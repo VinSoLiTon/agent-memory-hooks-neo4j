@@ -1,0 +1,41 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "./.codex/hooks/log_event.sh" },
+          { "type": "command", "command": "./.codex/hooks/inject_memory.sh" }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "./.codex/hooks/log_event.sh" },
+          { "type": "command", "command": "./.codex/hooks/inject_memory.sh" }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "./.codex/hooks/log_event.sh" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "./.codex/hooks/log_event.sh" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "./.codex/hooks/log_event.sh" }
+        ]
+      }
+    ]
+  }
+}

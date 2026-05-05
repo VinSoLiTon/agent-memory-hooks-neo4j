@@ -1,6 +1,6 @@
-# Claude with Neo4j Memory Hooks
+# Agent Memory Hooks (Claude Code + Codex)
 
-Claude Code hooks that store session events as a linked list in Neo4j.
+Hooks for Claude Code and Codex that store session events as a linked list in Neo4j.
 
 ## Setup
 
@@ -17,14 +17,19 @@ export HOOKS_NEO4J_PASSWORD=password
 
 ## Architecture
 
-Each Claude Code session creates a graph structure:
+Each agent session creates a graph structure:
 
 ```
-(Session {session_id}) -[:FIRST_EVENT]-> (Event) -[:NEXT]-> (Event) -[:NEXT]-> ...
-                       -[:LATEST_EVENT]-> (last Event)
+(Session {session_id, client}) -[:FIRST_EVENT]-> (Event {client}) -[:NEXT]-> (Event) -> ...
+                               -[:LATEST_EVENT]-> (last Event)
 ```
 
 Events captured: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop.
+Codex additionally fires PermissionRequest (not currently registered).
+
+`hooks/log_event.py` and `hooks/inject_memory.py` are shared. Per-client glue:
+- `.claude/settings.json` → `.claude/hooks/*.sh` → `hooks/*.py --client claude_code`
+- `.codex/hooks.json` → `.codex/hooks/*.sh` → `hooks/*.py --client codex`
 
 ## Testing
 

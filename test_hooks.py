@@ -15,12 +15,12 @@ NEO4J_URI = os.environ.get("HOOKS_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("HOOKS_NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.environ.get("HOOKS_NEO4J_PASSWORD", "password")
 
-HOOK_SCRIPT = os.path.join(os.path.dirname(__file__), ".claude", "hooks", "log_event.py")
+HOOK_SCRIPT = os.path.join(os.path.dirname(__file__), "hooks", "log_event.py")
 
 
-def run_hook(event_data: dict):
+def run_hook(event_data: dict, client: str = "claude_code"):
     result = subprocess.run(
-        ["python3", HOOK_SCRIPT],
+        ["python3", HOOK_SCRIPT, "--client", client],
         input=json.dumps(event_data),
         capture_output=True,
         text=True,
@@ -108,6 +108,21 @@ def test_linked_list():
         )
         resp = result.single()["resp"]
         assert resp is not None and "file1.txt" in resp, f"tool_response not stored correctly: {resp!r}"
+
+        # Verify client tagging on Session and every Event.
+        result = session.run(
+            "MATCH (s:Session {session_id: $sid}) RETURN s.client AS c", sid=session_id,
+        )
+        assert result.single()["c"] == "claude_code"
+        result = session.run(
+            """
+            MATCH (s:Session {session_id: $sid})-[:FIRST_EVENT]->(first)
+            MATCH (first)-[:NEXT*0..]->(e)
+            RETURN collect(DISTINCT e.client) AS clients
+            """,
+            sid=session_id,
+        )
+        assert result.single()["clients"] == ["claude_code"]
 
     # Clean up
     with driver.session() as session:

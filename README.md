@@ -1,24 +1,34 @@
-# Claude with Neo4j Memory Hooks
+# Agent Memory Hooks (Claude Code + Codex)
 
-A two-stage memory system for [Claude Code](https://claude.com/claude-code),
-backed by Neo4j.
+A two-stage memory system for [Claude Code](https://claude.com/claude-code)
+and [Codex](https://developers.openai.com/codex/hooks), backed by Neo4j.
 
-1. **Hooks (online)** — capture every Claude Code session event into a graph
-   as it happens.
+1. **Hooks (online)** — capture every session event from either agent into a
+   shared graph as it happens.
 2. **Dream phase (offline)** — periodically read those events and distill
    them into durable, markdown-style memories that future sessions can use.
 
 The hooks record *what happened*. The dream phase decides *what's worth
-remembering*.
+remembering*. Both clients write into the same Neo4j instance; nodes are
+tagged with `client: "claude_code" | "codex"` so you can query across or
+within agents.
 
 ## Repo layout
 
 ```
+hooks/
+  log_event.py             # shared writer (takes --client)
+  inject_memory.py         # shared memory injector
 .claude/
-  settings.json            # registers the hooks with Claude Code
+  settings.json            # registers hooks with Claude Code
   hooks/
-    log_event.sh           # entrypoint invoked by Claude Code
-    log_event.py           # writes the event into Neo4j
+    log_event.sh           # → hooks/log_event.py --client claude_code
+    inject_memory.sh       # → hooks/inject_memory.py --client claude_code
+.codex/
+  hooks.json               # registers hooks with Codex
+  hooks/
+    log_event.sh           # → hooks/log_event.py --client codex
+    inject_memory.sh       # → hooks/inject_memory.py --client codex
 dream/
   dream.py                 # offline consolidation script
   README.md                # dream-phase docs
@@ -29,16 +39,18 @@ test_hooks.py              # smoke test for the hook writer
 
 ## Stage 1 — Hooks
 
-Each Claude Code session becomes a linked list of events:
+Each session (Claude Code or Codex) becomes a linked list of events:
 
 ```
-(Session {session_id}) -[:FIRST_EVENT]->  (Event) -[:NEXT]-> (Event) -[:NEXT]-> ...
-                       -[:LATEST_EVENT]-> (last Event)
+(Session {session_id, client}) -[:FIRST_EVENT]->  (Event) -[:NEXT]-> (Event) -> ...
+                               -[:LATEST_EVENT]-> (last Event)
 ```
 
 Events captured: `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
-`PostToolUse`, `Stop`. Each `:Event` stores the raw hook payload — prompt,
-tool name, tool input, tool response, transcript snapshot, etc.
+`PostToolUse`, `Stop`. Codex also exposes `PermissionRequest` (not currently
+wired up). Each `:Event` stores the raw hook payload — prompt, tool name,
+tool input, tool response, transcript snapshot, plus Codex-specific
+`turn_id` / `tool_use_id` / `last_assistant_message` when present.
 
 ### Setup
 
@@ -50,8 +62,13 @@ export HOOKS_NEO4J_USER=neo4j
 export HOOKS_NEO4J_PASSWORD=password
 ```
 
-The hooks are already wired up in `.claude/settings.json` for this repo —
-just run Claude Code from this directory and events stream into Neo4j.
+The hooks are already wired up:
+- **Claude Code**: `.claude/settings.json` — run Claude Code from this dir.
+- **Codex**: `.codex/hooks.json` — run Codex from this dir with
+  `[features] codex_hooks = true` enabled in `~/.codex/config.toml`.
+
+Both clients stream events into the same Neo4j instance; Session/Event nodes
+are tagged with the originating `client`.
 
 ### Test
 
@@ -90,13 +107,15 @@ behavior, inspect/reset queries).
 ## Full graph schema
 
 ```
-(:Session {session_id, created_at, last_dreamed_at})
+(:Session {session_id, client, created_at, last_dreamed_at})
   -[:FIRST_EVENT]->  (:Event)
   -[:LATEST_EVENT]-> (:Event)
   -[:DREAMED]->      (:Memory)
 
-(:Event {event_id, event_name, timestamp, tool_name, tool_input,
-         tool_response, prompt, model, source, transcript_path, transcript, cwd})
+(:Event {event_id, event_name, client, timestamp, tool_name, tool_input,
+         tool_use_id, tool_response, prompt, model, source, turn_id,
+         last_assistant_message, stop_hook_active, transcript_path,
+         transcript, cwd})
   -[:NEXT]-> (:Event)
 
 (:Memory {path, content, updated_at})              // path unique
