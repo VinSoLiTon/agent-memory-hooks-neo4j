@@ -162,6 +162,9 @@ gate when tuning prompts or swapping models.
 
 ## The `njhook` CLI
 
+Full reference with every flag and example workflows lives in
+[cli/README.md](cli/README.md). Quick-glance summary below.
+
 ```bash
 ./njhook.cmd <subcommand>
 ```
