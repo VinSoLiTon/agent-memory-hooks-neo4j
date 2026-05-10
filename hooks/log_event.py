@@ -20,6 +20,10 @@ from datetime import datetime, timezone
 
 from neo4j import GraphDatabase
 
+# privacy.py lives next to this script; allow direct invocation regardless of cwd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from privacy import is_optout, scrub  # noqa: E402
+
 NEO4J_URI = os.environ.get("HOOKS_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("HOOKS_NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.environ.get("HOOKS_NEO4J_PASSWORD", "password")
@@ -56,6 +60,11 @@ def ensure_constraints(tx):
 
 
 def log_event(data: dict, client: str):
+    cwd = data.get("cwd")
+    if is_optout(cwd):
+        # User has marked this directory off-limits. Drop the event silently.
+        return
+
     session_id = data.get("session_id", "unknown")
     event_name = data.get("hook_event_name", "unknown")
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -64,26 +73,30 @@ def log_event(data: dict, client: str):
     # the same session_id.
     event_id = f"{client}_{session_id}_{timestamp}_{event_name}"
 
+    # Scrub user-content fields before serializing. Structured fields (tool_input
+    # is a dict; tool_response is dict-or-string) get scrubbed after stringification.
+    tool_input = data.get("tool_input")
+    tool_response = data.get("tool_response")
     event_props = {
         "event_id": event_id,
         "event_name": event_name,
         "client": client,
         "timestamp": timestamp,
-        "cwd": data.get("cwd"),
+        "cwd": cwd,
         "tool_name": data.get("tool_name"),
         "tool_use_id": data.get("tool_use_id"),
-        "tool_input": json.dumps(data.get("tool_input")) if data.get("tool_input") else None,
-        "tool_response": _serialize_tool_response(data.get("tool_response"))
-        if data.get("tool_response") is not None
+        "tool_input": scrub(json.dumps(tool_input)) if tool_input else None,
+        "tool_response": scrub(_serialize_tool_response(tool_response))
+        if tool_response is not None
         else None,
-        "prompt": data.get("prompt"),
+        "prompt": scrub(data.get("prompt")),
         "model": data.get("model"),
         "source": data.get("source"),
         "turn_id": data.get("turn_id"),
-        "last_assistant_message": data.get("last_assistant_message"),
+        "last_assistant_message": scrub(data.get("last_assistant_message")),
         "stop_hook_active": data.get("stop_hook_active"),
         "transcript_path": data.get("transcript_path"),
-        "transcript": _read_transcript(data.get("transcript_path")),
+        "transcript": scrub(_read_transcript(data.get("transcript_path"))),
     }
     event_props = {k: v for k, v in event_props.items() if v is not None}
 
