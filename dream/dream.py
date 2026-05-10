@@ -24,6 +24,7 @@ Default models: see dream/providers.py.
 """
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -53,45 +54,8 @@ NEO4J_PASSWORD = os.environ.get("HOOKS_NEO4J_PASSWORD", "password")
 
 MAX_TOKENS = 4096
 
-SYSTEM_PROMPT = """You are the "dream phase" for a Claude Code memory system. \
-You receive a chronological log of hook events from a Claude Code session \
-(SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop) plus the set of \
-markdown memories that already exist. Distill the session into durable markdown \
-memories that will help future sessions.
-
-Each memory imitates a markdown file: it has a path and a markdown body with \
-YAML frontmatter. Organize paths semantically by topic, e.g.:
-
-  profile/role.md
-  profile/preferences.md
-  tools/bash/common-flags.md
-  tools/edit/conventions.md
-  project/<short-slug>.md
-  general/<short-slug>.md
-
-Output STRICT JSON only, no prose, matching this schema:
-
-{
-  "memories": [
-    {
-      "path": "profile/role.md",
-      "content": "---\\ntitle: User role\\nkind: profile\\n---\\n\\n<markdown body>"
-    }
-  ]
-}
-
-Frontmatter must include `title` and `kind` (one of: profile, tool, project, general).
-The body should be tight markdown a future agent can read cold.
-
-Rules:
-- If a memory at the same path already exists, return an UPDATED full body that \
-merges new evidence with the prior content. Do not duplicate facts. Remove anything \
-the new events contradict.
-- Skip ephemeral details (one-off filenames, debug output) and anything obvious \
-from a fresh repo read (paths, git history).
-- Prefer fewer, sharper memories over many vague ones.
-- If nothing is worth remembering, return {"memories": []}.
-- Each memory must stand alone — a future agent reads it without this transcript."""
+# System prompts now live in dream/prompts.py (per-provider variants).
+from prompts import system_prompt_for  # type: ignore  # noqa: E402
 
 
 def get_driver():
@@ -145,7 +109,20 @@ def fetch_existing_memories(driver) -> list[dict]:
         return [dict(r) for r in result]
 
 
+def _summarize_tool_response(tr) -> str:
+    """One-line summary of a tool response for the dream input. Reduces a
+    multi-KB raw tool dump to a signal line: success/failure + a snippet."""
+    s = str(tr)
+    # Heuristics: pluck out exit_code if present; cap snippet to 80 chars.
+    snippet = " ".join(s.split())[:80]
+    return snippet
+
+
 def render_events(events: list[dict]) -> str:
+    """PR-C: trim render — keep prompt full, but tool I/O collapses to a
+    one-liner. Smaller models drown in raw transcript dumps; signal-bearing
+    fields are what actually inform memory extraction.
+    """
     lines = []
     for e in events:
         head = f"[{e.get('timestamp', '?')}] {e.get('event_name', '?')}"
@@ -153,11 +130,27 @@ def render_events(events: list[dict]) -> str:
             head += f" tool={e['tool_name']}"
         lines.append(head)
         if e.get("prompt"):
-            lines.append(f"  prompt: {e['prompt'][:500]}")
+            # Keep the full prompt — it's the highest-signal field.
+            lines.append(f"  prompt: {e['prompt']}")
         if e.get("tool_input"):
-            lines.append(f"  input:  {str(e['tool_input'])[:500]}")
+            ti = e["tool_input"]
+            try:
+                # Pull just the canonical command/file_path field if present.
+                ti_obj = json.loads(ti) if isinstance(ti, str) else ti
+                if isinstance(ti_obj, dict):
+                    key_field = (
+                        ti_obj.get("command")
+                        or ti_obj.get("file_path")
+                        or ti_obj.get("path")
+                        or str(ti_obj)
+                    )
+                    lines.append(f"  input:  {str(key_field)[:200]}")
+                else:
+                    lines.append(f"  input:  {str(ti)[:200]}")
+            except Exception:
+                lines.append(f"  input:  {str(ti)[:200]}")
         if e.get("tool_response"):
-            lines.append(f"  output: {str(e['tool_response'])[:500]}")
+            lines.append(f"  output: {_summarize_tool_response(e['tool_response'])}")
     return "\n".join(lines)
 
 
@@ -170,12 +163,13 @@ def render_existing(memories: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def call_provider(provider_fn, transcript: str, existing: str, model: str) -> list[dict]:
+def call_provider(provider_fn, transcript: str, existing: str, model: str,
+                  system_prompt: str) -> list[dict]:
     """Thin wrapper so call sites don't need to know provider internals."""
     return provider_fn(
         transcript=transcript,
         existing=existing,
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         model=model,
         max_tokens=MAX_TOKENS,
     )
@@ -343,11 +337,12 @@ def main():
             print("nothing to dream about.")
             return
         existing = render_existing(fetch_existing_memories(driver))
+        system_prompt = system_prompt_for(provider_name, model)
         for session_key, events in sessions:
             project = dominant_project([e.get("cwd") for e in events])
             label = f"{session_key}" + (f"  project={project}" if project else "")
             print(f"\n=== dreaming over {label} ({len(events)} new events) ===")
-            memories = call_provider(provider_fn, render_events(events), existing, model)
+            memories = call_provider(provider_fn, render_events(events), existing, model, system_prompt)
             for m in memories:
                 print(f"\n--- {m.get('path')} ---")
                 print(m.get("content", ""))

@@ -73,12 +73,21 @@ def dream_openai(transcript: str, existing: str, system: str, model: str, max_to
 def dream_ollama(transcript: str, existing: str, system: str, model: str, max_tokens: int = 4096) -> list[dict]:
     """Hit a local Ollama server. No API key needed; data never leaves the machine.
 
-    Uses /api/chat with format=json. For thinking-capable models like qwen3.5
-    we set think=False so the response is the JSON, not a chain-of-thought
-    wrapper. Falls back gracefully if the server doesn't recognize the option.
+    PR-C bundle for smaller-model quality:
+    - format=<JSON Schema> instead of format="json": Ollama 0.5+ supports a
+      real JSON Schema in the format field, structurally guaranteeing valid
+      output. The path is regex-constrained so the model can't hallucinate
+      a path outside profile/ tools/ project/ general/.
+    - Assistant turn pre-filled with `{"memories":[`: leaves the model
+      nowhere to put prose preamble.
+    - think=False for thinking-capable models like qwen3.5.
+    - Lower temperature (0.1) + repeat_penalty for structural tasks.
     """
     import urllib.request
     import urllib.error
+
+    # Lazy import to avoid a circular dep with dream.py during init.
+    from prompts import DREAM_JSON_SCHEMA  # type: ignore
 
     user_msg = f"<existing_memories>\n{existing}\n</existing_memories>\n\n<events>\n{transcript}\n</events>"
     payload = {
@@ -86,13 +95,18 @@ def dream_ollama(transcript: str, existing: str, system: str, model: str, max_to
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user_msg},
+            # Pre-fill the assistant turn so the model continues from a valid
+            # JSON open-bracket — no room for prose preamble.
+            {"role": "assistant", "content": '{"memories":['},
         ],
-        "format": "json",
+        "format": DREAM_JSON_SCHEMA,
         "stream": False,
         "think": False,  # qwen3.5 / similar; ignored by models without thinking
         "options": {
             "num_predict": max_tokens,
-            "temperature": 0.2,  # consolidation, not creative writing
+            "temperature": 0.1,
+            "top_p": 0.9,
+            "repeat_penalty": 1.05,
         },
     }
     req = urllib.request.Request(
@@ -112,7 +126,18 @@ def dream_ollama(transcript: str, existing: str, system: str, model: str, max_to
     text = (body.get("message") or {}).get("content", "")
     if not text:
         raise RuntimeError(f"empty response from Ollama: {body}")
-    return _extract_json_object(text).get("memories", [])
+    # The pre-filled assistant turn `{"memories":[` shapes generation but is NOT
+    # echoed back; Ollama returns only the model's continuation. Prepend it so
+    # we can parse the full object. Fall back to bracket-extraction if the
+    # daemon already gave us the full object (older Ollama / different mode).
+    full = '{"memories":[' + text
+    try:
+        return json.loads(full).get("memories", [])
+    except Exception:
+        try:
+            return _extract_json_object(full).get("memories", [])
+        except Exception:
+            return _extract_json_object(text).get("memories", [])
 
 
 PROVIDERS: dict[str, Callable[..., list[dict]]] = {
