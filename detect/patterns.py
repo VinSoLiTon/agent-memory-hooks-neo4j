@@ -7,14 +7,14 @@ Three detectors surface signals that might be worth promoting to memories:
 - prompt_clusters():  UserPromptSubmit prompts that group semantically
                       via embedding cosine similarity (requires EMBED_PROVIDER).
 
-Each detector returns a list of dicts so callers (CLI, dashboard, future
-auto-promotion) can format however they like. Nothing in here writes to the
-graph — patterns are advisory.
+Each detector returns a list of dicts. Each dict carries a stable `id` (sha1
+prefix of the defining content) so callers can reference a specific pattern
+across runs (e.g. `njhook patterns --promote a3f2e9`).
 """
 from __future__ import annotations
 
+import hashlib
 import json
-import os
 import re
 import sys
 from datetime import datetime, timezone, timedelta
@@ -23,6 +23,12 @@ from pathlib import Path
 # Pick up the embeddings module (lives under hooks/).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
 import embeddings  # noqa: E402
+
+
+def _pattern_id(*parts: str) -> str:
+    """Stable 6-char ID derived from the pattern's defining content."""
+    h = hashlib.sha1("|".join(parts).encode("utf-8", errors="replace")).hexdigest()
+    return h[:6]
 
 
 def _since_clause(since: str | None) -> tuple[str, dict]:
@@ -73,7 +79,13 @@ def repeated_commands(driver, min_count: int = 3, since: str | None = None,
             if r["cwd"]:
                 entry["cwds"].add(r["cwd"])
     matches = [
-        {"command": v["command"], "count": v["count"], "cwds": sorted(v["cwds"])}
+        {
+            "id": _pattern_id("cmd", v["command"]),
+            "kind": "command",
+            "command": v["command"],
+            "count": v["count"],
+            "cwds": sorted(v["cwds"]),
+        }
         for v in rows.values() if v["count"] >= min_count
     ]
     matches.sort(key=lambda x: x["count"], reverse=True)
@@ -106,7 +118,13 @@ def hot_files(driver, min_count: int = 3, since: str | None = None,
             entry["count"] += 1
             entry["tools"][r["tool"]] = entry["tools"].get(r["tool"], 0) + 1
     matches = [
-        {"path": v["path"], "count": v["count"], "tools": v["tools"]}
+        {
+            "id": _pattern_id("file", v["path"]),
+            "kind": "file",
+            "path": v["path"],
+            "count": v["count"],
+            "tools": v["tools"],
+        }
         for v in rows.values() if v["count"] >= min_count
     ]
     matches.sort(key=lambda x: x["count"], reverse=True)
@@ -173,8 +191,77 @@ def prompt_clusters(driver, min_cluster_size: int = 3,
             clusters.append({"seed_vec": vec, "prompts": [prompt]})
 
     out = [
-        {"size": len(cl["prompts"]), "exemplar": cl["prompts"][0], "prompts": cl["prompts"]}
+        {
+            "id": _pattern_id("prompt", cl["prompts"][0]),
+            "kind": "prompt",
+            "size": len(cl["prompts"]),
+            "exemplar": cl["prompts"][0],
+            "prompts": cl["prompts"],
+        }
         for cl in clusters if len(cl["prompts"]) >= min_cluster_size
     ]
     out.sort(key=lambda c: c["size"], reverse=True)
     return out
+
+
+# --- Promotion: pattern -> draft :Memory --------------------------------
+
+def _slugify(s: str, max_len: int = 32) -> str:
+    s = re.sub(r"[^A-Za-z0-9]+", "-", s.lower()).strip("-")
+    return (s[:max_len] or "pattern").rstrip("-")
+
+
+def draft_memory_from_pattern(pattern: dict) -> dict:
+    """Convert a detected pattern into a draft :Memory dict {path, content}.
+
+    Deterministic, no LLM. The user can edit afterward via `njhook edit`.
+    """
+    kind = pattern.get("kind")
+    pid = pattern.get("id", "?")
+    if kind == "command":
+        cmd = pattern["command"]
+        # Try to derive a binary name for the path slug.
+        binary = cmd.split()[0] if cmd.split() else "tool"
+        binary = re.sub(r"[^A-Za-z0-9_-]", "", binary) or "tool"
+        path = f"tools/{binary}/usage.md"
+        content = (
+            "---\n"
+            f"title: {binary} usage\n"
+            "kind: tool\n"
+            f"promoted_from_pattern: {pid}\n"
+            "---\n\n"
+            f"Frequently-run command (observed {pattern['count']}x across sessions):\n\n"
+            f"```\n{cmd}\n```\n"
+        )
+        return {"path": path, "content": content}
+    if kind == "file":
+        fp = pattern["path"]
+        slug = _slugify(Path(fp).stem)
+        path = f"project/hot-file-{slug}.md"
+        tool_summary = ", ".join(f"{k}={v}" for k, v in pattern["tools"].items())
+        content = (
+            "---\n"
+            f"title: Hot file — {Path(fp).name}\n"
+            "kind: project\n"
+            f"promoted_from_pattern: {pid}\n"
+            "---\n\n"
+            f"`{fp}` is touched repeatedly ({pattern['count']}x; {tool_summary}). "
+            "Likely a hot path worth dedicated attention or a project-level note.\n"
+        )
+        return {"path": path, "content": content}
+    if kind == "prompt":
+        slug = _slugify(pattern["exemplar"])
+        path = f"general/recurring-{slug}.md"
+        prompts_block = "\n".join(f"- {p}" for p in pattern["prompts"][:5])
+        content = (
+            "---\n"
+            f"title: Recurring prompt — {pattern['exemplar'][:60]}\n"
+            "kind: general\n"
+            f"promoted_from_pattern: {pid}\n"
+            "---\n\n"
+            f"This question / topic comes up repeatedly ({pattern['size']} times in recent sessions). "
+            "Consider memorializing the canonical answer here so future sessions skip the lookup.\n\n"
+            f"## Sample prompts\n{prompts_block}\n"
+        )
+        return {"path": path, "content": content}
+    raise ValueError(f"unknown pattern kind: {kind}")

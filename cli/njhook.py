@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 from neo4j import GraphDatabase
 
@@ -438,60 +439,110 @@ def cmd_reindex(args: argparse.Namespace) -> int:
     return cmd_embed_backfill(backfill_args)
 
 
-def cmd_patterns(args: argparse.Namespace) -> int:
-    """Surface repeated patterns across captured sessions.
-
-    Three detectors run in series; each is independently filterable via flags.
-    Output is human-readable; nothing is auto-promoted.
-    """
+def _gather_patterns(drv, args: argparse.Namespace) -> list[dict]:
+    """Run all three detectors and return a flat, deduped list with stable IDs."""
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "detect"))
     import patterns as patterns_mod  # type: ignore
 
+    out: list[dict] = []
     show = args.show or "all"
+    if show in ("commands", "all"):
+        out.extend(patterns_mod.repeated_commands(drv, min_count=args.min_count, since=args.since))
+    if show in ("files", "all"):
+        out.extend(patterns_mod.hot_files(drv, min_count=args.min_count, since=args.since))
+    if show in ("prompts", "all") and embeddings.is_enabled():
+        out.extend(patterns_mod.prompt_clusters(
+            drv, min_cluster_size=args.min_count,
+            similarity_threshold=args.similarity, since=args.since,
+        ))
+    return out
+
+
+def cmd_patterns(args: argparse.Namespace) -> int:
+    """Surface repeated patterns across captured sessions.
+
+    Three detectors run in series; each is independently filterable. With
+    --promote <id> the named pattern is converted into a draft :Memory.
+    """
     drv = driver()
-    try:
-        if show in ("commands", "all"):
-            print("\n=== Repeated commands ===")
-            cmds = patterns_mod.repeated_commands(drv, min_count=args.min_count, since=args.since)
-            if not cmds:
-                print("(none above threshold)")
-            for c in cmds:
-                print(f"  {c['count']:>3}×  {_short(c['command'], 90)}")
-                if c["cwds"] and len(c["cwds"]) <= 3:
-                    for cwd in c["cwds"]:
-                        print(f"        cwd: {cwd}")
 
-        if show in ("files", "all"):
-            print("\n=== Hot file paths ===")
-            files = patterns_mod.hot_files(drv, min_count=args.min_count, since=args.since)
-            if not files:
-                print("(none above threshold)")
-            for f in files:
-                tools = " ".join(f"{k}={v}" for k, v in f["tools"].items())
-                print(f"  {f['count']:>3}×  {f['path']}    [{tools}]")
+    if args.promote:
+        return _promote_pattern(drv, args)
 
-        if show in ("prompts", "all"):
-            print("\n=== Recurring prompt clusters ===")
-            if not embeddings.is_enabled():
-                print("(EMBED_PROVIDER not set — semantic clustering disabled)")
-            else:
-                clusters = patterns_mod.prompt_clusters(
-                    drv,
-                    min_cluster_size=args.min_count,
-                    similarity_threshold=args.similarity,
-                    since=args.since,
-                )
-                if not clusters:
-                    print("(no clusters above min size)")
-                for cl in clusters:
-                    print(f"\n  cluster of {cl['size']}: {_short(cl['exemplar'], 80)}")
-                    for p in cl["prompts"][1:4]:
-                        print(f"     - {_short(p, 80)}")
-                    if cl["size"] > 4:
-                        print(f"     … and {cl['size']-4} more")
-    finally:
-        pass  # driver() returns the singleton; don't close
+    patterns = _gather_patterns(drv, args)
+    by_kind: dict[str, list[dict]] = {"command": [], "file": [], "prompt": []}
+    for p in patterns:
+        by_kind[p["kind"]].append(p)
+
+    if not patterns:
+        print("(no patterns above threshold)")
+        return 0
+
+    if by_kind["command"]:
+        print("\n=== Repeated commands ===")
+        for c in by_kind["command"]:
+            print(f"  [{c['id']}] {c['count']:>3}×  {_short(c['command'], 90)}")
+            if c["cwds"] and len(c["cwds"]) <= 3:
+                for cwd in c["cwds"]:
+                    print(f"             cwd: {cwd}")
+    if by_kind["file"]:
+        print("\n=== Hot file paths ===")
+        for f in by_kind["file"]:
+            tools = " ".join(f"{k}={v}" for k, v in f["tools"].items())
+            print(f"  [{f['id']}] {f['count']:>3}×  {f['path']}    [{tools}]")
+    if by_kind["prompt"]:
+        print("\n=== Recurring prompt clusters ===")
+        for cl in by_kind["prompt"]:
+            print(f"\n  [{cl['id']}] cluster of {cl['size']}: {_short(cl['exemplar'], 80)}")
+            for p in cl["prompts"][1:4]:
+                print(f"          - {_short(p, 80)}")
+            if cl["size"] > 4:
+                print(f"          … and {cl['size']-4} more")
+
+    if "prompt" not in by_kind or not by_kind["prompt"]:
+        if not embeddings.is_enabled() and (args.show in (None, "all", "prompts")):
+            print("\n(EMBED_PROVIDER not set — prompt clustering disabled)")
+
+    print("\nTo turn one of these into a memory:")
+    print("  njhook patterns --promote <id>     (preview by default; -y to write)")
+    return 0
+
+
+def _promote_pattern(drv, args: argparse.Namespace) -> int:
+    """Locate the pattern by ID across all detectors and write a draft memory."""
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "detect"))
+    import patterns as patterns_mod  # type: ignore
+
+    patterns = _gather_patterns(drv, args)
+    target = next((p for p in patterns if p["id"] == args.promote), None)
+    if not target:
+        print(f"no pattern with id {args.promote!r} found in current detection (try `njhook patterns` first)", file=sys.stderr)
+        return 1
+
+    draft = patterns_mod.draft_memory_from_pattern(target)
+
+    print(f"--- Draft memory: {draft['path']} ---\n")
+    print(draft["content"])
+
+    if args.dry_run or not args.yes:
+        if args.dry_run:
+            print("\n[dry-run] not writing.")
+            return 0
+        print("\nRun again with -y to write this memory, or pipe through `njhook edit` to refine first.")
+        return 0
+
+    now = datetime.now(timezone.utc).isoformat()
+    with drv.session() as s:
+        s.run(
+            "MERGE (m:Memory {path: $path}) "
+            "SET m.content = $content, m.updated_at = $now, "
+            "    m.promoted_from_pattern = $pid",
+            parameters={"path": draft["path"], "content": draft["content"],
+                        "now": now, "pid": target["id"]},
+        )
+    print(f"\nwrote {draft['path']} (promoted_from_pattern={target['id']})")
     return 0
 
 
@@ -535,6 +586,152 @@ def cmd_unarchive(args: argparse.Namespace) -> int:
             parameters={"path": args.path, "now": datetime.now(timezone.utc).isoformat()},
         ).single()
     print(f"unarchived (matched {r['n']})")
+    return 0
+
+
+def cmd_backup(args: argparse.Namespace) -> int:
+    """Dump memories (and optionally sessions+events) to a JSON file.
+
+    Default skips embeddings (large). Use --with-embeddings if you intend
+    to restore on a machine without re-running embed-backfill.
+    """
+    import json as _json
+    out_path = Path(args.out) if args.out else Path(f"njhook-backup-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.json")
+    payload: dict = {"version": 1, "exported_at": datetime.now(timezone.utc).isoformat(), "memories": [], "sessions": []}
+
+    with driver() as d, d.session() as s:
+        emb_clause = "m.embedding AS embedding, m.embedding_model AS embedding_model, m.embedding_dim AS embedding_dim, " if args.with_embeddings else ""
+        rows = list(s.run(
+            f"MATCH (m:Memory) "
+            f"RETURN m.path AS path, m.content AS content, m.project AS project, "
+            f"       m.updated_at AS updated_at, "
+            f"       coalesce(m.archived,false) AS archived, "
+            f"       coalesce(m.access_count,0) AS access_count, "
+            f"       m.last_accessed_at AS last_accessed_at, "
+            f"       m.consolidated_from AS consolidated_from, "
+            f"       m.promoted_from_pattern AS promoted_from_pattern, "
+            f"       {emb_clause}"
+            f"       null AS _end "
+            f"ORDER BY m.path"
+        ))
+        for r in rows:
+            d_ = {k: r[k] for k in r.keys() if k != "_end" and r[k] is not None}
+            payload["memories"].append(d_)
+
+        if args.with_sessions:
+            sess_rows = list(s.run(
+                "MATCH (s:Session) "
+                "OPTIONAL MATCH (s)-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
+                "WITH s, collect(properties(e)) AS events "
+                "RETURN s.session_key AS session_key, s.session_id AS session_id, "
+                "       s.client AS client, s.created_at AS created_at, "
+                "       s.last_dreamed_at AS last_dreamed_at, events"
+            ))
+            for r in sess_rows:
+                payload["sessions"].append({
+                    "session_key": r["session_key"], "session_id": r["session_id"],
+                    "client": r["client"], "created_at": r["created_at"],
+                    "last_dreamed_at": r["last_dreamed_at"],
+                    "events": [e for e in r["events"] if e],
+                })
+
+    out_path.write_text(_json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"wrote {out_path} — {len(payload['memories'])} memories, {len(payload['sessions'])} sessions ({out_path.stat().st_size} bytes)")
+    return 0
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    """Load a backup file. Memories upsert by path; sessions upsert by session_key.
+    Embeddings restored only when present in the backup AND --with-embeddings is set.
+    """
+    import json as _json
+    in_path = Path(args.in_)
+    if not in_path.exists():
+        print(f"file not found: {in_path}", file=sys.stderr)
+        return 1
+    payload = _json.loads(in_path.read_text(encoding="utf-8"))
+    memories = payload.get("memories") or []
+    sessions = payload.get("sessions") or []
+    print(f"restoring from {in_path}: {len(memories)} memories, {len(sessions)} sessions")
+
+    if args.dry_run:
+        for m in memories[:5]:
+            print(f"  would write Memory {m['path']}")
+        for s in sessions[:5]:
+            print(f"  would write Session {s.get('session_key') or s.get('session_id')}")
+        print("[dry-run] no writes")
+        return 0
+
+    with driver() as d, d.session() as s:
+        # Memories
+        s.run("CREATE CONSTRAINT IF NOT EXISTS FOR (m:Memory) REQUIRE m.path IS UNIQUE")
+        s.run(
+            """
+            UNWIND $rows AS row
+            MERGE (m:Memory {path: row.path})
+            SET m += apoc.map.removeKey(row, 'path')
+            """,
+            parameters={"rows": memories},
+        ) if False else None  # APOC may not be available; use the explicit form below
+
+        for m in memories:
+            props = {k: v for k, v in m.items() if k != "path"}
+            if not args.with_embeddings:
+                for k in ("embedding", "embedding_model", "embedding_dim"):
+                    props.pop(k, None)
+            s.run(
+                "MERGE (m:Memory {path: $path}) SET m += $props",
+                parameters={"path": m["path"], "props": props},
+            )
+
+        # Sessions
+        s.run("CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) REQUIRE s.session_key IS UNIQUE")
+        for sess in sessions:
+            sk = sess.get("session_key") or f"{sess.get('client','unknown')}:{sess.get('session_id','unknown')}"
+            sess_props = {k: v for k, v in sess.items() if k not in ("events", "session_key") and v is not None}
+            sess_props["session_key"] = sk
+            s.run(
+                "MERGE (s:Session {session_key: $sk}) SET s += $props",
+                parameters={"sk": sk, "props": sess_props},
+            )
+            # Restore events: append in order, threading FIRST_EVENT / NEXT / LATEST_EVENT.
+            events = sess.get("events") or []
+            if events:
+                # Wipe any existing chain on this session before re-threading.
+                s.run(
+                    "MATCH (s:Session {session_key: $sk}) "
+                    "OPTIONAL MATCH (s)-[r1:FIRST_EVENT|LATEST_EVENT]->() DELETE r1",
+                    parameters={"sk": sk},
+                )
+                prev = None
+                for i, e in enumerate(events):
+                    eid = e.get("event_id")
+                    if not eid:
+                        continue
+                    s.run(
+                        "MERGE (e:Event {event_id: $eid}) SET e += $props",
+                        parameters={"eid": eid, "props": e},
+                    )
+                    if i == 0:
+                        s.run(
+                            "MATCH (s:Session {session_key: $sk}), (e:Event {event_id: $eid}) "
+                            "MERGE (s)-[:FIRST_EVENT]->(e)",
+                            parameters={"sk": sk, "eid": eid},
+                        )
+                    if prev:
+                        s.run(
+                            "MATCH (a:Event {event_id: $prev}), (b:Event {event_id: $eid}) "
+                            "MERGE (a)-[:NEXT]->(b)",
+                            parameters={"prev": prev, "eid": eid},
+                        )
+                    prev = eid
+                if prev:
+                    s.run(
+                        "MATCH (s:Session {session_key: $sk}), (e:Event {event_id: $eid}) "
+                        "MERGE (s)-[:LATEST_EVENT]->(e)",
+                        parameters={"sk": sk, "eid": prev},
+                    )
+    print(f"restored {len(memories)} memories, {len(sessions)} sessions")
     return 0
 
 
@@ -656,11 +853,26 @@ def build_parser() -> argparse.ArgumentParser:
     pun.add_argument("path")
     pun.set_defaults(fn=cmd_unarchive)
 
+    pbk = sub.add_parser("backup", help="dump memories (and optionally sessions) to JSON")
+    pbk.add_argument("--out", help="output file (default: njhook-backup-<timestamp>.json)")
+    pbk.add_argument("--with-embeddings", action="store_true", help="include m.embedding vectors (large)")
+    pbk.add_argument("--with-sessions", action="store_true", help="include captured sessions and their events")
+    pbk.set_defaults(fn=cmd_backup)
+
+    prs = sub.add_parser("restore", help="load a backup file (idempotent upsert by path / session_key)")
+    prs.add_argument("--in", dest="in_", required=True, help="input JSON file")
+    prs.add_argument("--with-embeddings", action="store_true", help="restore m.embedding when present")
+    prs.add_argument("--dry-run", action="store_true")
+    prs.set_defaults(fn=cmd_restore)
+
     ppat = sub.add_parser("patterns", help="surface repeated commands, hot files, and recurring prompt clusters")
     ppat.add_argument("--show", choices=["commands", "files", "prompts", "all"], default="all")
     ppat.add_argument("--min-count", type=int, default=3, help="threshold for a pattern to surface")
     ppat.add_argument("--since", help="only events newer than e.g. 7d, 24h, 30m")
     ppat.add_argument("--similarity", type=float, default=0.8, help="prompt-cluster cosine threshold")
+    ppat.add_argument("--promote", metavar="ID", help="convert the pattern with this id into a draft memory")
+    ppat.add_argument("--dry-run", action="store_true", help="(with --promote) print draft, don't write")
+    ppat.add_argument("-y", "--yes", action="store_true", help="(with --promote) skip preview-only mode and actually write")
     ppat.set_defaults(fn=cmd_patterns)
 
     return p
