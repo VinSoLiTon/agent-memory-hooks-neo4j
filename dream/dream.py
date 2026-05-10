@@ -28,6 +28,13 @@ from datetime import datetime, timezone, timedelta
 from anthropic import Anthropic
 from neo4j import GraphDatabase
 
+# Windows consoles default to cp1252; memories from Claude routinely include
+# em-dashes, arrows, smart quotes, etc. Force UTF-8 so the human-readable
+# preview doesn't crash before write_memories runs.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 NEO4J_URI = os.environ.get("HOOKS_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("HOOKS_NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.environ.get("HOOKS_NEO4J_PASSWORD", "password")
