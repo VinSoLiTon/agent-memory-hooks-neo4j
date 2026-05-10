@@ -312,7 +312,7 @@ def sessions():
             """
             MATCH (s:Session)
             OPTIONAL MATCH (s)-[:FIRST_EVENT|NEXT*0..]->(e:Event)
-            WITH s, count(e) AS events
+            WITH s, count(DISTINCT e) AS events
             RETURN coalesce(s.session_key, s.client + ':' + s.session_id) AS session_key,
                    s.session_id AS sid, s.client AS client, s.created_at AS created,
                    s.last_dreamed_at AS dreamed, events
@@ -358,6 +358,7 @@ def session_view(sid: str):
         rows = list(s.run(
             """
             MATCH (s:Session {session_key: $sk})-[:FIRST_EVENT|NEXT*0..]->(e:Event)
+            WITH DISTINCT e
             RETURN e.timestamp AS ts, e.event_name AS name, e.tool_name AS tool,
                    e.prompt AS prompt, e.tool_input AS ti, e.tool_response AS tr
             ORDER BY e.timestamp

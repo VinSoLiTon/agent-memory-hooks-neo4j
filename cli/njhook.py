@@ -261,7 +261,7 @@ def cmd_sessions(args: argparse.Namespace) -> int:
         "MATCH (s:Session) "
         + (("WHERE " + " AND ".join(where) + " ") if where else "")
         + "OPTIONAL MATCH (s)-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
-        + "WITH s, count(e) AS events "
+        + "WITH s, count(DISTINCT e) AS events "
         + "RETURN coalesce(s.session_key, s.client + ':' + s.session_id) AS session_key, "
         + "       s.session_id AS sid, s.client AS client, s.created_at AS created, "
         + "       s.last_dreamed_at AS dreamed, events "
@@ -315,6 +315,7 @@ def cmd_session(args: argparse.Namespace) -> int:
         rows = list(s.run(
             """
             MATCH (s:Session {session_key: $sk})-[:FIRST_EVENT|NEXT*0..]->(e:Event)
+            WITH DISTINCT e
             RETURN e.timestamp AS ts, e.event_name AS name, e.tool_name AS tool,
                    e.prompt AS prompt, e.tool_input AS ti, e.tool_response AS tr
             ORDER BY e.timestamp
@@ -665,6 +666,21 @@ def cmd_backup(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+        # PR-J #2: --all-sessions still streams from Neo4j (the OOM fix
+        # holds), but the Python-side payload accumulates everything before
+        # writing. On a graph with many MB of tool_response across hundreds
+        # of sessions, that consumes a lot of process memory. Require an
+        # explicit trimming knob so we don't silently turn a "back up
+        # everything" command into a multi-GB JSON file.
+        if args.all_sessions and not (args.no_tool_response or args.max_field_chars > 0):
+            print(
+                "--all-sessions requires either --no-tool-response or "
+                "--max-field-chars N to bound per-event field sizes. The Neo4j "
+                "side streams safely, but the JSON payload is still assembled "
+                "in Python memory before write.",
+                file=sys.stderr,
+            )
+            return 2
 
     payload: dict = {
         "version": 2,
@@ -769,7 +785,10 @@ def cmd_backup(args: argparse.Namespace) -> int:
 
             event_query = (
                 "MATCH (s:Session {session_key: $sk})-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
-                "WITH e ORDER BY e.timestamp "
+                # PR-J #3: DISTINCT defends against duplicate rows when the
+                # NEXT chain is corrupted (multiple branches from a node);
+                # without this, a damaged graph could double-count events.
+                "WITH DISTINCT e ORDER BY e.timestamp "
                 "RETURN e.event_id AS event_id, e.event_name AS event_name, "
                 "       e.client AS client, e.timestamp AS timestamp, "
                 "       e.cwd AS cwd, e.tool_name AS tool_name, "
@@ -855,13 +874,20 @@ def cmd_restore(args: argparse.Namespace) -> int:
                 "MERGE (s:Session {session_key: $sk}) SET s += $props",
                 parameters={"sk": sk, "props": sess_props},
             )
-            # Restore events: append in order, threading FIRST_EVENT / NEXT / LATEST_EVENT.
+            # PR-J #1: wipe ALL events reachable from this session before
+            # rebuilding the chain. Previously we deleted only the
+            # FIRST_EVENT / LATEST_EVENT relationships, which left the old
+            # NEXT chain (and any tail events past the new chain's length)
+            # reachable. That made restore unsafe for shorter / different
+            # backups. Now: detach-delete every Event reachable from this
+            # session — events are session-owned, so full replacement is
+            # the right semantic.
             events = sess.get("events") or []
             if events:
-                # Wipe any existing chain on this session before re-threading.
                 s.run(
                     "MATCH (s:Session {session_key: $sk}) "
-                    "OPTIONAL MATCH (s)-[r1:FIRST_EVENT|LATEST_EVENT]->() DELETE r1",
+                    "OPTIONAL MATCH (s)-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
+                    "DETACH DELETE e",
                     parameters={"sk": sk},
                 )
                 prev = None

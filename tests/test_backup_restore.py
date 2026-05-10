@@ -177,6 +177,56 @@ def main() -> int:
         except FileNotFoundError:
             pass
 
+    # ---------------------------------------------------------------------
+    # PR-J #1: restore must be safe when the backup is SHORTER than the
+    # current state. Seed the session again, run a backup of just 3 events,
+    # then add a 4th event directly to Neo4j, then restore the 3-event
+    # backup. The 4th event must be GONE — the previous code left it
+    # reachable through the old NEXT chain.
+    # ---------------------------------------------------------------------
+    out = Path(os.environ.get("TEMP", "/tmp")) / f"njhook-rt2-{SID}.json"
+    try:
+        cleanup()
+        seed()
+        backup = run_backup(out)  # captures the 3-event session
+        # Inject a 4th event directly into the chain.
+        with _driver() as d, d.session() as s:
+            extra_eid = f"claude_code_{SID}_2026-99_extra"
+            s.run(
+                "MATCH (sess:Session {session_key: $sk}) "
+                "OPTIONAL MATCH (sess)-[old:LATEST_EVENT]->(prev:Event) "
+                "DELETE old "
+                "WITH sess, prev "
+                "CREATE (e:Event {event_id: $eid, event_name: 'Extra', "
+                "                 client: 'claude_code', timestamp: '2099-01-01T00:00:00+00:00'}) "
+                "FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END | "
+                "    CREATE (prev)-[:NEXT]->(e)) "
+                "MERGE (sess)-[:LATEST_EVENT]->(e)",
+                parameters={"sk": f"claude_code:{SID}", "eid": extra_eid},
+            )
+        # Now restore the older 3-event backup.
+        run_restore(out)
+        with _driver() as d, d.session() as s:
+            row = s.run(
+                "MATCH (sess:Session {session_key: $sk})-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
+                "RETURN count(DISTINCT e) AS n",
+                parameters={"sk": f"claude_code:{SID}"},
+            ).single()
+            still_there = s.run(
+                "MATCH (e:Event {event_id: $eid}) RETURN count(e) AS n",
+                parameters={"eid": extra_eid},
+            ).single()
+        if row["n"] != 3:
+            failures.append(f"changed-backup restore: expected 3 events, got {row['n']} (stale tail not pruned)")
+        if still_there["n"] != 0:
+            failures.append("changed-backup restore: extra Event node still exists in graph after restore")
+    finally:
+        cleanup()
+        try:
+            out.unlink()
+        except FileNotFoundError:
+            pass
+
     if failures:
         for f in failures:
             print(f"  FAIL {f}")
