@@ -12,26 +12,31 @@ Schema:
     (:Memory)-[:DERIVED_FROM]->(:Session)
 
 Usage:
-    python dream.py                  # dream over sessions not yet dreamed
-    python dream.py --session <id>   # dream over one session
-    python dream.py --since 24h      # only events newer than 24h / 7d / 30m
-    python dream.py --dry-run        # print, don't write
+    python dream.py                                  # default provider (anthropic)
+    python dream.py --session <id>                   # dream over one session
+    python dream.py --since 24h                      # only events newer than 24h / 7d / 30m
+    python dream.py --dry-run                        # print, don't write
+    python dream.py --provider ollama                # use local Ollama (no API key)
+    python dream.py --provider openai --model gpt-4o # use OpenAI
+
+Provider precedence: --provider flag > $DREAM_PROVIDER > anthropic.
+Default models: see dream/providers.py.
 """
 
 import argparse
-import json
 import os
 import re
 import sys
 from datetime import datetime, timezone, timedelta
 
-from anthropic import Anthropic
 from neo4j import GraphDatabase
 
 # Pull in project derivation from the hooks package so dream and capture
 # share a single source of truth for "what is the project of this cwd?".
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "hooks"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from project import dominant_project  # noqa: E402
+from providers import get_provider, default_model  # noqa: E402
 
 # Windows consoles default to cp1252; memories from Claude routinely include
 # em-dashes, arrows, smart quotes, etc. Force UTF-8 so the human-readable
@@ -44,7 +49,6 @@ NEO4J_URI = os.environ.get("HOOKS_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("HOOKS_NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.environ.get("HOOKS_NEO4J_PASSWORD", "password")
 
-MODEL = os.environ.get("DREAM_MODEL", "claude-opus-4-7")
 MAX_TOKENS = 4096
 
 SYSTEM_PROMPT = """You are the "dream phase" for a Claude Code memory system. \
@@ -159,24 +163,15 @@ def render_existing(memories: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def call_claude(client: Anthropic, transcript: str, existing: str) -> list[dict]:
-    user_msg = (
-        f"<existing_memories>\n{existing}\n</existing_memories>\n\n"
-        f"<events>\n{transcript}\n</events>"
-    )
-    msg = client.messages.create(
-        model=MODEL,
+def call_provider(provider_fn, transcript: str, existing: str, model: str) -> list[dict]:
+    """Thin wrapper so call sites don't need to know provider internals."""
+    return provider_fn(
+        transcript=transcript,
+        existing=existing,
+        system=SYSTEM_PROMPT,
+        model=model,
         max_tokens=MAX_TOKENS,
-        system=[
-            {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
-        ],
-        messages=[{"role": "user", "content": user_msg}],
     )
-    text = "".join(b.text for b in msg.content if b.type == "text").strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError(f"no JSON in model output: {text[:200]}")
-    return json.loads(text[start : end + 1]).get("memories", [])
 
 
 def write_memories(driver, session_id: str, memories: list[dict], watermark: str, project: str | None = None) -> int:
@@ -231,14 +226,28 @@ def main():
     ap.add_argument("--session", help="dream over a single session_id")
     ap.add_argument("--since", help="only include events newer than e.g. 24h, 7d, 30m")
     ap.add_argument("--dry-run", action="store_true", help="print memories, don't write")
+    ap.add_argument(
+        "--provider",
+        choices=["anthropic", "openai", "ollama"],
+        help="LLM backend (default: $DREAM_PROVIDER or anthropic)",
+    )
+    ap.add_argument("--model", help="override the provider's default model")
     args = ap.parse_args()
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    provider_name, provider_fn = get_provider(args.provider)
+    model = args.model or default_model(provider_name)
+    print(f"provider={provider_name} model={model}")
+
+    # Provider-specific preflight: only Anthropic and OpenAI need a key in env;
+    # Ollama just needs a reachable local server (checked at first call).
+    if provider_name == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
         print("ANTHROPIC_API_KEY is not set", file=sys.stderr)
+        sys.exit(1)
+    if provider_name == "openai" and not os.environ.get("OPENAI_API_KEY"):
+        print("OPENAI_API_KEY is not set", file=sys.stderr)
         sys.exit(1)
 
     since = parse_since(args.since) if args.since else None
-    client = Anthropic()
     driver = get_driver()
     try:
         sessions = fetch_events(driver, args.session, since)
@@ -250,7 +259,7 @@ def main():
             project = dominant_project([e.get("cwd") for e in events])
             label = f"{session_id}" + (f"  project={project}" if project else "")
             print(f"\n=== dreaming over {label} ({len(events)} new events) ===")
-            memories = call_claude(client, render_events(events), existing)
+            memories = call_provider(provider_fn, render_events(events), existing, model)
             for m in memories:
                 print(f"\n--- {m.get('path')} ---")
                 print(m.get("content", ""))

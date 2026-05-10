@@ -1,2 +1,6 @@
 neo4j>=5.0.0
+# Provider SDKs are optional — install only the ones you'll use.
+# Default provider is anthropic; pick one of:
 anthropic>=0.40.0
+# openai>=1.40.0    # uncomment for --provider openai
+# Ollama needs no Python SDK; uses urllib against http://localhost:11434
