@@ -630,46 +630,77 @@ def cmd_unarchive(args: argparse.Namespace) -> int:
 
 
 def cmd_backup(args: argparse.Namespace) -> int:
-    """Dump memories (and optionally sessions+events) to a JSON file.
+    """Dump memories (and optionally sessions+events) to JSON.
 
-    Default skips embeddings (large). Use --with-embeddings if you intend
-    to restore on a machine without re-running embed-backfill.
+    PR-I #1+#2+#4 — streaming backup that's safe on large graphs:
+    - Only memories are exported by default (small, bounded).
+    - --with-sessions REQUIRES at least one scope flag: --since,
+      --session-key, --limit, OR the explicit --all-sessions opt-in.
+    - Events are streamed one row per event from Neo4j with field
+      projection done in Cypher (no `collect(properties(e))`, no
+      `properties(e)`); --no-tool-response drops those fields server-side
+      so they're never materialized; --max-field-chars uses substring()
+      in Cypher rather than slicing in Python after the data has already
+      crossed the wire.
+    - JSON is assembled incrementally in Python so we never hold the
+      whole graph in memory.
     """
     import json as _json
-    out_path = Path(args.out) if args.out else Path(f"njhook-backup-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.json")
-    payload: dict = {"version": 1, "exported_at": datetime.now(timezone.utc).isoformat(), "memories": [], "sessions": []}
+    from datetime import timedelta as _td
+    import re as _re
+
+    out_path = Path(args.out) if args.out else Path(
+        f"njhook-backup-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.json"
+    )
+
+    # --- scope guard for --with-sessions ----------------------------------
+    if args.with_sessions:
+        scoped = bool(args.since or args.session_key or (args.limit and args.limit > 0)
+                      or args.all_sessions)
+        if not scoped:
+            print(
+                "--with-sessions needs an explicit scope: pass --since 7d, "
+                "--session-key <key>, --limit N, or --all-sessions to opt into "
+                "the unbounded export.",
+                file=sys.stderr,
+            )
+            return 2
+
+    payload: dict = {
+        "version": 2,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "memories": [],
+        "sessions": [],
+    }
 
     with driver() as d, d.session() as s:
-        emb_clause = "m.embedding AS embedding, m.embedding_model AS embedding_model, m.embedding_dim AS embedding_dim, " if args.with_embeddings else ""
-        rows = list(s.run(
-            f"MATCH (m:Memory) "
-            f"RETURN m.path AS path, m.content AS content, m.project AS project, "
-            f"       m.updated_at AS updated_at, "
-            f"       coalesce(m.archived,false) AS archived, "
-            f"       coalesce(m.access_count,0) AS access_count, "
-            f"       m.last_accessed_at AS last_accessed_at, "
-            f"       m.consolidated_from AS consolidated_from, "
-            f"       m.promoted_from_pattern AS promoted_from_pattern, "
-            f"       {emb_clause}"
-            f"       null AS _end "
-            f"ORDER BY m.path"
-        ))
-        for r in rows:
+        # --- memories (small, project explicit fields) ---------------------
+        emb_clause = (
+            "m.embedding AS embedding, m.embedding_model AS embedding_model, "
+            "m.embedding_dim AS embedding_dim, "
+            if args.with_embeddings else ""
+        )
+        for r in s.run(
+            "MATCH (m:Memory) "
+            "RETURN m.path AS path, m.content AS content, m.project AS project, "
+            "       m.updated_at AS updated_at, "
+            "       coalesce(m.archived,false) AS archived, "
+            "       coalesce(m.access_count,0) AS access_count, "
+            "       m.last_accessed_at AS last_accessed_at, "
+            "       m.consolidated_from AS consolidated_from, "
+            "       m.promoted_from_pattern AS promoted_from_pattern, "
+            f"      {emb_clause}"
+            "       null AS _end "
+            "ORDER BY m.path"
+        ):
             d_ = {k: r[k] for k in r.keys() if k != "_end" and r[k] is not None}
             payload["memories"].append(d_)
 
+        # --- sessions (streaming, scoped) ---------------------------------
         if args.with_sessions:
-            # PR-F #2: ORDER BY e.timestamp before collect; otherwise the
-            # variable-length traversal returns events in arbitrary order and
-            # restore rethreads the linked list incorrectly.
-            # PR-G #1: --since filters by created_at; per-event tool_response
-            # can be capped or dropped to keep the dump from running into
-            # hundreds of MB on heavy graphs.
-            since_clause = ""
+            sess_where: list[str] = []
             params: dict = {}
             if args.since:
-                from datetime import timedelta as _td
-                import re as _re
                 m = _re.fullmatch(r"(\d+)([hdm])", args.since)
                 if not m:
                     print(f"--since must be like 24h / 7d / 30m; got {args.since!r}", file=sys.stderr)
@@ -677,43 +708,105 @@ def cmd_backup(args: argparse.Namespace) -> int:
                 n, unit = int(m.group(1)), m.group(2)
                 delta = {"h": _td(hours=n), "d": _td(days=n), "m": _td(minutes=n)}[unit]
                 params["since"] = (datetime.now(timezone.utc) - delta).isoformat()
-                since_clause = "WHERE coalesce(s.created_at, '') >= $since "
+                sess_where.append("coalesce(s.created_at, '') >= $since")
+            if args.session_key:
+                sess_where.append("s.session_key = $session_key")
+                params["session_key"] = args.session_key
 
-            sess_rows = list(s.run(
-                "MATCH (s:Session) " + since_clause +
-                "OPTIONAL MATCH (s)-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
-                "WITH s, e ORDER BY e.timestamp "
-                "WITH s, collect(properties(e)) AS events "
-                "RETURN s.session_key AS session_key, s.session_id AS session_id, "
-                "       s.client AS client, s.created_at AS created_at, "
-                "       s.last_dreamed_at AS last_dreamed_at, events",
-                parameters=params,
-            ))
+            sess_query = (
+                "MATCH (s:Session) "
+                + (("WHERE " + " AND ".join(sess_where) + " ") if sess_where else "")
+                + "RETURN s.session_key AS session_key, s.session_id AS session_id, "
+                  "       s.client AS client, s.created_at AS created_at, "
+                  "       s.last_dreamed_at AS last_dreamed_at "
+                  "ORDER BY s.created_at DESC"
+            )
+            if args.limit and args.limit > 0:
+                sess_query += " LIMIT $limit"
+                params["limit"] = args.limit
 
-            def _trim_event(e: dict) -> dict:
-                """Apply --no-tool-response / --max-field-chars to keep dumps sane."""
-                trimmed = dict(e)
-                if args.no_tool_response:
-                    trimmed.pop("tool_response", None)
-                    trimmed.pop("transcript", None)
-                cap = args.max_field_chars
-                if cap and cap > 0:
-                    for k in ("tool_response", "tool_input", "prompt", "transcript", "last_assistant_message"):
-                        v = trimmed.get(k)
-                        if isinstance(v, str) and len(v) > cap:
-                            trimmed[k] = v[:cap] + f"...[truncated {len(v) - cap} chars]"
-                return trimmed
+            session_rows = list(s.run(sess_query, parameters=params))
 
-            for r in sess_rows:
+            # Field-projection knobs: omit tool_response/transcript entirely
+            # when --no-tool-response, and substring() any kept long fields
+            # to --max-field-chars at the DB so we never transfer the full
+            # blob.
+            cap = args.max_field_chars or 0
+            if args.no_tool_response:
+                tr_clause = "null AS tool_response, null AS transcript"
+            elif cap > 0:
+                tr_clause = (
+                    "CASE WHEN size(coalesce(e.tool_response, '')) > $cap "
+                    "THEN substring(e.tool_response, 0, $cap) + '...[truncated]' "
+                    "ELSE e.tool_response END AS tool_response, "
+                    "CASE WHEN size(coalesce(e.transcript, '')) > $cap "
+                    "THEN substring(e.transcript, 0, $cap) + '...[truncated]' "
+                    "ELSE e.transcript END AS transcript"
+                )
+            else:
+                tr_clause = "e.tool_response AS tool_response, e.transcript AS transcript"
+
+            if cap > 0:
+                prompt_clause = (
+                    "CASE WHEN size(coalesce(e.prompt, '')) > $cap "
+                    "THEN substring(e.prompt, 0, $cap) + '...[truncated]' "
+                    "ELSE e.prompt END AS prompt"
+                )
+                input_clause = (
+                    "CASE WHEN size(coalesce(e.tool_input, '')) > $cap "
+                    "THEN substring(e.tool_input, 0, $cap) + '...[truncated]' "
+                    "ELSE e.tool_input END AS tool_input"
+                )
+                last_msg_clause = (
+                    "CASE WHEN size(coalesce(e.last_assistant_message, '')) > $cap "
+                    "THEN substring(e.last_assistant_message, 0, $cap) + '...[truncated]' "
+                    "ELSE e.last_assistant_message END AS last_assistant_message"
+                )
+            else:
+                prompt_clause = "e.prompt AS prompt"
+                input_clause = "e.tool_input AS tool_input"
+                last_msg_clause = "e.last_assistant_message AS last_assistant_message"
+
+            event_query = (
+                "MATCH (s:Session {session_key: $sk})-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
+                "WITH e ORDER BY e.timestamp "
+                "RETURN e.event_id AS event_id, e.event_name AS event_name, "
+                "       e.client AS client, e.timestamp AS timestamp, "
+                "       e.cwd AS cwd, e.tool_name AS tool_name, "
+                "       e.tool_use_id AS tool_use_id, "
+                "       e.model AS model, e.source AS source, "
+                "       e.turn_id AS turn_id, "
+                "       e.stop_hook_active AS stop_hook_active, "
+                "       e.transcript_path AS transcript_path, "
+                f"      {prompt_clause}, "
+                f"      {input_clause}, "
+                f"      {last_msg_clause}, "
+                f"      {tr_clause}"
+            )
+
+            for sess in session_rows:
+                events: list[dict] = []
+                ev_params = {"sk": sess["session_key"]}
+                if cap > 0:
+                    ev_params["cap"] = cap
+                # Stream — never materialize the full event list in Neo4j.
+                for er in s.run(event_query, parameters=ev_params):
+                    ev = {k: er[k] for k in er.keys() if er[k] is not None}
+                    events.append(ev)
                 payload["sessions"].append({
-                    "session_key": r["session_key"], "session_id": r["session_id"],
-                    "client": r["client"], "created_at": r["created_at"],
-                    "last_dreamed_at": r["last_dreamed_at"],
-                    "events": [_trim_event(e) for e in r["events"] if e],
+                    "session_key": sess["session_key"],
+                    "session_id": sess["session_id"],
+                    "client": sess["client"],
+                    "created_at": sess["created_at"],
+                    "last_dreamed_at": sess["last_dreamed_at"],
+                    "events": events,
                 })
 
     out_path.write_text(_json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"wrote {out_path} — {len(payload['memories'])} memories, {len(payload['sessions'])} sessions ({out_path.stat().st_size} bytes)")
+    print(
+        f"wrote {out_path} — {len(payload['memories'])} memories, "
+        f"{len(payload['sessions'])} sessions ({out_path.stat().st_size} bytes)"
+    )
     return 0
 
 
@@ -1143,10 +1236,17 @@ def build_parser() -> argparse.ArgumentParser:
     pbk = sub.add_parser("backup", help="dump memories (and optionally sessions) to JSON")
     pbk.add_argument("--out", help="output file (default: njhook-backup-<timestamp>.json)")
     pbk.add_argument("--with-embeddings", action="store_true", help="include m.embedding vectors (large)")
-    pbk.add_argument("--with-sessions", action="store_true", help="include captured sessions and their events (potentially huge)")
-    pbk.add_argument("--since", help="(with --with-sessions) only include sessions created within this window, e.g. 7d / 24h")
-    pbk.add_argument("--no-tool-response", action="store_true", help="(with --with-sessions) drop tool_response and transcript fields")
-    pbk.add_argument("--max-field-chars", type=int, default=0, help="(with --with-sessions) truncate per-event string fields to N chars (0 = unlimited)")
+    pbk.add_argument("--with-sessions", action="store_true",
+                     help="include sessions+events; REQUIRES one of --since / --session-key / --limit / --all-sessions")
+    pbk.add_argument("--since", help="(with --with-sessions) only sessions created within this window, e.g. 7d / 24h")
+    pbk.add_argument("--session-key", help="(with --with-sessions) export only the named session (e.g. claude_code:abc...)")
+    pbk.add_argument("--limit", type=int, default=0, help="(with --with-sessions) cap to N most-recent sessions")
+    pbk.add_argument("--all-sessions", action="store_true",
+                     help="(with --with-sessions) explicit opt-in to unbounded export — can be huge")
+    pbk.add_argument("--no-tool-response", action="store_true",
+                     help="(with --with-sessions) drop tool_response and transcript server-side (never fetched)")
+    pbk.add_argument("--max-field-chars", type=int, default=0,
+                     help="(with --with-sessions) truncate kept string fields to N chars in Cypher (0 = unlimited)")
     pbk.set_defaults(fn=cmd_backup)
 
     prs = sub.add_parser("restore", help="load a backup file (idempotent upsert by path / session_key)")

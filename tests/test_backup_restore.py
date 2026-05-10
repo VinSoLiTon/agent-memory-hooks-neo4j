@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import time
 import uuid
 from pathlib import Path
@@ -80,9 +79,14 @@ def cleanup():
 
 
 def run_backup(out: Path) -> dict:
+    # PR-I #3: scope the export to JUST the seeded session via --session-key
+    # so the test doesn't OOM on the user's live historical graph. Also cap
+    # tool_response fields server-side so a runaway transcript on some other
+    # captured session can't poison this test (defense in depth).
     p = subprocess.run(
         ["python", str(NJHOOK), "backup",
          "--out", str(out), "--with-sessions",
+         "--session-key", f"claude_code:{SID}",
          "--max-field-chars", "500"],
         capture_output=True, text=True,
     )
