@@ -829,9 +829,53 @@ def cmd_backup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _validate_backup(memories: list[dict], sessions: list[dict]) -> list[str]:
+    """PR-L: pre-flight backup shape check. Returns a list of error strings;
+    empty list means safe to restore. Catches malformed backups up front so
+    we don't half-restore and leave the graph in a wedged state.
+    """
+    errors: list[str] = []
+    for i, m in enumerate(memories):
+        if not isinstance(m, dict):
+            errors.append(f"memories[{i}] is not an object")
+            continue
+        if not m.get("path"):
+            errors.append(f"memories[{i}] missing 'path'")
+        if "content" not in m:
+            errors.append(f"memories[{i}] (path={m.get('path')!r}) missing 'content'")
+    for i, sess in enumerate(sessions):
+        if not isinstance(sess, dict):
+            errors.append(f"sessions[{i}] is not an object")
+            continue
+        if not sess.get("session_key") and not (sess.get("client") and sess.get("session_id")):
+            errors.append(
+                f"sessions[{i}] missing 'session_key' (or 'client'+'session_id' to derive one)"
+            )
+        events = sess.get("events") or []
+        if not isinstance(events, list):
+            errors.append(f"sessions[{i}].events is not a list")
+            continue
+        for j, e in enumerate(events):
+            if not isinstance(e, dict):
+                errors.append(f"sessions[{i}].events[{j}] is not an object")
+                continue
+            if not e.get("event_id"):
+                errors.append(
+                    f"sessions[{i}].events[{j}] missing 'event_id' "
+                    f"(session_key={sess.get('session_key')!r}); restore would silently "
+                    "skip this event and could leave a broken chain"
+                )
+    return errors
+
+
 def cmd_restore(args: argparse.Namespace) -> int:
     """Load a backup file. Memories upsert by path; sessions upsert by session_key.
     Embeddings restored only when present in the backup AND --with-embeddings is set.
+
+    PR-L: validates backup shape up front. Aborts before any DB write if the
+    file is malformed (missing memory.path/content, session.session_key, or
+    event.event_id). This prevents partial restores from silently skipping
+    events and leaving the chain wedged.
     """
     import json as _json
     in_path = Path(args.in_)
@@ -841,6 +885,19 @@ def cmd_restore(args: argparse.Namespace) -> int:
     payload = _json.loads(in_path.read_text(encoding="utf-8"))
     memories = payload.get("memories") or []
     sessions = payload.get("sessions") or []
+
+    validation_errors = _validate_backup(memories, sessions)
+    if validation_errors:
+        print(f"backup at {in_path} has {len(validation_errors)} malformed entries:", file=sys.stderr)
+        for e in validation_errors[:20]:
+            print(f"  - {e}", file=sys.stderr)
+        if len(validation_errors) > 20:
+            print(f"  ... and {len(validation_errors) - 20} more", file=sys.stderr)
+        print("\naborting; nothing was written. Fix the backup or pass --allow-malformed.",
+              file=sys.stderr)
+        if not args.allow_malformed:
+            return 2
+
     print(f"restoring from {in_path}: {len(memories)} memories, {len(sessions)} sessions")
 
     if args.dry_run:
@@ -1278,6 +1335,8 @@ def build_parser() -> argparse.ArgumentParser:
     prs.add_argument("--in", dest="in_", required=True, help="input JSON file")
     prs.add_argument("--with-embeddings", action="store_true", help="restore m.embedding when present")
     prs.add_argument("--dry-run", action="store_true")
+    prs.add_argument("--allow-malformed", action="store_true",
+                     help="proceed even if pre-flight finds missing event_id / path / session_key")
     prs.set_defaults(fn=cmd_restore)
 
     ppat = sub.add_parser("patterns", help="surface repeated commands, hot files, and recurring prompt clusters")

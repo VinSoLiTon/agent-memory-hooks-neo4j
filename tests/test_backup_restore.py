@@ -267,6 +267,50 @@ def main() -> int:
         except FileNotFoundError:
             pass
 
+    # ---------------------------------------------------------------------
+    # PR-L: restore must reject a malformed backup up front rather than
+    # half-write it. Build a backup whose first event is missing event_id
+    # (the worst case — would skip FIRST_EVENT and leave the chain broken)
+    # and one whose memory is missing 'path'. Both must abort with rc=2.
+    # ---------------------------------------------------------------------
+    bad = Path(os.environ.get("TEMP", "/tmp")) / f"njhook-bad-{SID}.json"
+    try:
+        cleanup()
+        seed()
+        backup = run_backup(bad)
+        # Mutilate: drop event_id from the first event of our session.
+        for sess in backup["sessions"]:
+            if sess["session_key"] == f"claude_code:{SID}" and sess["events"]:
+                sess["events"][0].pop("event_id", None)
+                break
+        bad.write_text(json.dumps(backup, indent=2), encoding="utf-8")
+
+        p = subprocess.run(
+            ["python", str(NJHOOK), "restore", "--in", str(bad)],
+            capture_output=True, text=True,
+        )
+        if p.returncode != 2:
+            failures.append(
+                f"malformed backup: expected rc=2 abort, got rc={p.returncode}; "
+                f"stderr={p.stderr[:200]!r}"
+            )
+        if "missing 'event_id'" not in p.stderr:
+            failures.append(f"malformed backup: missing event_id error not surfaced: {p.stderr[:200]!r}")
+
+        # Same backup with --allow-malformed should succeed (skipping the bad event).
+        p2 = subprocess.run(
+            ["python", str(NJHOOK), "restore", "--in", str(bad), "--allow-malformed"],
+            capture_output=True, text=True,
+        )
+        if p2.returncode != 0:
+            failures.append(f"--allow-malformed: expected rc=0, got {p2.returncode}; stderr={p2.stderr[:200]!r}")
+    finally:
+        cleanup()
+        try:
+            bad.unlink()
+        except FileNotFoundError:
+            pass
+
     if failures:
         for f in failures:
             print(f"  FAIL {f}")
