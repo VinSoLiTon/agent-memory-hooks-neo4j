@@ -851,10 +851,14 @@ def _validate_backup(memories: list[dict], sessions: list[dict]) -> list[str]:
             errors.append(
                 f"sessions[{i}] missing 'session_key' (or 'client'+'session_id' to derive one)"
             )
-        events = sess.get("events") or []
-        if not isinstance(events, list):
-            errors.append(f"sessions[{i}].events is not a list")
+        # PR-N: check the raw value, not the coalesced one — `events: ""` or
+        # `events: 42` would otherwise slip past as []. Missing key is fine
+        # (treated as []); present-but-not-list is a malformed signal.
+        events_raw = sess.get("events", [])
+        if not isinstance(events_raw, list):
+            errors.append(f"sessions[{i}].events is not a list (got {type(events_raw).__name__})")
             continue
+        events = events_raw
         for j, e in enumerate(events):
             if not isinstance(e, dict):
                 errors.append(f"sessions[{i}].events[{j}] is not an object")
@@ -927,14 +931,22 @@ def cmd_restore(args: argparse.Namespace) -> int:
                 continue
             sess = dict(sess)
             sess["session_key"] = sk
+            # PR-N: distinguish "events key missing" (treat as []) from
+            # "events present but not a list" (malformed — skip the whole
+            # session). Coercing the latter to [] would, when combined with
+            # restore's always-wipe-existing-chain semantics (PR-K), DELETE
+            # the real events of a same-keyed session in the graph. That's
+            # a data-loss path; refuse rather than ride.
+            if "events" in sess and not isinstance(sess["events"], list):
+                skipped_sessions += 1
+                continue
             events = sess.get("events") or []
             kept_events = []
-            if isinstance(events, list):
-                for e in events:
-                    if isinstance(e, dict) and e.get("event_id"):
-                        kept_events.append(e)
-                    else:
-                        skipped_events_total += 1
+            for e in events:
+                if isinstance(e, dict) and e.get("event_id"):
+                    kept_events.append(e)
+                else:
+                    skipped_events_total += 1
             sess["events"] = kept_events
             kept_sessions.append(sess)
 

@@ -312,6 +312,79 @@ def main() -> int:
             pass
 
     # ---------------------------------------------------------------------
+    # PR-N: a backup whose session has `events: "garbage"` (not a list)
+    # must NOT cause restore to wipe a real same-keyed session's events.
+    # Previously --allow-malformed coerced non-list events to [] and then
+    # restore's PR-K wipe deleted the existing chain unconditionally — a
+    # data-loss path triggered by a single malformed field in the backup.
+    # Now the entire malformed session is skipped, so the real session's
+    # events stay intact.
+    # ---------------------------------------------------------------------
+    bad3 = Path(os.environ.get("TEMP", "/tmp")) / f"njhook-bad3-{SID}.json"
+    try:
+        cleanup()
+        seed()  # 3-event session at claude_code:<SID>
+        # Snapshot expected event count BEFORE restore.
+        with _driver() as d, d.session() as s:
+            pre = s.run(
+                "MATCH (sess:Session {session_key: $sk})-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
+                "RETURN count(DISTINCT e) AS n",
+                parameters={"sk": f"claude_code:{SID}"},
+            ).single()
+        assert pre["n"] == 3, f"setup: expected 3 events, got {pre['n']}"
+
+        # Build a backup that contains ONLY a malformed session record for
+        # the same session_key — events is a string, not a list.
+        bad3.write_text(json.dumps({
+            "version": 2,
+            "memories": [],
+            "sessions": [{
+                "session_key": f"claude_code:{SID}",
+                "session_id": SID,
+                "client": "claude_code",
+                "events": "this should be a list, not a string",
+            }],
+        }), encoding="utf-8")
+
+        p4 = subprocess.run(
+            ["python", str(NJHOOK), "restore", "--in", str(bad3), "--allow-malformed"],
+            capture_output=True, text=True,
+        )
+        if p4.returncode != 0:
+            failures.append(f"--allow-malformed (non-list events): rc={p4.returncode}, stderr={p4.stderr[:200]!r}")
+        if "1 sessions" not in p4.stderr and "1 session" not in p4.stderr:
+            failures.append(f"--allow-malformed: did not skip the malformed session (stderr={p4.stderr[:300]!r})")
+
+        # Critical: real session's events must still be there.
+        with _driver() as d, d.session() as s:
+            post = s.run(
+                "MATCH (sess:Session {session_key: $sk})-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
+                "RETURN count(DISTINCT e) AS n",
+                parameters={"sk": f"claude_code:{SID}"},
+            ).single()
+        if post["n"] != 3:
+            failures.append(
+                f"DATA LOSS: malformed-events restore wiped real session's events "
+                f"(expected 3, got {post['n']})"
+            )
+
+        # Default mode (no --allow-malformed) should also reject.
+        p5 = subprocess.run(
+            ["python", str(NJHOOK), "restore", "--in", str(bad3)],
+            capture_output=True, text=True,
+        )
+        if p5.returncode != 2:
+            failures.append(f"non-list events in default mode: expected rc=2, got {p5.returncode}")
+        if "not a list" not in p5.stderr:
+            failures.append(f"validator didn't surface 'not a list' error: {p5.stderr[:200]!r}")
+    finally:
+        cleanup()
+        try:
+            bad3.unlink()
+        except FileNotFoundError:
+            pass
+
+    # ---------------------------------------------------------------------
     # PR-M: --allow-malformed must SKIP bad records, not crash on them and
     # not invent `unknown:unknown` sentinel session keys.
     # ---------------------------------------------------------------------
