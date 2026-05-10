@@ -342,8 +342,15 @@ def cmd_embed_backfill(args: argparse.Namespace) -> int:
                     """
                 )
                 dim_committed = True
+            model_name = embeddings.model()
+            dim_value = len(embs[0]) if embs else 0
             payload = [
-                {"path": r["path"], "embedding": embs[j]}
+                {
+                    "path": r["path"],
+                    "embedding": embs[j],
+                    "embedding_model": model_name,
+                    "embedding_dim": dim_value,
+                }
                 for j, r in enumerate(chunk)
                 if j < len(embs)
             ]
@@ -351,7 +358,9 @@ def cmd_embed_backfill(args: argparse.Namespace) -> int:
                 """
                 UNWIND $rows AS row
                 MATCH (m:Memory {path: row.path})
-                SET m.embedding = row.embedding
+                SET m.embedding = row.embedding,
+                    m.embedding_model = row.embedding_model,
+                    m.embedding_dim = row.embedding_dim
                 """,
                 parameters={"rows": payload},
             )
@@ -360,6 +369,73 @@ def cmd_embed_backfill(args: argparse.Namespace) -> int:
 
     print(f"\nembedded {total} memories")
     return 0
+
+
+def cmd_reindex(args: argparse.Namespace) -> int:
+    """H5: detect embedding model/dim mismatch and rebuild memory_embeddings.
+
+    Compares the active EMBED_PROVIDER's model vs what's stored on existing
+    memories. If they disagree (or --force), drops the vector index, clears
+    stale embeddings, and re-runs embed-backfill so every memory gets a fresh
+    embedding from the current model.
+    """
+    if not embeddings.is_enabled():
+        print("EMBED_PROVIDER is not set; nothing to reindex.", file=sys.stderr)
+        return 2
+
+    active_model = embeddings.model()
+    try:
+        active_dim = embeddings.dim()
+    except Exception as e:
+        print(f"could not probe active model dim ({e})", file=sys.stderr)
+        return 1
+
+    with driver() as d, d.session() as s:
+        # What model produced the existing embeddings?
+        models_in_graph = list(s.run(
+            "MATCH (m:Memory) WHERE m.embedding IS NOT NULL "
+            "RETURN coalesce(m.embedding_model, '?') AS model, "
+            "       coalesce(m.embedding_dim, 0) AS dim, count(*) AS n "
+            "ORDER BY n DESC"
+        ))
+
+    if not models_in_graph:
+        print(f"no embeddings yet — running embed-backfill against {active_model} ({active_dim}d)")
+        backfill_args = argparse.Namespace(force=False, batch_size=16)
+        return cmd_embed_backfill(backfill_args)
+
+    print("Embeddings currently in graph:")
+    for r in models_in_graph:
+        marker = "  (matches active)" if r["model"] == active_model and r["dim"] == active_dim else "  (STALE)"
+        print(f"  {r['n']:>4}  model={r['model']:<35}  dim={r['dim']}{marker}")
+    print(f"\nActive: model={active_model}  dim={active_dim}")
+
+    needs_reindex = args.force or any(
+        r["model"] != active_model or r["dim"] != active_dim for r in models_in_graph
+    )
+    if not needs_reindex:
+        print("\nNothing to do (active model matches stored embeddings). --force to rebuild anyway.")
+        return 0
+
+    if args.dry_run:
+        print("\n[dry-run] would drop memory_embeddings, clear stale m.embedding, and rerun embed-backfill")
+        return 0
+
+    print("\nrebuilding...")
+    with driver() as d, d.session() as s:
+        try:
+            s.run("DROP INDEX memory_embeddings IF EXISTS")
+            print("  dropped memory_embeddings index")
+        except Exception as e:
+            print(f"  warn: drop index failed ({e})", file=sys.stderr)
+        s.run(
+            "MATCH (m:Memory) WHERE m.embedding IS NOT NULL "
+            "REMOVE m.embedding, m.embedding_model, m.embedding_dim"
+        )
+        print("  cleared stale embeddings on all memories")
+
+    backfill_args = argparse.Namespace(force=True, batch_size=16)
+    return cmd_embed_backfill(backfill_args)
 
 
 def cmd_patterns(args: argparse.Namespace) -> int:
@@ -549,6 +625,14 @@ def build_parser() -> argparse.ArgumentParser:
     pem.add_argument("--force", action="store_true", help="re-embed all memories, not just those missing embeddings")
     pem.add_argument("--batch-size", type=int, default=16)
     pem.set_defaults(fn=cmd_embed_backfill)
+
+    pri = sub.add_parser(
+        "reindex",
+        help="rebuild memory_embeddings when EMBED_MODEL/dim changes (or --force)",
+    )
+    pri.add_argument("--force", action="store_true", help="rebuild even when active model matches stored embeddings")
+    pri.add_argument("--dry-run", action="store_true")
+    pri.set_defaults(fn=cmd_reindex)
 
     pco = sub.add_parser(
         "consolidate",

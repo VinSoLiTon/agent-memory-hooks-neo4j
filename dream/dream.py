@@ -108,14 +108,19 @@ def parse_since(s: str) -> datetime:
 
 
 def fetch_events(driver, session_id: str | None, since: datetime | None):
-    """Return list of (session_id, [event_props, ...]) ordered chronologically.
+    """Return list of (session_key, [event_props, ...]) ordered chronologically.
 
     A session is included if it has at least one event newer than its
     `last_dreamed_at` watermark (or has never been dreamed).
+
+    H1: grouping is now by session_key (composite "<client>:<session_id>"),
+    not session_id alone. The --session arg still accepts a raw session_id
+    for ergonomics; matching sessions across clients are processed separately.
     """
     where, params = ["(s.last_dreamed_at IS NULL OR e.timestamp > s.last_dreamed_at)"], {}
     if session_id:
-        where.append("s.session_id = $session_id")
+        # Accept either the composite key or the raw id; OR-match for ergonomics.
+        where.append("(s.session_id = $session_id OR s.session_key = $session_id)")
         params["session_id"] = session_id
     if since:
         where.append("e.timestamp >= $since")
@@ -124,13 +129,13 @@ def fetch_events(driver, session_id: str | None, since: datetime | None):
     query = f"""
     MATCH (s:Session)-[:FIRST_EVENT|NEXT*0..]->(e:Event)
     WHERE {' AND '.join(where)}
-    RETURN s.session_id AS session_id, e
-    ORDER BY s.session_id, e.timestamp
+    RETURN coalesce(s.session_key, s.session_id) AS session_key, e
+    ORDER BY session_key, e.timestamp
     """
     grouped: dict[str, list] = {}
     with driver.session() as ses:
         for record in ses.run(query, **params):
-            grouped.setdefault(record["session_id"], []).append(dict(record["e"]))
+            grouped.setdefault(record["session_key"], []).append(dict(record["e"]))
     return list(grouped.items())
 
 
@@ -176,7 +181,7 @@ def call_provider(provider_fn, transcript: str, existing: str, model: str) -> li
     )
 
 
-def write_memories(driver, session_id: str, memories: list[dict], watermark: str, project: str | None = None) -> int:
+def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None) -> int:
     """Upsert memories and advance the session's last_dreamed_at watermark.
 
     `watermark` is the timestamp of the latest event we just dreamed over —
@@ -206,6 +211,7 @@ def write_memories(driver, session_id: str, memories: list[dict], watermark: str
             print(f"  warn: embedding failed, writing memories without vectors: {e}", file=sys.stderr)
             embeds = []
 
+    embed_model_name = embeddings.model() if (valid and embeddings.is_enabled() and embeds) else None
     rows = []
     for i, m in enumerate(valid):
         rows.append({
@@ -216,14 +222,18 @@ def write_memories(driver, session_id: str, memories: list[dict], watermark: str
             if m["path"].startswith(("profile/", "tools/")) or not project
             else project,
             "embedding": embeds[i] if embeds and i < len(embeds) else None,
+            # H5: track which model produced the embedding and at what dimension.
+            # Lets `njhook reindex` detect mismatches when the embedding model changes.
+            "embedding_model": embed_model_name if embeds and i < len(embeds) else None,
+            "embedding_dim": embed_dim if embeds and i < len(embeds) else None,
         })
 
     with driver.session() as ses:
         # H2: always advance the watermark, even when no memories were produced.
         # Otherwise low-signal sessions get re-dreamed every run forever.
         ses.run(
-            "MATCH (s:Session {session_id: $session_id}) SET s.last_dreamed_at = $watermark",
-            parameters={"session_id": session_id, "watermark": watermark},
+            "MATCH (s:Session {session_key: $session_key}) SET s.last_dreamed_at = $watermark",
+            parameters={"session_key": session_key, "watermark": watermark},
         )
 
         if not rows:
@@ -243,7 +253,7 @@ def write_memories(driver, session_id: str, memories: list[dict], watermark: str
             )
         ses.run(
             """
-            MATCH (s:Session {session_id: $session_id})
+            MATCH (s:Session {session_key: $session_key})
             UNWIND $rows AS row
             MERGE (m:Memory {path: row.path})
             SET m.content = row.content,
@@ -257,12 +267,14 @@ def write_memories(driver, session_id: str, memories: list[dict], watermark: str
                   ELSE m.project
                 END
             FOREACH (_ IN CASE WHEN row.embedding IS NOT NULL THEN [1] ELSE [] END |
-                SET m.embedding = row.embedding
+                SET m.embedding = row.embedding,
+                    m.embedding_model = row.embedding_model,
+                    m.embedding_dim = row.embedding_dim
             )
             MERGE (s)-[:DREAMED]->(m)
             MERGE (m)-[:DERIVED_FROM]->(s)
             """,
-            parameters={"session_id": session_id, "rows": rows},
+            parameters={"session_key": session_key, "rows": rows},
         )
     return len(rows)
 
@@ -331,9 +343,9 @@ def main():
             print("nothing to dream about.")
             return
         existing = render_existing(fetch_existing_memories(driver))
-        for session_id, events in sessions:
+        for session_key, events in sessions:
             project = dominant_project([e.get("cwd") for e in events])
-            label = f"{session_id}" + (f"  project={project}" if project else "")
+            label = f"{session_key}" + (f"  project={project}" if project else "")
             print(f"\n=== dreaming over {label} ({len(events)} new events) ===")
             memories = call_provider(provider_fn, render_events(events), existing, model)
             for m in memories:
@@ -341,7 +353,7 @@ def main():
                 print(m.get("content", ""))
             if not args.dry_run:
                 watermark = events[-1].get("timestamp")
-                n = write_memories(driver, session_id, memories, watermark, project=project)
+                n = write_memories(driver, session_key, memories, watermark, project=project)
                 print(f"\n  wrote/updated {n} memories; watermark -> {watermark}")
     finally:
         driver.close()
