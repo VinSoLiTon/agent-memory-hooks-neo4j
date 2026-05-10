@@ -2,11 +2,18 @@
 """
 Shared hook: inject :Memory nodes into the session as additional context.
 
-- SessionStart: load up to 5 profile/* memories so the model has user context.
+- SessionStart: load profile/* and tools/* memories ordered by recency, capped
+  by per-bucket limits and an overall char budget so a large memory graph does
+  not flood the model context.
 - UserPromptSubmit: fulltext search against memory content/path with an OR-term
   fallback when the initial query returns nothing.
 
-Used by both Claude Code and Codex. Both clients accept the same output shape:
+Tunables (env vars):
+  INJECT_PROFILE_LIMIT  max profile/* memories on session start (default 5)
+  INJECT_TOOLS_LIMIT    max tools/*  memories on session start (default 5)
+  INJECT_CHAR_BUDGET    soft cap on total chars emitted on session start (default 4000)
+
+Used by Claude Code, Codex, and Cursor. All clients accept the same output shape:
   {"hookSpecificOutput": {"hookEventName": "...", "additionalContext": "..."}}
 
 Requires a fulltext index (create once):
@@ -28,6 +35,10 @@ NEO4J_PASSWORD = os.environ.get("HOOKS_NEO4J_PASSWORD", "password")
 
 MAX_PROMPT_HITS = 5
 MIN_FULLTEXT_SCORE = 0.5
+
+PROFILE_LIMIT = int(os.environ.get("INJECT_PROFILE_LIMIT", "5"))
+TOOLS_LIMIT = int(os.environ.get("INJECT_TOOLS_LIMIT", "5"))
+CHAR_BUDGET = int(os.environ.get("INJECT_CHAR_BUDGET", "4000"))
 
 STOPWORDS = {
     "this", "that", "with", "from", "have", "what", "when", "where", "which",
@@ -59,20 +70,44 @@ def _extract_terms(prompt: str) -> list[str]:
     return [w for w in words if len(w) >= 3 and w not in STOPWORDS]
 
 
+def _fetch_bucket(s, prefix: str, limit: int) -> list:
+    return list(s.run(
+        "MATCH (m:Memory) WHERE m.path STARTS WITH $prefix "
+        "RETURN m.path AS path, m.content AS content "
+        "ORDER BY coalesce(m.updated_at, '') DESC, m.path "
+        "LIMIT $limit",
+        prefix=prefix,
+        limit=limit,
+    ))
+
+
 def session_start_context() -> str:
     with get_driver() as driver, driver.session() as s:
-        profile = list(s.run(
-            "MATCH (m:Memory) WHERE m.path STARTS WITH 'profile/' "
-            "RETURN m.path AS path, m.content AS content ORDER BY m.path "
-            "LIMIT 5"
-        ))
+        profile = _fetch_bucket(s, "profile/", PROFILE_LIMIT)
+        tools = _fetch_bucket(s, "tools/", TOOLS_LIMIT)
 
-    if not profile:
+    if not profile and not tools:
         return ""
 
-    parts = ["# Memory (from prior sessions)\n", "## Profile\n"]
-    for r in profile:
-        parts.append(f"### {r['path']}\n{r['content']}\n")
+    parts = ["# Memory (from prior sessions)\n"]
+    used = len(parts[0])
+
+    def append_section(header: str, rows: list) -> None:
+        nonlocal used
+        if not rows:
+            return
+        parts.append(header)
+        used += len(header)
+        for r in rows:
+            entry = f"### {r['path']}\n{r['content']}\n"
+            if used + len(entry) > CHAR_BUDGET and len(parts) > 2:
+                parts.append(f"_(further memories omitted; CHAR_BUDGET={CHAR_BUDGET} reached)_\n")
+                return
+            parts.append(entry)
+            used += len(entry)
+
+    append_section("## Profile\n", profile)
+    append_section("## Tools\n", tools)
     return "\n".join(parts)
 
 
