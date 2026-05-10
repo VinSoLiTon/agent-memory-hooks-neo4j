@@ -150,7 +150,7 @@ def emit(event_name: str, context: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--client", required=True, choices=["claude_code", "codex", "cursor"])
+    parser.add_argument("--client", required=True, choices=["claude_code", "codex", "cursor", "gemini"])
     parser.parse_args()
 
     try:
@@ -160,8 +160,11 @@ def main():
         normalized = (event or "").lower()
         if normalized in {"sessionstart", "session_start"}:
             emit(event or "sessionStart", session_start_context())
-        elif normalized in {"userpromptsubmit", "beforesubmitprompt"}:
-            emit(event or "beforeSubmitPrompt", prompt_context(data.get("prompt", "")))
+        # Gemini fires BeforeAgent after the user prompt is submitted but before
+        # the agent reasons — analogous to Claude Code's UserPromptSubmit and
+        # Cursor's beforeSubmitPrompt. All three carry a `prompt` field.
+        elif normalized in {"userpromptsubmit", "beforesubmitprompt", "beforeagent", "before_agent"}:
+            emit(event or "beforeAgent", prompt_context(data.get("prompt", "")))
     except Exception as e:
         print(f"inject_memory error: {e}", file=sys.stderr)
 

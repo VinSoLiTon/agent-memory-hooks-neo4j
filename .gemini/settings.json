@@ -1,0 +1,43 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "%GEMINI_PROJECT_DIR%\\.gemini\\hooks\\log_event.cmd" },
+          { "type": "command", "command": "%GEMINI_PROJECT_DIR%\\.gemini\\hooks\\inject_memory.cmd" }
+        ]
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "hooks": [
+          { "type": "command", "command": "%GEMINI_PROJECT_DIR%\\.gemini\\hooks\\log_event.cmd" },
+          { "type": "command", "command": "%GEMINI_PROJECT_DIR%\\.gemini\\hooks\\inject_memory.cmd" }
+        ]
+      }
+    ],
+    "BeforeTool": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "%GEMINI_PROJECT_DIR%\\.gemini\\hooks\\log_event.cmd" }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "%GEMINI_PROJECT_DIR%\\.gemini\\hooks\\log_event.cmd" }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "%GEMINI_PROJECT_DIR%\\.gemini\\hooks\\log_event.cmd" }
+        ]
+      }
+    ]
+  }
+}
