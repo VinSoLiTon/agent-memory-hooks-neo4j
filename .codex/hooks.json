@@ -3,37 +3,37 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "./.codex/hooks/log_event.sh" },
-          { "type": "command", "command": "./.codex/hooks/inject_memory.sh" }
+          { "type": "command", "command": "./.codex/hooks/log_event.cmd" },
+          { "type": "command", "command": "./.codex/hooks/inject_memory.cmd" }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "./.codex/hooks/log_event.sh" },
-          { "type": "command", "command": "./.codex/hooks/inject_memory.sh" }
+          { "type": "command", "command": "./.codex/hooks/log_event.cmd" },
+          { "type": "command", "command": "./.codex/hooks/inject_memory.cmd" }
         ]
       }
     ],
     "PreToolUse": [
       {
         "hooks": [
-          { "type": "command", "command": "./.codex/hooks/log_event.sh" }
+          { "type": "command", "command": "./.codex/hooks/log_event.cmd" }
         ]
       }
     ],
     "PostToolUse": [
       {
         "hooks": [
-          { "type": "command", "command": "./.codex/hooks/log_event.sh" }
+          { "type": "command", "command": "./.codex/hooks/log_event.cmd" }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "./.codex/hooks/log_event.sh" }
+          { "type": "command", "command": "./.codex/hooks/log_event.cmd" }
         ]
       }
     ]

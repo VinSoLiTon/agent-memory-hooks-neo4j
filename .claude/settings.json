@@ -5,11 +5,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/log_event.sh\""
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/log_event.cmd\""
           },
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/inject_memory.sh\""
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/inject_memory.cmd\""
           }
         ]
       }
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/log_event.sh\""
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/log_event.cmd\""
           }
         ]
       }
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/log_event.sh\""
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/log_event.cmd\""
           }
         ]
       }
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/log_event.sh\""
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/log_event.cmd\""
           }
         ]
       }
@@ -49,11 +49,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/log_event.sh\""
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/log_event.cmd\""
           },
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/inject_memory.sh\""
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/inject_memory.cmd\""
           }
         ]
       }
