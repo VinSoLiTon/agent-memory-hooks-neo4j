@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from project import dominant_project  # noqa: E402
 from providers import get_provider, default_model  # noqa: E402
 import embeddings  # noqa: E402
+import consolidate as consolidate_mod  # noqa: E402
 
 # Windows consoles default to cp1252; memories from Claude routinely include
 # em-dashes, arrows, smart quotes, etc. Force UTF-8 so the human-readable
@@ -266,24 +267,54 @@ def main():
         help="LLM backend (default: $DREAM_PROVIDER or anthropic)",
     )
     ap.add_argument("--model", help="override the provider's default model")
+    # Consolidation / archival modes (mutually exclusive with the per-session
+    # distillation that's the default behavior).
+    ap.add_argument("--consolidate", action="store_true",
+                    help="merge near-duplicate memories instead of distilling sessions")
+    ap.add_argument("--consolidate-threshold", type=float, default=0.92,
+                    help="cosine similarity above which memories are candidates to merge")
+    ap.add_argument("--consolidate-rounds", type=int, default=10,
+                    help="max merge rounds before exiting")
+    ap.add_argument("--archive", action="store_true",
+                    help="flag stale memories as archived (excluded from recall)")
+    ap.add_argument("--stale-days", type=int, default=60,
+                    help="memories untouched for this many days are archive-eligible")
     args = ap.parse_args()
 
     provider_name, provider_fn = get_provider(args.provider)
     model = args.model or default_model(provider_name)
-    print(f"provider={provider_name} model={model}")
+    if not (args.consolidate or args.archive):
+        print(f"provider={provider_name} model={model}")
 
     # Provider-specific preflight: only Anthropic and OpenAI need a key in env;
     # Ollama just needs a reachable local server (checked at first call).
-    if provider_name == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
-        print("ANTHROPIC_API_KEY is not set", file=sys.stderr)
-        sys.exit(1)
-    if provider_name == "openai" and not os.environ.get("OPENAI_API_KEY"):
-        print("OPENAI_API_KEY is not set", file=sys.stderr)
-        sys.exit(1)
+    needs_llm = not args.archive  # archive doesn't call any LLM
+    if needs_llm:
+        if provider_name == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
+            print("ANTHROPIC_API_KEY is not set", file=sys.stderr)
+            sys.exit(1)
+        if provider_name == "openai" and not os.environ.get("OPENAI_API_KEY"):
+            print("OPENAI_API_KEY is not set", file=sys.stderr)
+            sys.exit(1)
 
     since = parse_since(args.since) if args.since else None
     driver = get_driver()
     try:
+        if args.archive:
+            consolidate_mod.archive(driver, stale_days=args.stale_days, dry_run=args.dry_run)
+            return
+        if args.consolidate:
+            embed_fn = embeddings.embed if embeddings.is_enabled() else None
+            consolidate_mod.consolidate(
+                driver,
+                provider_name=args.provider,
+                threshold=args.consolidate_threshold,
+                max_rounds=args.consolidate_rounds,
+                dry_run=args.dry_run,
+                embed_fn=embed_fn,
+            )
+            return
+
         sessions = fetch_events(driver, args.session, since)
         if not sessions:
             print("nothing to dream about.")

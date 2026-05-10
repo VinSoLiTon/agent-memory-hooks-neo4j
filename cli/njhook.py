@@ -80,6 +80,8 @@ def _kind_of(path: str) -> str:
 
 def cmd_list(args: argparse.Namespace) -> int:
     where, params = [], {}
+    if not args.include_archived:
+        where.append("coalesce(m.archived, false) = false")
     if args.kind:
         where.append("m.path STARTS WITH $kind_prefix")
         params["kind_prefix"] = args.kind.rstrip("/") + "/"
@@ -346,9 +348,58 @@ def cmd_embed_backfill(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_consolidate(args: argparse.Namespace) -> int:
+    """Delegate to dream/consolidate.py — LLM-merge near-duplicate memories."""
+    # The consolidate module lives under dream/, which isn't on sys.path by default
+    # for the CLI. Add it.
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dream"))
+    import consolidate as consolidate_mod  # type: ignore
+    if not embeddings.is_enabled():
+        print("EMBED_PROVIDER is not set. Consolidation needs vector similarity to find pair candidates.", file=sys.stderr)
+        return 2
+    with driver() as d:
+        consolidate_mod.consolidate(
+            d,
+            provider_name=args.provider,
+            threshold=args.threshold,
+            max_rounds=args.rounds,
+            dry_run=args.dry_run,
+            embed_fn=embeddings.embed,
+        )
+    return 0
+
+
+def cmd_archive(args: argparse.Namespace) -> int:
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dream"))
+    import consolidate as consolidate_mod  # type: ignore
+    with driver() as d:
+        consolidate_mod.archive(d, stale_days=args.stale_days, dry_run=args.dry_run)
+    return 0
+
+
+def cmd_unarchive(args: argparse.Namespace) -> int:
+    with driver() as d, d.session() as s:
+        r = s.run(
+            "MATCH (m:Memory {path: $path}) "
+            "SET m.archived = false, m.unarchived_at = $now "
+            "RETURN count(*) AS n",
+            parameters={"path": args.path, "now": datetime.now(timezone.utc).isoformat()},
+        ).single()
+    print(f"unarchived (matched {r['n']})")
+    return 0
+
+
 def cmd_stats(_: argparse.Namespace) -> int:
     with driver() as d, d.session() as s:
         m_total = s.run("MATCH (m:Memory) RETURN count(m) AS n").single()["n"]
+        m_archived = s.run(
+            "MATCH (m:Memory) WHERE coalesce(m.archived,false)=true RETURN count(m) AS n"
+        ).single()["n"]
+        m_with_emb = s.run(
+            "MATCH (m:Memory) WHERE m.embedding IS NOT NULL RETURN count(m) AS n"
+        ).single()["n"]
         m_by_kind = list(s.run(
             """
             MATCH (m:Memory)
@@ -362,7 +413,7 @@ def cmd_stats(_: argparse.Namespace) -> int:
         ))
         e_total = s.run("MATCH (e:Event) RETURN count(e) AS n").single()["n"]
 
-    print(f"Memories: {m_total}")
+    print(f"Memories: {m_total}  ({m_archived} archived, {m_with_emb} embedded)")
     for r in m_by_kind:
         print(f"  {r['kind']:<10} {r['n']}")
     print(f"\nSessions: {s_total}")
@@ -383,6 +434,7 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--project", help="filter by project tag")
     pl.add_argument("--since", help="only memories updated since e.g. 24h, 7d, 30m")
     pl.add_argument("--limit", type=int, default=0, help="max rows (0 = no limit)")
+    pl.add_argument("--include-archived", action="store_true", help="show archived memories too")
     pl.set_defaults(fn=cmd_list)
 
     ps = sub.add_parser("show", help="print a memory's full content")
@@ -426,6 +478,28 @@ def build_parser() -> argparse.ArgumentParser:
     pem.add_argument("--force", action="store_true", help="re-embed all memories, not just those missing embeddings")
     pem.add_argument("--batch-size", type=int, default=16)
     pem.set_defaults(fn=cmd_embed_backfill)
+
+    pco = sub.add_parser(
+        "consolidate",
+        help="LLM-merge near-duplicate memories (requires EMBED_PROVIDER and a dream provider)",
+    )
+    pco.add_argument("--threshold", type=float, default=0.92, help="cosine similarity threshold (default 0.92)")
+    pco.add_argument("--rounds", type=int, default=10, help="max merge rounds (default 10)")
+    pco.add_argument("--provider", choices=["anthropic", "openai", "ollama"])
+    pco.add_argument("--dry-run", action="store_true")
+    pco.set_defaults(fn=cmd_consolidate)
+
+    par = sub.add_parser(
+        "archive",
+        help="flag stale memories as archived (excluded from recall)",
+    )
+    par.add_argument("--stale-days", type=int, default=60)
+    par.add_argument("--dry-run", action="store_true")
+    par.set_defaults(fn=cmd_archive)
+
+    pun = sub.add_parser("unarchive", help="restore an archived memory by path")
+    pun.add_argument("path")
+    pun.set_defaults(fn=cmd_unarchive)
 
     return p
 

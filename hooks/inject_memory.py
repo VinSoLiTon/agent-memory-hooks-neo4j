@@ -63,12 +63,12 @@ def get_driver():
 
 
 def _fulltext_search(session, query: str, limit: int = MAX_PROMPT_HITS) -> list:
-    """Raw fulltext hits — Lucene over (m.content, m.path)."""
+    """Raw fulltext hits — Lucene over (m.content, m.path). Skips archived."""
     raw_limit = max(limit * 3, limit + 5)
     cypher = """
     CALL db.index.fulltext.queryNodes('memory_fulltext', $query)
     YIELD node, score
-    WHERE score > $min_score
+    WHERE score > $min_score AND coalesce(node.archived, false) = false
     RETURN node.path AS path, node.content AS content,
            coalesce(node.project, '') AS project, score
     ORDER BY score DESC
@@ -98,6 +98,7 @@ def _vector_search(session, query: str, limit: int = MAX_PROMPT_HITS) -> list:
             """
             CALL db.index.vector.queryNodes('memory_embeddings', $k, $qvec)
             YIELD node, score
+            WHERE coalesce(node.archived, false) = false
             RETURN node.path AS path, node.content AS content,
                    coalesce(node.project, '') AS project, score
             """,
@@ -137,6 +138,7 @@ def _extract_terms(prompt: str) -> list[str]:
 def _fetch_bucket(s, prefix: str, limit: int) -> list:
     return list(s.run(
         "MATCH (m:Memory) WHERE m.path STARTS WITH $prefix "
+        "AND coalesce(m.archived, false) = false "
         "RETURN m.path AS path, m.content AS content "
         "ORDER BY coalesce(m.updated_at, '') DESC, m.path "
         "LIMIT $limit",
@@ -148,6 +150,7 @@ def _fetch_project(s, project: str, limit: int) -> list:
     return list(s.run(
         "MATCH (m:Memory) WHERE m.project = $project "
         "AND NOT (m.path STARTS WITH 'profile/' OR m.path STARTS WITH 'tools/') "
+        "AND coalesce(m.archived, false) = false "
         "RETURN m.path AS path, m.content AS content "
         "ORDER BY coalesce(m.updated_at, '') DESC, m.path "
         "LIMIT $limit",
@@ -155,17 +158,19 @@ def _fetch_project(s, project: str, limit: int) -> list:
     ))
 
 
-def session_start_context(current_project: str | None = None) -> str:
+def session_start_context(current_project: str | None = None) -> tuple[str, list[str]]:
+    """Returns (markdown_context, paths_emitted). Paths are used for access tracking."""
     with get_driver() as driver, driver.session() as s:
         profile = _fetch_bucket(s, "profile/", PROFILE_LIMIT)
         tools = _fetch_bucket(s, "tools/", TOOLS_LIMIT)
         project_rows = _fetch_project(s, current_project, PROJECT_LIMIT) if current_project else []
 
     if not profile and not tools and not project_rows:
-        return ""
+        return "", []
 
     parts = ["# Memory (from prior sessions)\n"]
     used = len(parts[0])
+    emitted_paths: list[str] = []
 
     def append_section(header: str, rows: list) -> None:
         nonlocal used
@@ -180,17 +185,18 @@ def session_start_context(current_project: str | None = None) -> str:
                 return
             parts.append(entry)
             used += len(entry)
+            emitted_paths.append(r["path"])
 
     append_section("## Profile\n", profile)
     if project_rows:
         append_section(f"## Project ({current_project})\n", project_rows)
     append_section("## Tools\n", tools)
-    return "\n".join(parts)
+    return "\n".join(parts), emitted_paths
 
 
-def prompt_context(prompt: str, current_project: str | None = None) -> str:
+def prompt_context(prompt: str, current_project: str | None = None) -> tuple[str, list[str]]:
     if not prompt.strip():
-        return ""
+        return "", []
 
     with get_driver() as driver, driver.session() as s:
         ft_rows = _fulltext_search(s, prompt)
@@ -205,17 +211,41 @@ def prompt_context(prompt: str, current_project: str | None = None) -> str:
         vec_rows = _vector_search(s, prompt)
 
     if not ft_rows and not vec_rows:
-        return ""
+        return "", []
 
     rows = _hybrid_merge(ft_rows, vec_rows, current_project, MAX_PROMPT_HITS)
 
     parts = ["# Relevant memory for this prompt\n"]
+    paths: list[str] = []
     for r in rows:
         parts.append(f"## {r['path']}\n{r['content']}\n")
-    return "\n".join(parts)
+        paths.append(r["path"])
+    return "\n".join(parts), paths
 
 
-def emit(event_name: str, context: str):
+def _bump_access(paths: list[str]) -> None:
+    """Best-effort: increment access_count and stamp last_accessed_at on each
+    memory just returned. Failures are swallowed so recall is never blocked."""
+    if not paths:
+        return
+    try:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        with get_driver() as driver, driver.session() as s:
+            s.run(
+                """
+                UNWIND $paths AS p
+                MATCH (m:Memory {path: p})
+                SET m.last_accessed_at = $now,
+                    m.access_count = coalesce(m.access_count, 0) + 1
+                """,
+                parameters={"paths": paths, "now": now},
+            )
+    except Exception:
+        pass
+
+
+def emit(event_name: str, context: str, accessed_paths: list[str] | None = None):
     if not context.strip():
         return
     out = {
@@ -225,6 +255,7 @@ def emit(event_name: str, context: str):
         }
     }
     print(json.dumps(out))
+    _bump_access(accessed_paths or [])
 
 
 def main():
@@ -239,12 +270,14 @@ def main():
         normalized = (event or "").lower()
         current_project = derive_project(data.get("cwd"))
         if normalized in {"sessionstart", "session_start"}:
-            emit(event or "sessionStart", session_start_context(current_project))
+            ctx, paths = session_start_context(current_project)
+            emit(event or "sessionStart", ctx, paths)
         # Gemini fires BeforeAgent after the user prompt is submitted but before
         # the agent reasons — analogous to Claude Code's UserPromptSubmit and
         # Cursor's beforeSubmitPrompt. All three carry a `prompt` field.
         elif normalized in {"userpromptsubmit", "beforesubmitprompt", "beforeagent", "before_agent"}:
-            emit(event or "beforeAgent", prompt_context(data.get("prompt", ""), current_project))
+            ctx, paths = prompt_context(data.get("prompt", ""), current_project)
+            emit(event or "beforeAgent", ctx, paths)
     except Exception as e:
         print(f"inject_memory error: {e}", file=sys.stderr)
 
