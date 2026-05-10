@@ -90,54 +90,86 @@ def dream_ollama(transcript: str, existing: str, system: str, model: str, max_to
     from prompts import DREAM_JSON_SCHEMA  # type: ignore
 
     user_msg = f"<existing_memories>\n{existing}\n</existing_memories>\n\n<events>\n{transcript}\n</events>"
-    payload = {
-        "model": model,
-        "messages": [
+
+    def _build_payload(use_prefix: bool) -> dict:
+        msgs: list[dict] = [
             {"role": "system", "content": system},
             {"role": "user", "content": user_msg},
+        ]
+        if use_prefix:
             # Pre-fill the assistant turn so the model continues from a valid
             # JSON open-bracket — no room for prose preamble.
-            {"role": "assistant", "content": '{"memories":['},
-        ],
-        "format": DREAM_JSON_SCHEMA,
-        "stream": False,
-        "think": False,  # qwen3.5 / similar; ignored by models without thinking
-        "options": {
-            "num_predict": max_tokens,
-            "temperature": 0.1,
-            "top_p": 0.9,
-            "repeat_penalty": 1.05,
-        },
-    }
-    req = urllib.request.Request(
-        f"{OLLAMA_HOST.rstrip('/')}/api/chat",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as e:
-        raise RuntimeError(
-            f"Ollama unreachable at {OLLAMA_HOST}: {e}. "
-            "Is `ollama serve` running, or is the daemon installed?"
-        ) from e
-    text = (body.get("message") or {}).get("content", "")
-    if not text:
-        raise RuntimeError(f"empty response from Ollama: {body}")
-    # The pre-filled assistant turn `{"memories":[` shapes generation but is NOT
-    # echoed back; Ollama returns only the model's continuation. Prepend it so
-    # we can parse the full object. Fall back to bracket-extraction if the
-    # daemon already gave us the full object (older Ollama / different mode).
-    full = '{"memories":[' + text
-    try:
-        return json.loads(full).get("memories", [])
-    except Exception:
+            msgs.append({"role": "assistant", "content": '{"memories":['})
+        return {
+            "model": model,
+            "messages": msgs,
+            "format": DREAM_JSON_SCHEMA,
+            "stream": False,
+            "think": False,
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "repeat_penalty": 1.05,
+            },
+        }
+
+    def _post(payload: dict) -> str:
+        req = urllib.request.Request(
+            f"{OLLAMA_HOST.rstrip('/')}/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         try:
-            return _extract_json_object(full).get("memories", [])
-        except Exception:
-            return _extract_json_object(text).get("memories", [])
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.URLError as e:
+            raise RuntimeError(
+                f"Ollama unreachable at {OLLAMA_HOST}: {e}. "
+                "Is `ollama serve` running, or is the daemon installed?"
+            ) from e
+        text = (body.get("message") or {}).get("content", "")
+        if not text:
+            raise RuntimeError(f"empty response from Ollama: {body}")
+        return text
+
+    def _try_parse(text: str, with_prefix: bool) -> list[dict] | None:
+        """Try the full pipeline of parse strategies. Returns None on total failure."""
+        candidates = []
+        if with_prefix:
+            candidates.append('{"memories":[' + text)
+        candidates.append(text)
+        for c in candidates:
+            try:
+                return json.loads(c).get("memories", [])
+            except Exception:
+                try:
+                    return _extract_json_object(c).get("memories", [])
+                except Exception:
+                    continue
+        return None
+
+    # Attempt 1: with assistant prefix (cheaper, usually wins).
+    text = _post(_build_payload(use_prefix=True))
+    parsed = _try_parse(text, with_prefix=True)
+    if parsed is not None:
+        return parsed
+
+    # PR-F #3: retry once without the prefix. If Ollama returned a complete
+    # JSON object on its own (rather than a continuation), the prepend-prefix
+    # path corrupts it; some daemons / models behave inconsistently between
+    # the two modes.
+    print("ollama: prefix-mode parse failed; retrying without assistant prefix", file=__import__("sys").stderr)
+    text2 = _post(_build_payload(use_prefix=False))
+    parsed2 = _try_parse(text2, with_prefix=False)
+    if parsed2 is not None:
+        return parsed2
+
+    raise ValueError(
+        f"ollama returned malformed JSON across two attempts. "
+        f"first response: {text[:200]!r}; retry response: {text2[:200]!r}"
+    )
 
 
 PROVIDERS: dict[str, Callable[..., list[dict]]] = {

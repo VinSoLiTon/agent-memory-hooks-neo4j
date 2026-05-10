@@ -279,23 +279,26 @@ def memory_archive(path: str):
 
 @app.route("/sessions")
 def sessions():
+    """PR-F #1: list by session_key (canonical) so cross-client raw-id
+    collisions can't silently merge views."""
     with driver().session() as s:
         rows = list(s.run(
             """
             MATCH (s:Session)
             OPTIONAL MATCH (s)-[:FIRST_EVENT|NEXT*0..]->(e:Event)
             WITH s, count(e) AS events
-            RETURN s.session_id AS sid, s.client AS client, s.created_at AS created,
+            RETURN coalesce(s.session_key, s.client + ':' + s.session_id) AS session_key,
+                   s.session_id AS sid, s.client AS client, s.created_at AS created,
                    s.last_dreamed_at AS dreamed, events
             ORDER BY s.created_at DESC LIMIT 200
             """
         ))
     body = "<h1>Sessions</h1>"
-    body += "<table><tr><th>session_id</th><th>client</th><th>created</th><th>events</th><th>dreamed</th></tr>"
+    body += "<table><tr><th>session_key</th><th>client</th><th>created</th><th>events</th><th>dreamed</th></tr>"
     for r in rows:
-        sid = r["sid"]
+        sk = r["session_key"]
         body += (
-            f'<tr><td><a class="mono" href="{url_for("session_view", sid=sid)}">{escape(sid[:40])}</a></td>'
+            f'<tr><td><a class="mono" href="{url_for("session_view", sid=sk)}">{escape(sk[:60])}</a></td>'
             f'<td><span class="pill">{escape(r["client"] or "?")}</span></td>'
             f'<td class="muted small">{fmt_ts(r["created"])}</td>'
             f'<td class="small">{r["events"]}</td>'
@@ -305,21 +308,39 @@ def sessions():
     return page("sessions", "Sessions", body)
 
 
-@app.route("/session/<sid>")
+@app.route("/session/<path:sid>")
 def session_view(sid: str):
+    """PR-F #1: query by session_key, accept session_id as fallback. If the
+    raw id collides across clients, render a chooser instead of merging."""
     with driver().session() as s:
+        candidates = list(s.run(
+            "MATCH (s:Session) WHERE s.session_key = $sid OR s.session_id = $sid "
+            "RETURN coalesce(s.session_key, s.client + ':' + s.session_id) AS sk, s.client AS client",
+            parameters={"sid": sid},
+        ))
+        if not candidates:
+            abort(404, f"no session matching {sid}")
+        if len(candidates) > 1:
+            body = f'<h1 class="mono">{escape(sid)} matches {len(candidates)} sessions</h1>'
+            body += "<p class='muted'>Pick one:</p><ul>"
+            for c in candidates:
+                body += f'<li><a class="mono" href="{url_for("session_view", sid=c["sk"])}">{escape(c["sk"])}</a> (client={escape(c["client"] or "?")})</li>'
+            body += "</ul>"
+            return page("sessions", sid, body)
+        session_key = candidates[0]["sk"]
+
         rows = list(s.run(
             """
-            MATCH (s:Session {session_id: $sid})-[:FIRST_EVENT|NEXT*0..]->(e:Event)
+            MATCH (s:Session {session_key: $sk})-[:FIRST_EVENT|NEXT*0..]->(e:Event)
             RETURN e.timestamp AS ts, e.event_name AS name, e.tool_name AS tool,
                    e.prompt AS prompt, e.tool_input AS ti, e.tool_response AS tr
             ORDER BY e.timestamp
             """,
-            parameters={"sid": sid},
+            parameters={"sk": session_key},
         ))
     if not rows:
-        abort(404, f"no events for session {sid}")
-    body = f'<h1 class="mono">session {escape(sid)}</h1>'
+        abort(404, f"no events for session {session_key}")
+    body = f'<h1 class="mono">session {escape(session_key)}</h1>'
     body += '<p class="muted">' + str(len(rows)) + " events</p>"
     for r in rows:
         head = f"<strong>{escape(r['name'] or '?')}</strong>"

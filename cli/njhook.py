@@ -236,6 +236,12 @@ def cmd_edit(args: argparse.Namespace) -> int:
 # --- sessions / session / stats --------------------------------------------
 
 def cmd_sessions(args: argparse.Namespace) -> int:
+    """List captured sessions.
+
+    PR-F #1: lists by `session_key` (the canonical primary key) so cross-client
+    raw-id collisions can't merge views. The session_id column is shown as
+    metadata for human readability.
+    """
     where, params = [], {}
     if args.client:
         where.append("s.client = $client")
@@ -248,7 +254,8 @@ def cmd_sessions(args: argparse.Namespace) -> int:
         + (("WHERE " + " AND ".join(where) + " ") if where else "")
         + "OPTIONAL MATCH (s)-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
         + "WITH s, count(e) AS events "
-        + "RETURN s.session_id AS sid, s.client AS client, s.created_at AS created, "
+        + "RETURN coalesce(s.session_key, s.client + ':' + s.session_id) AS session_key, "
+        + "       s.session_id AS sid, s.client AS client, s.created_at AS created, "
         + "       s.last_dreamed_at AS dreamed, events "
         + "ORDER BY s.created_at DESC LIMIT $limit"
     )
@@ -260,31 +267,56 @@ def cmd_sessions(args: argparse.Namespace) -> int:
     if not rows:
         print("(no sessions)")
         return 0
-    print(f"{'session_id':<40}  {'client':<12}  {'created':<19}  {'events':>6}  dreamed")
+    print(f"{'session_key':<60}  {'client':<12}  {'created':<19}  {'events':>6}  dreamed")
     for r in rows:
-        sid = r["sid"][:40] if r["sid"] else "?"
+        sk = (r["session_key"] or "?")[:60]
         c = (r["created"] or "")[:19].replace("T", " ")
         d_ = "yes" if r["dreamed"] else "—"
-        print(f"{sid:<40}  {r['client'] or '?':<12}  {c:<19}  {r['events']:>6}  {d_}")
+        print(f"{sk:<60}  {r['client'] or '?':<12}  {c:<19}  {r['events']:>6}  {d_}")
     return 0
 
 
 def cmd_session(args: argparse.Namespace) -> int:
+    """Walk events of one session.
+
+    PR-F #1: prefer matching by `session_key` (composite, unique). Accept raw
+    `session_id` as a convenience fallback — if it matches multiple sessions
+    across clients, list the candidates and ask for the full key.
+    """
+    sid = args.session_id
     with driver() as d, d.session() as s:
-        rows = list(
-            s.run(
-                """
-                MATCH (s:Session {session_id: $sid})-[:FIRST_EVENT|NEXT*0..]->(e:Event)
-                RETURN e.timestamp AS ts, e.event_name AS name, e.tool_name AS tool,
-                       e.prompt AS prompt, e.tool_input AS ti, e.tool_response AS tr
-                ORDER BY e.timestamp
-                """,
-                parameters={"sid": args.session_id},
-            )
-        )
+        # Resolve to a single session_key. If the user passed the composite key
+        # directly, this matches one session. If they passed a raw id and it
+        # collides across clients, we surface the ambiguity instead of merging.
+        candidates = list(s.run(
+            "MATCH (s:Session) WHERE s.session_key = $sid OR s.session_id = $sid "
+            "RETURN s.session_key AS sk, s.client AS client",
+            parameters={"sid": sid},
+        ))
+        if not candidates:
+            print(f"no session matching {sid!r}", file=sys.stderr)
+            return 1
+        if len(candidates) > 1:
+            print(f"raw session_id {sid!r} matches {len(candidates)} sessions across clients:", file=sys.stderr)
+            for c in candidates:
+                print(f"  {c['sk']}  (client={c['client']})", file=sys.stderr)
+            print("\nRe-run with the full session_key (e.g. claude_code:<id>).", file=sys.stderr)
+            return 1
+        session_key = candidates[0]["sk"]
+
+        rows = list(s.run(
+            """
+            MATCH (s:Session {session_key: $sk})-[:FIRST_EVENT|NEXT*0..]->(e:Event)
+            RETURN e.timestamp AS ts, e.event_name AS name, e.tool_name AS tool,
+                   e.prompt AS prompt, e.tool_input AS ti, e.tool_response AS tr
+            ORDER BY e.timestamp
+            """,
+            parameters={"sk": session_key},
+        ))
     if not rows:
-        print(f"no events for session {args.session_id}", file=sys.stderr)
+        print(f"no events for session {session_key}", file=sys.stderr)
         return 1
+    print(f"# session_key: {session_key}\n")
     for r in rows:
         head = f"[{(r['ts'] or '')[:19].replace('T',' ')}] {r['name'] or '?'}"
         if r["tool"]:
@@ -619,9 +651,13 @@ def cmd_backup(args: argparse.Namespace) -> int:
             payload["memories"].append(d_)
 
         if args.with_sessions:
+            # PR-F #2: ORDER BY e.timestamp before collect; otherwise the
+            # variable-length traversal returns events in arbitrary order and
+            # restore rethreads the linked list incorrectly.
             sess_rows = list(s.run(
                 "MATCH (s:Session) "
                 "OPTIONAL MATCH (s)-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
+                "WITH s, e ORDER BY e.timestamp "
                 "WITH s, collect(properties(e)) AS events "
                 "RETURN s.session_key AS session_key, s.session_id AS session_id, "
                 "       s.client AS client, s.created_at AS created_at, "
@@ -735,6 +771,26 @@ def cmd_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_migrate(_: argparse.Namespace) -> int:
+    """Run the full schema migration (drop legacy constraints, create the
+    canonical set, backfill session_key on pre-PR-B sessions). Idempotent.
+
+    PR-F #4: this used to run on every hook event, which made every event
+    pay for `SHOW CONSTRAINTS` plus several CREATE round-trips. Hooks now
+    only ensure the two MERGE-supporting UNIQUE constraints; everything
+    else lives here.
+    """
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
+    import schema as schema_mod  # type: ignore
+    with driver() as d:
+        report = schema_mod.run_full_migration(d)
+    print(f"dropped legacy constraints: {report['dropped_constraints'] or 'none'}")
+    print(f"backfilled session_key on:   {report['session_keys_backfilled']} session(s)")
+    print("created canonical constraints/indexes (idempotent)")
+    return 0
+
+
 def cmd_stats(_: argparse.Namespace) -> int:
     with driver() as d, d.session() as s:
         m_total = s.run("MATCH (m:Memory) RETURN count(m) AS n").single()["n"]
@@ -814,6 +870,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     pst = sub.add_parser("stats", help="counts by client / kind")
     pst.set_defaults(fn=cmd_stats)
+
+    pmg = sub.add_parser("migrate", help="run full schema migration (idempotent; run after install or upgrade)")
+    pmg.set_defaults(fn=cmd_migrate)
 
     pem = sub.add_parser(
         "embed-backfill",

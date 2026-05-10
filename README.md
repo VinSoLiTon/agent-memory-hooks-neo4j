@@ -71,6 +71,12 @@ export HOOKS_NEO4J_URI=bolt://localhost:7687
 export HOOKS_NEO4J_USER=neo4j
 export HOOKS_NEO4J_PASSWORD=password
 
+# Run schema migration once (idempotent; rerun after pulling upgrades).
+# Hooks themselves only ensure the two MERGE-supporting UNIQUE constraints
+# at runtime — the rest of the schema (legacy-constraint drops, indexes,
+# data backfills) lives behind this command so hot-path events stay cheap.
+./njhook.cmd migrate
+
 # Optional: enable semantic recall + dream-phase Ollama
 export EMBED_PROVIDER=ollama          # or openai
 ollama pull nomic-embed-text          # if using Ollama

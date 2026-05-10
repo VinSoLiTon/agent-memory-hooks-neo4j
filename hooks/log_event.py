@@ -64,35 +64,15 @@ def _read_transcript(path):
         return None
 
 
-def ensure_constraints(tx):
-    """Schema-only setup. Neo4j forbids mixing schema and data ops in one tx,
-    so the H1 data backfill happens separately in `_backfill_session_keys`."""
-    # H1: drop the legacy single-property UNIQUE constraint on session_id, if
-    # present, so different clients can reuse a session_id without collision.
-    try:
-        for record in tx.run("SHOW CONSTRAINTS YIELD name, labelsOrTypes, properties, type"):
-            labels = record.get("labelsOrTypes") or []
-            props = record.get("properties") or []
-            ctype = (record.get("type") or "").upper()
-            if "Session" in labels and props == ["session_id"] and "UNIQUE" in ctype:
-                tx.run(f"DROP CONSTRAINT `{record['name']}`")
-    except Exception:
-        # SHOW CONSTRAINTS not available; harmless on graphs that never had it.
-        pass
+def ensure_minimal_constraints(tx):
+    """PR-F #4: hot-path schema is now minimal — only the UNIQUE constraints
+    the MERGE statements depend on. Heavier work (legacy-constraint drops,
+    index creation, data backfills) lives in hooks/schema.py and runs from
+    `njhook migrate`. Each `CREATE CONSTRAINT IF NOT EXISTS` is a single
+    round-trip and a no-op when the constraint already exists.
+    """
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) REQUIRE s.session_key IS UNIQUE")
-    tx.run("CREATE INDEX session_id_lookup IF NOT EXISTS FOR (s:Session) ON (s.session_id)")
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (e:Event) REQUIRE e.event_id IS UNIQUE")
-    tx.run("CREATE FULLTEXT INDEX memory_fulltext IF NOT EXISTS FOR (m:Memory) ON EACH [m.content, m.path]")
-    tx.run("CREATE INDEX memory_project IF NOT EXISTS FOR (m:Memory) ON (m.project)")
-
-
-def _backfill_session_keys(tx):
-    """H1 data migration: heal pre-PR-B Sessions that lack a session_key.
-    Idempotent — no-op once everything is keyed."""
-    tx.run(
-        "MATCH (s:Session) WHERE s.session_key IS NULL "
-        "SET s.session_key = coalesce(s.client, 'unknown') + ':' + coalesce(s.session_id, 'unknown')"
-    )
 
 
 def log_event(data: dict, client: str):
@@ -141,10 +121,10 @@ def log_event(data: dict, client: str):
 
     driver = get_driver()
     with driver.session() as session:
-        session.execute_write(ensure_constraints)
-        # H1 backfill must run in its own tx (Neo4j forbids mixing schema +
-        # data writes); it's a no-op once all sessions have session_key set.
-        session.execute_write(_backfill_session_keys)
+        # PR-F #4: only the two MERGE-supporting UNIQUE constraints. The full
+        # migration (legacy-constraint drops, indexes, data backfills) ran via
+        # `njhook migrate`, not here.
+        session.execute_write(ensure_minimal_constraints)
         session.execute_write(_append_event, session_id, client, event_props)
     driver.close()
 

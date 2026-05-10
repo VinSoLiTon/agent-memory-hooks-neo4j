@@ -100,8 +100,10 @@ Register-ScheduledTask -TaskName "njhook-dream-nightly" `
 ```
 
 `run_dream.cmd` defaults `DREAM_PROVIDER=ollama` and
-`DREAM_OLLAMA_MODEL=gemma4:latest` (eval winner; latency irrelevant at 3 AM).
-Override via User-scope env vars. Logs at `dream/logs/dream_YYYY-MM-DD.log`.
+`DREAM_OLLAMA_MODEL=qwen3.5:latest` (chosen for clean output and ~5s latency
+— gemma4 had a merge-vs-replace pollution failure mode that consolidate
+can't fix within a single memory). Override via User-scope env vars. Logs
+at `dream/logs/dream_YYYY-MM-DD.log`.
 
 ## Schema
 
