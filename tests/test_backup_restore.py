@@ -227,6 +227,46 @@ def main() -> int:
         except FileNotFoundError:
             pass
 
+    # ---------------------------------------------------------------------
+    # PR-K: restoring a backup whose session has events:[] must clear the
+    # existing chain. Previously the wipe sat inside `if events:`, so
+    # empty-event restore preserved stale data and the graph didn't match
+    # the backup.
+    # ---------------------------------------------------------------------
+    out2 = Path(os.environ.get("TEMP", "/tmp")) / f"njhook-rt3-{SID}.json"
+    try:
+        cleanup()
+        seed()
+        backup = run_backup(out2)  # 3-event session
+        # Hand-edit the JSON so this session has no events.
+        for sess in backup["sessions"]:
+            if sess["session_key"] == f"claude_code:{SID}":
+                sess["events"] = []
+        out2.write_text(json.dumps(backup, indent=2), encoding="utf-8")
+        run_restore(out2)
+        with _driver() as d, d.session() as s:
+            row = s.run(
+                "MATCH (sess:Session {session_key: $sk}) "
+                "OPTIONAL MATCH (sess)-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
+                "RETURN count(DISTINCT e) AS n",
+                parameters={"sk": f"claude_code:{SID}"},
+            ).single()
+            rels = s.run(
+                "MATCH (sess:Session {session_key: $sk})-[r:FIRST_EVENT|LATEST_EVENT]->() "
+                "RETURN count(r) AS n",
+                parameters={"sk": f"claude_code:{SID}"},
+            ).single()
+        if row["n"] != 0:
+            failures.append(f"empty-events restore: expected 0 events, got {row['n']} (stale chain not pruned)")
+        if rels["n"] != 0:
+            failures.append(f"empty-events restore: FIRST_EVENT/LATEST_EVENT relationships still attached (got {rels['n']})")
+    finally:
+        cleanup()
+        try:
+            out2.unlink()
+        except FileNotFoundError:
+            pass
+
     if failures:
         for f in failures:
             print(f"  FAIL {f}")

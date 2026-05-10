@@ -874,22 +874,21 @@ def cmd_restore(args: argparse.Namespace) -> int:
                 "MERGE (s:Session {session_key: $sk}) SET s += $props",
                 parameters={"sk": sk, "props": sess_props},
             )
-            # PR-J #1: wipe ALL events reachable from this session before
-            # rebuilding the chain. Previously we deleted only the
-            # FIRST_EVENT / LATEST_EVENT relationships, which left the old
-            # NEXT chain (and any tail events past the new chain's length)
-            # reachable. That made restore unsafe for shorter / different
-            # backups. Now: detach-delete every Event reachable from this
-            # session — events are session-owned, so full replacement is
-            # the right semantic.
+            # PR-K: ALWAYS wipe the existing reachable chain — even when the
+            # backup's events list is empty. Previously the wipe was inside
+            # `if events:`, so restoring a backup whose session has zero
+            # events left the old FIRST_EVENT/NEXT/LATEST_EVENT chain intact,
+            # and the restored graph didn't match the backup. Restore should
+            # match the backup; if the backup says "this session has no
+            # events," the graph must reflect that.
             events = sess.get("events") or []
+            s.run(
+                "MATCH (s:Session {session_key: $sk}) "
+                "OPTIONAL MATCH (s)-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
+                "DETACH DELETE e",
+                parameters={"sk": sk},
+            )
             if events:
-                s.run(
-                    "MATCH (s:Session {session_key: $sk}) "
-                    "OPTIONAL MATCH (s)-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
-                    "DETACH DELETE e",
-                    parameters={"sk": sk},
-                )
                 prev = None
                 for i, e in enumerate(events):
                     eid = e.get("event_id")
