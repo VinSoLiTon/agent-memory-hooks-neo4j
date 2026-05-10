@@ -34,6 +34,7 @@ from neo4j import GraphDatabase
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from project import derive_project  # noqa: E402
+import embeddings  # noqa: E402
 
 NEO4J_URI = os.environ.get("HOOKS_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("HOOKS_NEO4J_USER", "neo4j")
@@ -61,13 +62,8 @@ def get_driver():
     return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 
-def _fulltext_search(session, query: str, limit: int = MAX_PROMPT_HITS, current_project: str | None = None) -> list:
-    """Fulltext search with optional in-project boost.
-
-    Pulls more raw hits than `limit` so the post-boost re-rank has room to move
-    project-matching memories into the top slots. Score returned to the caller
-    is the boosted score.
-    """
+def _fulltext_search(session, query: str, limit: int = MAX_PROMPT_HITS) -> list:
+    """Raw fulltext hits — Lucene over (m.content, m.path)."""
     raw_limit = max(limit * 3, limit + 5)
     cypher = """
     CALL db.index.fulltext.queryNodes('memory_fulltext', $query)
@@ -78,24 +74,59 @@ def _fulltext_search(session, query: str, limit: int = MAX_PROMPT_HITS, current_
     ORDER BY score DESC
     LIMIT $limit
     """
-    # Pass Cypher parameters via the `parameters` dict — using kwargs would
-    # collide with neo4j's `Session.run(query, ...)` first positional, since
-    # the Cypher parameter happens to be named `$query`.
     rows = list(session.run(
         cypher,
         parameters={"query": query, "min_score": MIN_FULLTEXT_SCORE, "limit": raw_limit},
     ))
-    if not rows:
-        return rows
-    # Re-rank with project boost.
-    boosted = []
-    for r in rows:
-        s = r["score"]
-        if current_project and r["project"] == current_project:
-            s += PROJECT_BOOST
-        boosted.append({"path": r["path"], "content": r["content"], "project": r["project"], "score": s})
-    boosted.sort(key=lambda x: x["score"], reverse=True)
-    return boosted[:limit]
+    return [{"path": r["path"], "content": r["content"], "project": r["project"], "score": r["score"]} for r in rows]
+
+
+def _vector_search(session, query: str, limit: int = MAX_PROMPT_HITS) -> list:
+    """Approximate-nearest-neighbor over the memory vector index. Returns []
+    if embeddings are disabled or the index isn't populated yet."""
+    if not embeddings.is_enabled():
+        return []
+    try:
+        qvec = embeddings.embed([query])
+        if not qvec:
+            return []
+    except Exception:
+        return []
+    raw_limit = max(limit * 3, limit + 5)
+    try:
+        rows = list(session.run(
+            """
+            CALL db.index.vector.queryNodes('memory_embeddings', $k, $qvec)
+            YIELD node, score
+            RETURN node.path AS path, node.content AS content,
+                   coalesce(node.project, '') AS project, score
+            """,
+            parameters={"qvec": qvec[0], "k": raw_limit},
+        ))
+    except Exception:
+        # No vector index yet, or unsupported on this Neo4j version. Silently fall back.
+        return []
+    return [{"path": r["path"], "content": r["content"], "project": r["project"], "score": r["score"]} for r in rows]
+
+
+def _hybrid_merge(fulltext: list, vector: list, current_project: str | None, limit: int) -> list:
+    """Combine fulltext and vector hits with Reciprocal Rank Fusion (k=60),
+    then apply the project-match boost as a tie-break / score nudge."""
+    k = 60
+    scores: dict[str, float] = {}
+    by_path: dict[str, dict] = {}
+    for rank, r in enumerate(fulltext):
+        scores[r["path"]] = scores.get(r["path"], 0.0) + 1.0 / (k + rank + 1)
+        by_path[r["path"]] = r
+    for rank, r in enumerate(vector):
+        scores[r["path"]] = scores.get(r["path"], 0.0) + 1.0 / (k + rank + 1)
+        by_path.setdefault(r["path"], r)
+    if current_project:
+        for p, _ in scores.items():
+            if by_path[p].get("project") == current_project:
+                scores[p] += PROJECT_BOOST * 0.05  # RRF scores are O(1/60) — boost in the same range
+    ordered = sorted(by_path.values(), key=lambda r: scores[r["path"]], reverse=True)
+    return ordered[:limit]
 
 
 def _extract_terms(prompt: str) -> list[str]:
@@ -162,16 +193,21 @@ def prompt_context(prompt: str, current_project: str | None = None) -> str:
         return ""
 
     with get_driver() as driver, driver.session() as s:
-        rows = _fulltext_search(s, prompt, current_project=current_project)
-
-        if not rows:
+        ft_rows = _fulltext_search(s, prompt)
+        if not ft_rows:
             terms = _extract_terms(prompt)
             if terms:
-                lucene_query = " OR ".join(terms)
-                rows = _fulltext_search(s, lucene_query, current_project=current_project)
+                ft_rows = _fulltext_search(s, " OR ".join(terms))
+        # Vector search runs against the verbatim prompt regardless — embeddings
+        # don't need stopword filtering. Returns [] when EMBED_PROVIDER is unset
+        # or the vector index isn't populated, so behavior degrades gracefully
+        # to fulltext-only.
+        vec_rows = _vector_search(s, prompt)
 
-    if not rows:
+    if not ft_rows and not vec_rows:
         return ""
+
+    rows = _hybrid_merge(ft_rows, vec_rows, current_project, MAX_PROMPT_HITS)
 
     parts = ["# Relevant memory for this prompt\n"]
     for r in rows:

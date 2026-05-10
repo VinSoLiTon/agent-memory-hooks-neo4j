@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from project import dominant_project  # noqa: E402
 from providers import get_provider, default_model  # noqa: E402
+import embeddings  # noqa: E402
 
 # Windows consoles default to cp1252; memories from Claude routinely include
 # em-dashes, arrows, smart quotes, etc. Force UTF-8 so the human-readable
@@ -185,22 +186,52 @@ def write_memories(driver, session_id: str, memories: list[dict], watermark: str
     cross-project and stay untagged so they surface in every session; everything
     else (project/, general/, etc.) is tagged with this project so recall can
     boost in-project hits.
+
+    If EMBED_PROVIDER is set, embeddings are computed in one batch call and
+    written alongside the memory. Failures fall back gracefully — content is
+    still saved without embedding.
     """
     now = datetime.now(timezone.utc).isoformat()
-    rows = [
-        {
+    valid = [m for m in memories if m.get("path") and m.get("content")]
+    if not valid:
+        return 0
+
+    embeds: list[list[float]] = []
+    embed_dim: int | None = None
+    if embeddings.is_enabled():
+        try:
+            texts = [embeddings.memory_text(m["path"], m["content"]) for m in valid]
+            embeds = embeddings.embed(texts)
+            embed_dim = len(embeds[0]) if embeds and embeds[0] else None
+        except Exception as e:
+            print(f"  warn: embedding failed, writing memories without vectors: {e}", file=sys.stderr)
+            embeds = []
+
+    rows = []
+    for i, m in enumerate(valid):
+        rows.append({
             "path": m["path"],
             "content": m["content"],
             "updated_at": now,
             "project": None
             if m["path"].startswith(("profile/", "tools/")) or not project
             else project,
-        }
-        for m in memories
-        if m.get("path") and m.get("content")
-    ]
+            "embedding": embeds[i] if embeds and i < len(embeds) else None,
+        })
+
     with driver.session() as ses:
         ses.run("CREATE CONSTRAINT IF NOT EXISTS FOR (m:Memory) REQUIRE m.path IS UNIQUE")
+        if embed_dim:
+            ses.run(
+                f"""
+                CREATE VECTOR INDEX memory_embeddings IF NOT EXISTS
+                FOR (m:Memory) ON m.embedding
+                OPTIONS {{ indexConfig: {{
+                  `vector.dimensions`: {embed_dim},
+                  `vector.similarity_function`: 'cosine'
+                }} }}
+                """
+            )
         ses.run(
             """
             MATCH (s:Session {session_id: $session_id})
@@ -211,6 +242,9 @@ def write_memories(driver, session_id: str, memories: list[dict], watermark: str
             SET m.content = row.content,
                 m.updated_at = row.updated_at,
                 m.project = coalesce(row.project, m.project)
+            FOREACH (_ IN CASE WHEN row.embedding IS NOT NULL THEN [1] ELSE [] END |
+                SET m.embedding = row.embedding
+            )
             MERGE (s)-[:DREAMED]->(m)
             MERGE (m)-[:DERIVED_FROM]->(s)
             """,

@@ -29,6 +29,10 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+# Bring in embeddings module (lives next to hooks/) for the backfill command.
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "hooks"))
+import embeddings  # noqa: E402
+
 NEO4J_URI = os.environ.get("HOOKS_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("HOOKS_NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.environ.get("HOOKS_NEO4J_PASSWORD", "password")
@@ -277,6 +281,71 @@ def cmd_session(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_embed_backfill(args: argparse.Namespace) -> int:
+    """Compute and store embeddings for memories that don't have them yet.
+
+    Requires EMBED_PROVIDER=openai|ollama in the env. Idempotent: re-run after
+    adding new memories or switching models (use --force to overwrite).
+    """
+    if not embeddings.is_enabled():
+        print("EMBED_PROVIDER is not set. Export EMBED_PROVIDER=openai or ollama and retry.", file=sys.stderr)
+        return 2
+
+    where = "" if args.force else "WHERE m.embedding IS NULL"
+    with driver() as d, d.session() as s:
+        rows = list(s.run(
+            f"MATCH (m:Memory) {where} RETURN m.path AS path, m.content AS content ORDER BY m.path"
+        ))
+        if not rows:
+            print("nothing to backfill")
+            return 0
+        print(f"backfilling {len(rows)} memories using EMBED_PROVIDER={embeddings.EMBED_PROVIDER} model={embeddings.model()}")
+
+        # Batch in chunks so we don't hit any per-call payload limit.
+        batch = max(1, args.batch_size)
+        dim_committed = False
+        total = 0
+        for i in range(0, len(rows), batch):
+            chunk = rows[i : i + batch]
+            texts = [embeddings.memory_text(r["path"], r["content"]) for r in chunk]
+            try:
+                embs = embeddings.embed(texts)
+            except Exception as e:
+                print(f"  batch {i}-{i+len(chunk)}: failed ({e}); aborting", file=sys.stderr)
+                return 1
+            if not dim_committed and embs:
+                d_ = len(embs[0])
+                s.run(
+                    f"""
+                    CREATE VECTOR INDEX memory_embeddings IF NOT EXISTS
+                    FOR (m:Memory) ON m.embedding
+                    OPTIONS {{ indexConfig: {{
+                      `vector.dimensions`: {d_},
+                      `vector.similarity_function`: 'cosine'
+                    }} }}
+                    """
+                )
+                dim_committed = True
+            payload = [
+                {"path": r["path"], "embedding": embs[j]}
+                for j, r in enumerate(chunk)
+                if j < len(embs)
+            ]
+            s.run(
+                """
+                UNWIND $rows AS row
+                MATCH (m:Memory {path: row.path})
+                SET m.embedding = row.embedding
+                """,
+                parameters={"rows": payload},
+            )
+            total += len(payload)
+            print(f"  {i+len(chunk):>4}/{len(rows)}  ({chunk[-1]['path']})")
+
+    print(f"\nembedded {total} memories")
+    return 0
+
+
 def cmd_stats(_: argparse.Namespace) -> int:
     with driver() as d, d.session() as s:
         m_total = s.run("MATCH (m:Memory) RETURN count(m) AS n").single()["n"]
@@ -349,6 +418,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     pst = sub.add_parser("stats", help="counts by client / kind")
     pst.set_defaults(fn=cmd_stats)
+
+    pem = sub.add_parser(
+        "embed-backfill",
+        help="compute embeddings for memories missing them (requires EMBED_PROVIDER)",
+    )
+    pem.add_argument("--force", action="store_true", help="re-embed all memories, not just those missing embeddings")
+    pem.add_argument("--batch-size", type=int, default=16)
+    pem.set_defaults(fn=cmd_embed_backfill)
 
     return p
 
