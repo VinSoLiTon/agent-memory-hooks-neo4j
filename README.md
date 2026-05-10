@@ -1,63 +1,66 @@
-# Agent Memory Hooks (Claude Code + Codex + Cursor)
+# Agent Memory Hooks (Claude Code · Codex · Cursor · Gemini)
 
-A two-stage memory system for [Claude Code](https://claude.com/claude-code),
-[Codex](https://developers.openai.com/codex/hooks), and
-[Cursor](https://www.cursor.com/), backed by Neo4j.
+A two-stage memory layer for [Claude Code](https://claude.com/claude-code),
+[Codex](https://developers.openai.com/codex/hooks),
+[Cursor](https://www.cursor.com/), and
+[Gemini CLI](https://github.com/google-gemini/gemini-cli), backed by Neo4j.
 
-1. **Hooks (online)** — capture every session event from either agent into a
-   shared graph as it happens.
-2. **Dream phase (offline)** — periodically read those events and distill
-   them into durable, markdown-style memories that future sessions can use.
+1. **Hooks (online)** — capture every session event from any of the four CLIs
+   into a shared graph as it happens, with privacy filters and per-CWD opt-out.
+2. **Dream phase (offline)** — periodically read those events through any of
+   three LLM providers (Anthropic / OpenAI / local Ollama) and distill durable
+   markdown memories that future sessions automatically receive.
 
 The hooks record *what happened*. The dream phase decides *what's worth
-remembering*. Both clients write into the same Neo4j instance; nodes are
-tagged with `client: "claude_code" | "codex" | "cursor"` so you can query
-across or within agents.
+remembering*. All four CLIs write into the same Neo4j instance; nodes carry
+`client: "claude_code" | "codex" | "cursor" | "gemini"`. Memory recall
+combines fulltext and vector (embedding) search and boosts in-project hits.
 
 ## Repo layout
 
 ```
 hooks/
-  log_event.py             # shared writer (takes --client)
-  inject_memory.py         # shared memory injector
-.claude/
-  settings.json            # registers hooks with Claude Code
-  hooks/
-    log_event.sh           # → hooks/log_event.py --client claude_code
-    inject_memory.sh       # → hooks/inject_memory.py --client claude_code
-.codex/
-  hooks.json               # registers hooks with Codex
-  hooks/
-    log_event.sh           # → hooks/log_event.py --client codex
-    inject_memory.sh       # → hooks/inject_memory.py --client codex
-.cursor/
-  hooks.json               # modern Cursor hook registration
-  settings.json            # legacy/compat Cursor hook registration
-  hooks/
-    log_event.sh           # → hooks/log_event.py --client cursor
-    inject_memory.sh       # → hooks/inject_memory.py --client cursor
+  log_event.py              # shared writer (takes --client)
+  inject_memory.py          # shared memory injector — hybrid (fulltext + vector)
+  privacy.py                # CWD opt-out + secret scrubbing
+  project.py                # derive project slug from cwd
+  embeddings.py             # embedding providers (openai / ollama)
+.claude/  .codex/  .cursor/  .gemini/
+  hooks/                    # .cmd wrappers (Windows) / .sh (POSIX)
+  settings.json | hooks.json
 dream/
-  dream.py                 # offline consolidation script
-  README.md                # dream-phase docs
-  requirements.txt
-requirements.txt           # hook deps (just neo4j driver)
-test_hooks.py              # smoke test for the hook writer
+  dream.py                  # offline consolidation
+  providers.py              # anthropic / openai / ollama adapters
+  prompts.py                # per-provider system prompts (Ollama gets few-shot)
+  consolidate.py            # LLM-merge near-duplicate memories + archive
+  eval.py                   # tiny pass/fail harness for prompt regressions
+  run_dream.cmd             # Windows Task Scheduler wrapper
+cli/njhook.py               # the njhook CLI (see "Subcommands" below)
+njhook.cmd                  # Windows launcher for the CLI
+dashboard/app.py            # local Flask UI on http://localhost:5000
+detect/patterns.py          # cross-session pattern detection
+tests/                      # unit tests (privacy, project)
+test_hooks.py               # integration test against a live Neo4j
 ```
 
 ## Stage 1 — Hooks
 
-Each session (Claude Code, Codex, or Cursor) becomes a linked list of events:
+Each session becomes a linked list of events:
 
 ```
-(Session {session_id, client}) -[:FIRST_EVENT]->  (Event) -[:NEXT]-> (Event) -> ...
-                               -[:LATEST_EVENT]-> (last Event)
+(Session {session_key, session_id, client}) -[:FIRST_EVENT]->  (Event) -[:NEXT]-> (Event) -> ...
+                                            -[:LATEST_EVENT]-> (last Event)
 ```
 
-Events captured: `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
-`PostToolUse`, `Stop`. Codex also exposes `PermissionRequest` (not currently
-wired up). Each `:Event` stores the raw hook payload — prompt, tool name,
-tool input, tool response, transcript snapshot, plus Codex-specific
-`turn_id` / `tool_use_id` / `last_assistant_message` when present.
+`session_key = "<client>:<session_id>"` so two clients can use the same raw
+`session_id` without colliding into one chain.
+
+Events captured: `SessionStart`, `UserPromptSubmit` / `BeforeAgent`,
+`PreToolUse` / `BeforeTool`, `PostToolUse` / `AfterTool`, `Stop` /
+`SessionEnd`. Each `:Event` stores the relevant hook payload — prompt, tool
+name, tool input, tool response — with secrets scrubbed before write.
+Transcripts are NOT captured by default (set `HOOKS_CAPTURE_TRANSCRIPT=1` to
+opt in; cap with `HOOKS_TRANSCRIPT_MAX_CHARS`).
 
 ### Setup
 
@@ -67,60 +70,144 @@ pip install -r requirements.txt
 export HOOKS_NEO4J_URI=bolt://localhost:7687
 export HOOKS_NEO4J_USER=neo4j
 export HOOKS_NEO4J_PASSWORD=password
+
+# Optional: enable semantic recall + dream-phase Ollama
+export EMBED_PROVIDER=ollama          # or openai
+ollama pull nomic-embed-text          # if using Ollama
 ```
 
-The hooks are already wired up:
-- **Claude Code**: `.claude/settings.json` — run Claude Code from this dir.
-- **Codex**: `.codex/hooks.json` — run Codex from this dir with
-  `[features] codex_hooks = true` enabled in `~/.codex/config.toml`.
-- **Cursor**: `.cursor/hooks.json` (preferred) or `.cursor/settings.json`
-  (legacy compatibility) — open this dir in Cursor.
+The hooks are already wired up at the project level — open this directory in
+your CLI of choice and they fire automatically:
 
-For Python dependencies, Cursor wrappers prefer `./.venv/bin/python` and
-fallback to `python3`. This avoids interpreter mismatches when Cursor runs in
-a different environment than your shell.
+| CLI | File | Notes |
+|---|---|---|
+| Claude Code | `.claude/settings.json` | Just run Claude Code in this dir. |
+| Codex | `.codex/hooks.json` | Set `[features] codex_hooks = true` in `~/.codex/config.toml`. |
+| Cursor | `.cursor/hooks.json` (modern) or `.cursor/settings.json` (legacy) | Open the folder. |
+| Gemini CLI | `.gemini/settings.json` | Run from this dir; uses `BeforeAgent` as user-prompt analog. |
 
-Both clients stream events into the same Neo4j instance; Session/Event nodes
-are tagged with the originating `client`.
+For **global capture** (any project, no per-repo glue) merge a `hooks` block
+into your user-level config (`~/.claude/settings.json`,
+`~/.gemini/settings.json`, `~/.codex/hooks.json`) pointing at the absolute
+path of the wrappers in this repo's `.claude/hooks/` etc.
 
-### Test
+### Privacy
+
+`hooks/privacy.py` runs on every captured event:
+
+- **CWD opt-out** — drop the event entirely if `cwd` is in
+  `HOOKS_OPT_OUT_PATHS` (semicolon-separated) or `~/.njhook/optout.txt`.
+- **Secret scrubbing** — regex-redact API keys (Anthropic, OpenAI, GitHub,
+  AWS, Slack, Stripe), JWTs, Bearer tokens, .env-style assignments, and PEM
+  private key blocks before write. `HOOKS_DISABLE_SCRUB=1` to bypass.
+
+### Tests
 
 ```bash
-python test_hooks.py    # requires a running Neo4j
+python tests/test_privacy.py       # 11 unit tests, no Neo4j required
+python tests/test_project.py       # 6 unit tests, no Neo4j required
+python test_hooks.py               # integration; needs a live Neo4j
 ```
 
 ## Stage 2 — Dream phase
 
-Reads sessions that have events newer than their `last_dreamed_at`
-watermark, asks Claude to extract durable memories, and upserts them as
-`:Memory` nodes whose `path` + `content` imitate a markdown file.
+Reads sessions newer than their `last_dreamed_at` watermark, distills durable
+markdown memories via your chosen LLM, upserts them as `:Memory` nodes (with
+embeddings if `EMBED_PROVIDER` is set).
 
 ```bash
 pip install -r dream/requirements.txt
-export ANTHROPIC_API_KEY=sk-ant-...
 
-python dream/dream.py              # all sessions with new events
-python dream/dream.py --since 24h  # only events from last 24h
-python dream/dream.py --dry-run    # preview without writing
+python dream/dream.py                              # default provider (anthropic)
+python dream/dream.py --since 24h                  # only recent events
+python dream/dream.py --dry-run                    # preview, don't write
+python dream/dream.py --provider ollama            # local, no API key
+python dream/dream.py --provider openai --model gpt-4o-mini
+python dream/dream.py --consolidate                # LLM-merge near-duplicates
+python dream/dream.py --archive --stale-days 60    # flag cold memories
 ```
 
-Memory paths are organized semantically:
+Provider precedence: `--provider` flag > `$DREAM_PROVIDER` > anthropic.
+Default models: `claude-opus-4-7`, `gpt-4o-mini`, `qwen3.5:latest`.
+
+### Scheduled (Windows Task Scheduler)
+
+The repo ships `dream/run_dream.cmd` (a wrapper that defaults to ollama +
+gemma4) and was registered via:
+
+```powershell
+$action  = New-ScheduledTaskAction -Execute "C:\Projects\njhook\dream\run_dream.cmd"
+$trigger = New-ScheduledTaskTrigger -Daily -At 3am
+Register-ScheduledTask -TaskName "njhook-dream-nightly" -Action $action -Trigger $trigger
+```
+
+Logs at `dream/logs/dream_YYYY-MM-DD.log`. See `dream/README.md` for details.
+
+### Eval harness
+
+```bash
+python dream/eval.py --provider ollama --model qwen3.5:latest
+```
+
+Seeds a synthetic Rust-engineer-at-Acme session, runs dream `--dry-run`,
+asserts JSON validity, ≥2 memories, path schema, project discrimination, and
+expected-keyword coverage. Cleans up after itself. Use it as a regression
+gate when tuning prompts or swapping models.
+
+## The `njhook` CLI
+
+```bash
+./njhook.cmd <subcommand>
+```
+
+| Subcommand | Purpose |
+|---|---|
+| `list [--kind X] [--project Y] [--include-archived]` | Tabular list of memories. |
+| `show <path>` | Print a memory's full content. |
+| `search <query>` | Fulltext-rank search (Lucene-escaped). |
+| `edit <path> [--create]` | Open in `$EDITOR` / Notepad, save back. |
+| `delete <path> [-y]` | Remove a memory. |
+| `sessions [--client X] [--since 7d]` | Captured sessions with event counts. |
+| `session <id> [-v]` | Walk events of one session. |
+| `stats` | Counts by client / kind / archived / embedded; top-accessed. |
+| `embed-backfill [--force]` | Compute embeddings for memories missing them. |
+| `reindex [--force] [--dry-run]` | Rebuild vector index when embedding model changes. |
+| `consolidate [--threshold 0.92] [--rounds 10]` | LLM-merge near-duplicates. |
+| `archive [--stale-days 60]` | Flag stale memories so they vanish from recall. |
+| `unarchive <path>` | Restore an archived memory. |
+| `patterns [--show ...] [--since 7d]` | Surface repeated commands / hot files / prompt clusters. |
+| `patterns --promote <id> [-y]` | Convert a detected pattern into a draft memory. |
+| `backup [--out F] [--with-embeddings] [--with-sessions]` | JSON dump. |
+| `restore --in F [--with-embeddings]` | Idempotent upsert from a backup. |
+
+## Web dashboard
+
+```bash
+pip install -r dashboard/requirements.txt
+python dashboard/app.py            # http://localhost:5000
+```
+
+View / edit / delete / archive memories, walk sessions, hybrid search.
+Binds to 127.0.0.1 by default; override with `DASHBOARD_HOST=0.0.0.0`.
+
+## Memory paths (conventions)
 
 ```
-profile/role.md
-profile/preferences.md
-tools/bash/common-flags.md
-project/<slug>.md
-general/<slug>.md
+profile/role.md                 # who the user is (cross-project)
+profile/preferences.md          # communication / workflow preferences (cross-project)
+tools/<binary>/usage.md         # tool conventions (cross-project)
+project/<slug>.md               # per-project rules and architecture
+general/<slug>.md               # cross-cutting notes
 ```
 
-See [dream/README.md](dream/README.md) for full docs (schema, re-run
-behavior, inspect/reset queries).
+`profile/*` and `tools/*` are cross-project (surface in every session).
+`project/*` and `general/*` are tagged with a project slug (derived from the
+cwd's nearest `.git` ancestor) and recall boosts in-project hits.
 
 ## Full graph schema
 
 ```
-(:Session {session_id, client, created_at, last_dreamed_at})
+(:Session {session_key, session_id, client, created_at, last_dreamed_at})
   -[:FIRST_EVENT]->  (:Event)
   -[:LATEST_EVENT]-> (:Event)
   -[:DREAMED]->      (:Memory)
@@ -131,15 +218,27 @@ behavior, inspect/reset queries).
          transcript, cwd})
   -[:NEXT]-> (:Event)
 
-(:Memory {path, content, updated_at})              // path unique
+(:Memory {path, content, updated_at, project, archived, archived_at,
+          access_count, last_accessed_at, embedding, embedding_model,
+          embedding_dim, consolidated_from, promoted_from_pattern})
   -[:DERIVED_FROM]-> (:Session)
+
+constraints: Session.session_key UNIQUE, Event.event_id UNIQUE, Memory.path UNIQUE
+indexes:     fulltext on (Memory.content, Memory.path), vector on Memory.embedding,
+             Memory.project, Session.session_id
 ```
 
 ## Suggested workflow
 
-1. Use Claude Code as normal — hooks capture everything.
-2. Run `python dream/dream.py` on a cadence that suits you (manually,
-   nightly cron, or after each session).
-3. Future sessions / agents can read `:Memory` nodes by path to get a fast
-   profile of who the user is, what tools work well, and what's going on
-   in the project.
+1. Use any of the four CLIs as normal — hooks capture everything (with
+   secrets scrubbed; opt out of specific projects via
+   `HOOKS_OPT_OUT_PATHS`).
+2. Let `njhook-dream-nightly` run at 3 AM, or trigger ad-hoc with
+   `python dream/dream.py --since 24h`.
+3. Future sessions automatically receive distilled memories on
+   `SessionStart` (profile + tools + current-project sections) and
+   `UserPromptSubmit` / `BeforeAgent` (hybrid recall ranked by RRF +
+   in-project boost).
+4. Curate with `njhook list / show / edit / delete`, surface candidates with
+   `njhook patterns --promote`, dedupe with `njhook consolidate`, prune cold
+   entries with `njhook archive`.
