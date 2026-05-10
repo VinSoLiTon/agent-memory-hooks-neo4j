@@ -348,6 +348,63 @@ def cmd_embed_backfill(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_patterns(args: argparse.Namespace) -> int:
+    """Surface repeated patterns across captured sessions.
+
+    Three detectors run in series; each is independently filterable via flags.
+    Output is human-readable; nothing is auto-promoted.
+    """
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "detect"))
+    import patterns as patterns_mod  # type: ignore
+
+    show = args.show or "all"
+    drv = driver()
+    try:
+        if show in ("commands", "all"):
+            print("\n=== Repeated commands ===")
+            cmds = patterns_mod.repeated_commands(drv, min_count=args.min_count, since=args.since)
+            if not cmds:
+                print("(none above threshold)")
+            for c in cmds:
+                print(f"  {c['count']:>3}×  {_short(c['command'], 90)}")
+                if c["cwds"] and len(c["cwds"]) <= 3:
+                    for cwd in c["cwds"]:
+                        print(f"        cwd: {cwd}")
+
+        if show in ("files", "all"):
+            print("\n=== Hot file paths ===")
+            files = patterns_mod.hot_files(drv, min_count=args.min_count, since=args.since)
+            if not files:
+                print("(none above threshold)")
+            for f in files:
+                tools = " ".join(f"{k}={v}" for k, v in f["tools"].items())
+                print(f"  {f['count']:>3}×  {f['path']}    [{tools}]")
+
+        if show in ("prompts", "all"):
+            print("\n=== Recurring prompt clusters ===")
+            if not embeddings.is_enabled():
+                print("(EMBED_PROVIDER not set — semantic clustering disabled)")
+            else:
+                clusters = patterns_mod.prompt_clusters(
+                    drv,
+                    min_cluster_size=args.min_count,
+                    similarity_threshold=args.similarity,
+                    since=args.since,
+                )
+                if not clusters:
+                    print("(no clusters above min size)")
+                for cl in clusters:
+                    print(f"\n  cluster of {cl['size']}: {_short(cl['exemplar'], 80)}")
+                    for p in cl["prompts"][1:4]:
+                        print(f"     - {_short(p, 80)}")
+                    if cl["size"] > 4:
+                        print(f"     … and {cl['size']-4} more")
+    finally:
+        pass  # driver() returns the singleton; don't close
+    return 0
+
+
 def cmd_consolidate(args: argparse.Namespace) -> int:
     """Delegate to dream/consolidate.py — LLM-merge near-duplicate memories."""
     # The consolidate module lives under dream/, which isn't on sys.path by default
@@ -500,6 +557,13 @@ def build_parser() -> argparse.ArgumentParser:
     pun = sub.add_parser("unarchive", help="restore an archived memory by path")
     pun.add_argument("path")
     pun.set_defaults(fn=cmd_unarchive)
+
+    ppat = sub.add_parser("patterns", help="surface repeated commands, hot files, and recurring prompt clusters")
+    ppat.add_argument("--show", choices=["commands", "files", "prompts", "all"], default="all")
+    ppat.add_argument("--min-count", type=int, default=3, help="threshold for a pattern to surface")
+    ppat.add_argument("--since", help="only events newer than e.g. 7d, 24h, 30m")
+    ppat.add_argument("--similarity", type=float, default=0.8, help="prompt-cluster cosine threshold")
+    ppat.set_defaults(fn=cmd_patterns)
 
     return p
 
