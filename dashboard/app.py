@@ -45,7 +45,11 @@ driver_singleton = None
 def driver():
     global driver_singleton
     if driver_singleton is None:
-        driver_singleton = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+        # PR-G #2: silence harmless "property does not exist" notifications.
+        driver_singleton = GraphDatabase.driver(
+            NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD),
+            notifications_disabled_classifications=["UNRECOGNIZED"],
+        )
     return driver_singleton
 
 

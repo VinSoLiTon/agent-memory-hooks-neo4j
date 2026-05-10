@@ -59,7 +59,11 @@ STOPWORDS = {
 
 
 def get_driver():
-    return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    # PR-G #2: silence harmless "property does not exist" notifications.
+    return GraphDatabase.driver(
+        NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD),
+        notifications_disabled_classifications=["UNRECOGNIZED"],
+    )
 
 
 _LUCENE_SPECIAL = re.compile(r'([+\-!(){}\[\]^"~*?:\\/]|&&|\|\|)')

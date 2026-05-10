@@ -40,7 +40,15 @@ NEO4J_PASSWORD = os.environ.get("HOOKS_NEO4J_PASSWORD", "password")
 
 
 def driver():
-    return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    # PR-G #2: silence the "property X does not exist" notifications. They
+    # fire for optional fields (archived, consolidated_from, embedding_model,
+    # promoted_from_pattern) on graphs where those properties haven't been
+    # set on any node yet — harmless but visually noisy on user-facing output.
+    # We deliberately keep DEPRECATION / PERFORMANCE / SECURITY warnings on.
+    return GraphDatabase.driver(
+        NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD),
+        notifications_disabled_classifications=["UNRECOGNIZED"],
+    )
 
 
 def _parse_since(s: str) -> str:
@@ -654,21 +662,54 @@ def cmd_backup(args: argparse.Namespace) -> int:
             # PR-F #2: ORDER BY e.timestamp before collect; otherwise the
             # variable-length traversal returns events in arbitrary order and
             # restore rethreads the linked list incorrectly.
+            # PR-G #1: --since filters by created_at; per-event tool_response
+            # can be capped or dropped to keep the dump from running into
+            # hundreds of MB on heavy graphs.
+            since_clause = ""
+            params: dict = {}
+            if args.since:
+                from datetime import timedelta as _td
+                import re as _re
+                m = _re.fullmatch(r"(\d+)([hdm])", args.since)
+                if not m:
+                    print(f"--since must be like 24h / 7d / 30m; got {args.since!r}", file=sys.stderr)
+                    return 2
+                n, unit = int(m.group(1)), m.group(2)
+                delta = {"h": _td(hours=n), "d": _td(days=n), "m": _td(minutes=n)}[unit]
+                params["since"] = (datetime.now(timezone.utc) - delta).isoformat()
+                since_clause = "WHERE coalesce(s.created_at, '') >= $since "
+
             sess_rows = list(s.run(
-                "MATCH (s:Session) "
+                "MATCH (s:Session) " + since_clause +
                 "OPTIONAL MATCH (s)-[:FIRST_EVENT|NEXT*0..]->(e:Event) "
                 "WITH s, e ORDER BY e.timestamp "
                 "WITH s, collect(properties(e)) AS events "
                 "RETURN s.session_key AS session_key, s.session_id AS session_id, "
                 "       s.client AS client, s.created_at AS created_at, "
-                "       s.last_dreamed_at AS last_dreamed_at, events"
+                "       s.last_dreamed_at AS last_dreamed_at, events",
+                parameters=params,
             ))
+
+            def _trim_event(e: dict) -> dict:
+                """Apply --no-tool-response / --max-field-chars to keep dumps sane."""
+                trimmed = dict(e)
+                if args.no_tool_response:
+                    trimmed.pop("tool_response", None)
+                    trimmed.pop("transcript", None)
+                cap = args.max_field_chars
+                if cap and cap > 0:
+                    for k in ("tool_response", "tool_input", "prompt", "transcript", "last_assistant_message"):
+                        v = trimmed.get(k)
+                        if isinstance(v, str) and len(v) > cap:
+                            trimmed[k] = v[:cap] + f"...[truncated {len(v) - cap} chars]"
+                return trimmed
+
             for r in sess_rows:
                 payload["sessions"].append({
                     "session_key": r["session_key"], "session_id": r["session_id"],
                     "client": r["client"], "created_at": r["created_at"],
                     "last_dreamed_at": r["last_dreamed_at"],
-                    "events": [e for e in r["events"] if e],
+                    "events": [_trim_event(e) for e in r["events"] if e],
                 })
 
     out_path.write_text(_json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -699,17 +740,8 @@ def cmd_restore(args: argparse.Namespace) -> int:
         return 0
 
     with driver() as d, d.session() as s:
-        # Memories
+        # Memories — explicit row-by-row upsert so we don't depend on APOC.
         s.run("CREATE CONSTRAINT IF NOT EXISTS FOR (m:Memory) REQUIRE m.path IS UNIQUE")
-        s.run(
-            """
-            UNWIND $rows AS row
-            MERGE (m:Memory {path: row.path})
-            SET m += apoc.map.removeKey(row, 'path')
-            """,
-            parameters={"rows": memories},
-        ) if False else None  # APOC may not be available; use the explicit form below
-
         for m in memories:
             props = {k: v for k, v in m.items() if k != "path"}
             if not args.with_embeddings:
@@ -915,7 +947,10 @@ def build_parser() -> argparse.ArgumentParser:
     pbk = sub.add_parser("backup", help="dump memories (and optionally sessions) to JSON")
     pbk.add_argument("--out", help="output file (default: njhook-backup-<timestamp>.json)")
     pbk.add_argument("--with-embeddings", action="store_true", help="include m.embedding vectors (large)")
-    pbk.add_argument("--with-sessions", action="store_true", help="include captured sessions and their events")
+    pbk.add_argument("--with-sessions", action="store_true", help="include captured sessions and their events (potentially huge)")
+    pbk.add_argument("--since", help="(with --with-sessions) only include sessions created within this window, e.g. 7d / 24h")
+    pbk.add_argument("--no-tool-response", action="store_true", help="(with --with-sessions) drop tool_response and transcript fields")
+    pbk.add_argument("--max-field-chars", type=int, default=0, help="(with --with-sessions) truncate per-event string fields to N chars (0 = unlimited)")
     pbk.set_defaults(fn=cmd_backup)
 
     prs = sub.add_parser("restore", help="load a backup file (idempotent upsert by path / session_key)")

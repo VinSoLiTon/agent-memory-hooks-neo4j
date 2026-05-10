@@ -59,7 +59,11 @@ from prompts import system_prompt_for  # type: ignore  # noqa: E402
 
 
 def get_driver():
-    return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    # PR-G #2: silence harmless "property does not exist" notifications.
+    return GraphDatabase.driver(
+        NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD),
+        notifications_disabled_classifications=["UNRECOGNIZED"],
+    )
 
 
 def parse_since(s: str) -> datetime:
@@ -77,15 +81,39 @@ def fetch_events(driver, session_id: str | None, since: datetime | None):
     A session is included if it has at least one event newer than its
     `last_dreamed_at` watermark (or has never been dreamed).
 
-    H1: grouping is now by session_key (composite "<client>:<session_id>"),
-    not session_id alone. The --session arg still accepts a raw session_id
-    for ergonomics; matching sessions across clients are processed separately.
+    PR-G #5: --session accepts either the composite session_key or a raw
+    session_id for ergonomics. If a raw id matches multiple sessions (across
+    clients), we DON'T silently process all of them — we exit with a
+    candidate list and ask for the explicit session_key. Same disambiguation
+    rule as `njhook session <id>`.
     """
     where, params = ["(s.last_dreamed_at IS NULL OR e.timestamp > s.last_dreamed_at)"], {}
+
     if session_id:
-        # Accept either the composite key or the raw id; OR-match for ergonomics.
-        where.append("(s.session_id = $session_id OR s.session_key = $session_id)")
-        params["session_id"] = session_id
+        # Resolve --session to a single session_key first.
+        with driver.session() as ses:
+            candidates = list(ses.run(
+                "MATCH (s:Session) "
+                "WHERE s.session_key = $sid OR s.session_id = $sid "
+                "RETURN coalesce(s.session_key, s.client + ':' + s.session_id) AS sk, "
+                "       s.client AS client",
+                parameters={"sid": session_id},
+            ))
+        if not candidates:
+            print(f"--session: no session matching {session_id!r}", file=sys.stderr)
+            return []
+        if len(candidates) > 1:
+            print(
+                f"--session: raw id {session_id!r} matches {len(candidates)} sessions across clients:",
+                file=sys.stderr,
+            )
+            for c in candidates:
+                print(f"  {c['sk']}  (client={c['client']})", file=sys.stderr)
+            print("\nRe-run with the explicit session_key (e.g. claude_code:<id>).", file=sys.stderr)
+            return []
+        where.append("s.session_key = $session_key")
+        params["session_key"] = candidates[0]["sk"]
+
     if since:
         where.append("e.timestamp >= $since")
         params["since"] = since.isoformat()
