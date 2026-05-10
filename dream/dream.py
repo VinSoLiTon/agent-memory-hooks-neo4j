@@ -28,6 +28,11 @@ from datetime import datetime, timezone, timedelta
 from anthropic import Anthropic
 from neo4j import GraphDatabase
 
+# Pull in project derivation from the hooks package so dream and capture
+# share a single source of truth for "what is the project of this cwd?".
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "hooks"))
+from project import dominant_project  # noqa: E402
+
 # Windows consoles default to cp1252; memories from Claude routinely include
 # em-dashes, arrows, smart quotes, etc. Force UTF-8 so the human-readable
 # preview doesn't crash before write_memories runs.
@@ -174,15 +179,28 @@ def call_claude(client: Anthropic, transcript: str, existing: str) -> list[dict]
     return json.loads(text[start : end + 1]).get("memories", [])
 
 
-def write_memories(driver, session_id: str, memories: list[dict], watermark: str) -> int:
+def write_memories(driver, session_id: str, memories: list[dict], watermark: str, project: str | None = None) -> int:
     """Upsert memories and advance the session's last_dreamed_at watermark.
 
     `watermark` is the timestamp of the latest event we just dreamed over —
     future runs will only re-dream the session if newer events arrive.
+
+    `project` is the dominant project slug for the session (derived from event
+    cwds). Memories whose path starts with profile/ or tools/ are considered
+    cross-project and stay untagged so they surface in every session; everything
+    else (project/, general/, etc.) is tagged with this project so recall can
+    boost in-project hits.
     """
     now = datetime.now(timezone.utc).isoformat()
     rows = [
-        {"path": m["path"], "content": m["content"], "updated_at": now}
+        {
+            "path": m["path"],
+            "content": m["content"],
+            "updated_at": now,
+            "project": None
+            if m["path"].startswith(("profile/", "tools/")) or not project
+            else project,
+        }
         for m in memories
         if m.get("path") and m.get("content")
     ]
@@ -195,7 +213,9 @@ def write_memories(driver, session_id: str, memories: list[dict], watermark: str
             WITH s
             UNWIND $rows AS row
             MERGE (m:Memory {path: row.path})
-            SET m.content = row.content, m.updated_at = row.updated_at
+            SET m.content = row.content,
+                m.updated_at = row.updated_at,
+                m.project = coalesce(row.project, m.project)
             MERGE (s)-[:DREAMED]->(m)
             MERGE (m)-[:DERIVED_FROM]->(s)
             """,
@@ -227,14 +247,16 @@ def main():
             return
         existing = render_existing(fetch_existing_memories(driver))
         for session_id, events in sessions:
-            print(f"\n=== dreaming over {session_id} ({len(events)} new events) ===")
+            project = dominant_project([e.get("cwd") for e in events])
+            label = f"{session_id}" + (f"  project={project}" if project else "")
+            print(f"\n=== dreaming over {label} ({len(events)} new events) ===")
             memories = call_claude(client, render_events(events), existing)
             for m in memories:
                 print(f"\n--- {m.get('path')} ---")
                 print(m.get("content", ""))
             if not args.dry_run:
                 watermark = events[-1].get("timestamp")
-                n = write_memories(driver, session_id, memories, watermark)
+                n = write_memories(driver, session_id, memories, watermark, project=project)
                 print(f"\n  wrote/updated {n} memories; watermark -> {watermark}")
     finally:
         driver.close()

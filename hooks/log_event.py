@@ -57,6 +57,7 @@ def ensure_constraints(tx):
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) REQUIRE s.session_id IS UNIQUE")
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (e:Event) REQUIRE e.event_id IS UNIQUE")
     tx.run("CREATE FULLTEXT INDEX memory_fulltext IF NOT EXISTS FOR (m:Memory) ON EACH [m.content, m.path]")
+    tx.run("CREATE INDEX memory_project IF NOT EXISTS FOR (m:Memory) ON (m.project)")
 
 
 def log_event(data: dict, client: str):
