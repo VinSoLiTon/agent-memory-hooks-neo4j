@@ -62,7 +62,10 @@ def _fulltext_search(session, query: str, limit: int = MAX_PROMPT_HITS) -> list:
     ORDER BY score DESC
     LIMIT $limit
     """
-    return list(session.run(cypher, query=query, min_score=MIN_FULLTEXT_SCORE, limit=limit))
+    # Pass Cypher parameters via the `parameters` dict — using kwargs would
+    # collide with neo4j's `Session.run(query, ...)` first positional, since
+    # the Cypher parameter happens to be named `$query`.
+    return list(session.run(cypher, parameters={"query": query, "min_score": MIN_FULLTEXT_SCORE, "limit": limit}))
 
 
 def _extract_terms(prompt: str) -> list[str]:

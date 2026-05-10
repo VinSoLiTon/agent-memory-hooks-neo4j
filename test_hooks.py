@@ -174,10 +174,10 @@ def test_inject_memory():
         text=True,
     )
     assert result.returncode == 0, f"inject_memory failed: {result.stderr}"
-    if result.stdout.strip():
-        output = json.loads(result.stdout)
-        ctx = output["hookSpecificOutput"]["additionalContext"]
-        assert "auth" in ctx.lower(), f"Auth memory not found via fulltext: {ctx}"
+    assert result.stdout.strip(), f"inject_memory produced no output (stderr: {result.stderr})"
+    output = json.loads(result.stdout)
+    ctx = output["hookSpecificOutput"]["additionalContext"]
+    assert "auth" in ctx.lower(), f"Auth memory not found via fulltext: {ctx}"
 
     # --- UserPromptSubmit: search for testing should find feedback ---
     result = subprocess.run(
@@ -187,10 +187,10 @@ def test_inject_memory():
         text=True,
     )
     assert result.returncode == 0, f"inject_memory failed: {result.stderr}"
-    if result.stdout.strip():
-        output = json.loads(result.stdout)
-        ctx = output["hookSpecificOutput"]["additionalContext"]
-        assert "mock" in ctx.lower() or "test" in ctx.lower(), f"Testing memory not found: {ctx}"
+    assert result.stdout.strip(), f"inject_memory produced no output (stderr: {result.stderr})"
+    output = json.loads(result.stdout)
+    ctx = output["hookSpecificOutput"]["additionalContext"]
+    assert "mock" in ctx.lower() or "test" in ctx.lower(), f"Testing memory not found: {ctx}"
 
     # Clean up
     with driver.session() as session:
