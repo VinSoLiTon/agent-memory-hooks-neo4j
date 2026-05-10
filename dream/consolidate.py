@@ -17,8 +17,6 @@ Archival needs neither.
 """
 from __future__ import annotations
 
-import json
-import os
 import sys
 from datetime import datetime, timezone, timedelta
 from typing import Callable
@@ -45,6 +43,9 @@ def _fetch_pair_candidates(session, threshold: float, limit: int) -> list[dict]:
 
     Uses the vector index for the right-hand side; m1 < m2 by path so each
     unordered pair appears at most once.
+
+    M4: surface vector-index errors instead of silently returning [], so a
+    misconfigured / missing index doesn't masquerade as 'nothing to merge'.
     """
     try:
         return list(session.run(
@@ -64,7 +65,13 @@ def _fetch_pair_candidates(session, threshold: float, limit: int) -> list[dict]:
             """,
             parameters={"threshold": threshold, "limit": limit},
         ))
-    except Exception:
+    except Exception as e:
+        print(
+            f"warn: vector pair-candidate query failed ({e}). "
+            "Either the memory_embeddings index doesn't exist (run "
+            "`njhook embed-backfill`) or no memories have embeddings yet.",
+            file=sys.stderr,
+        )
         return []
 
 

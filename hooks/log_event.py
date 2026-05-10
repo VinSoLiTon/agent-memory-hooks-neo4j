@@ -86,7 +86,10 @@ def log_event(data: dict, client: str):
         "cwd": cwd,
         "tool_name": data.get("tool_name"),
         "tool_use_id": data.get("tool_use_id"),
-        "tool_input": scrub(json.dumps(tool_input)) if tool_input else None,
+        # M1: empty dicts / strings are falsy in Python but legitimate hook
+        # payloads — distinguish "field missing" (None) from "field present but
+        # empty" (capture it as-is).
+        "tool_input": scrub(json.dumps(tool_input)) if tool_input is not None else None,
         "tool_response": scrub(_serialize_tool_response(tool_response))
         if tool_response is not None
         else None,

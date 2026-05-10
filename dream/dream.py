@@ -194,12 +194,10 @@ def write_memories(driver, session_id: str, memories: list[dict], watermark: str
     """
     now = datetime.now(timezone.utc).isoformat()
     valid = [m for m in memories if m.get("path") and m.get("content")]
-    if not valid:
-        return 0
 
     embeds: list[list[float]] = []
     embed_dim: int | None = None
-    if embeddings.is_enabled():
+    if valid and embeddings.is_enabled():
         try:
             texts = [embeddings.memory_text(m["path"], m["content"]) for m in valid]
             embeds = embeddings.embed(texts)
@@ -221,6 +219,16 @@ def write_memories(driver, session_id: str, memories: list[dict], watermark: str
         })
 
     with driver.session() as ses:
+        # H2: always advance the watermark, even when no memories were produced.
+        # Otherwise low-signal sessions get re-dreamed every run forever.
+        ses.run(
+            "MATCH (s:Session {session_id: $session_id}) SET s.last_dreamed_at = $watermark",
+            parameters={"session_id": session_id, "watermark": watermark},
+        )
+
+        if not rows:
+            return 0
+
         ses.run("CREATE CONSTRAINT IF NOT EXISTS FOR (m:Memory) REQUIRE m.path IS UNIQUE")
         if embed_dim:
             ses.run(
@@ -236,22 +244,25 @@ def write_memories(driver, session_id: str, memories: list[dict], watermark: str
         ses.run(
             """
             MATCH (s:Session {session_id: $session_id})
-            SET s.last_dreamed_at = $watermark
-            WITH s
             UNWIND $rows AS row
             MERGE (m:Memory {path: row.path})
             SET m.content = row.content,
                 m.updated_at = row.updated_at,
-                m.project = coalesce(row.project, m.project)
+                // M3: cross-project paths (profile/, tools/) ALWAYS clear any
+                // stale project tag. Project-scoped paths get the new project
+                // when supplied, else preserve the existing tag.
+                m.project = CASE
+                  WHEN row.path STARTS WITH 'profile/' OR row.path STARTS WITH 'tools/' THEN null
+                  WHEN row.project IS NOT NULL THEN row.project
+                  ELSE m.project
+                END
             FOREACH (_ IN CASE WHEN row.embedding IS NOT NULL THEN [1] ELSE [] END |
                 SET m.embedding = row.embedding
             )
             MERGE (s)-[:DREAMED]->(m)
             MERGE (m)-[:DERIVED_FROM]->(s)
             """,
-            session_id=session_id,
-            watermark=watermark,
-            rows=rows,
+            parameters={"session_id": session_id, "rows": rows},
         )
     return len(rows)
 

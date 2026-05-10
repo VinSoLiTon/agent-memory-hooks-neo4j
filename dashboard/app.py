@@ -339,6 +339,10 @@ def search():
     if not q:
         return redirect(url_for("memories"))
 
+    # Escape Lucene reserved chars so user queries with `:`, `-`, `(`, etc. work.
+    import re as _re
+    safe_q = _re.sub(r'([+\-!(){}\[\]^"~*?:\\/]|&&|\|\|)', r'\\\1', q)
+
     rows = []
     with driver().session() as s:
         try:
@@ -350,7 +354,7 @@ def search():
                 RETURN node.path AS path, node.content AS content, score, 'fulltext' AS source
                 ORDER BY score DESC LIMIT 20
                 """,
-                parameters={"q": q},
+                parameters={"q": safe_q},
             ).data())
         except Exception:
             pass

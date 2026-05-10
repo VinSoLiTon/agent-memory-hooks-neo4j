@@ -43,7 +43,18 @@ def driver():
 
 
 def _parse_since(s: str) -> str:
-    n, unit = int(s[:-1]), s[-1]
+    """Convert a duration like '24h' / '7d' / '30m' to an ISO timestamp.
+
+    M5: validate the input shape so a typo like '7day' or '24' produces a
+    clear error instead of an int(...) ValueError or KeyError.
+    """
+    import re as _re
+    m = _re.fullmatch(r"(\d+)([hdm])", s)
+    if not m:
+        raise argparse.ArgumentTypeError(
+            f"--since must look like '24h', '7d', or '30m'; got {s!r}"
+        )
+    n, unit = int(m.group(1)), m.group(2)
     delta = {"h": timedelta(hours=n), "d": timedelta(days=n), "m": timedelta(minutes=n)}[unit]
     return (datetime.now(timezone.utc) - delta).isoformat()
 
@@ -131,6 +142,9 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def cmd_search(args: argparse.Namespace) -> int:
+    # Escape Lucene reserved chars so prompts with `:`, `-`, `(`, etc. work.
+    import re as _re
+    safe_q = _re.sub(r'([+\-!(){}\[\]^"~*?:\\/]|&&|\|\|)', r'\\\1', args.query)
     with driver() as d, d.session() as s:
         rows = list(
             s.run(
@@ -141,7 +155,7 @@ def cmd_search(args: argparse.Namespace) -> int:
                 RETURN node.path AS path, node.content AS content, score
                 ORDER BY score DESC LIMIT $limit
                 """,
-                parameters={"q": args.query, "min": args.min_score, "limit": args.limit},
+                parameters={"q": safe_q, "min": args.min_score, "limit": args.limit},
             )
         )
     if not rows:

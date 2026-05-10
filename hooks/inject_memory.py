@@ -62,9 +62,28 @@ def get_driver():
     return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 
+_LUCENE_SPECIAL = re.compile(r'([+\-!(){}\[\]^"~*?:\\/]|&&|\|\|)')
+
+
+def _escape_lucene(query: str) -> str:
+    """Escape Lucene reserved characters so a user prompt with `:`, `?`, `(`,
+    `-`, etc. doesn't get parsed as Lucene operators (and doesn't raise).
+
+    Reserved (per Lucene query syntax): + - && || ! ( ) { } [ ] ^ " ~ * ? : \\ /
+    """
+    return _LUCENE_SPECIAL.sub(r"\\\1", query)
+
+
 def _fulltext_search(session, query: str, limit: int = MAX_PROMPT_HITS) -> list:
-    """Raw fulltext hits — Lucene over (m.content, m.path). Skips archived."""
+    """Raw fulltext hits — Lucene over (m.content, m.path). Skips archived.
+
+    H4 belt + suspenders: escape Lucene reserved chars before submission AND
+    return [] on any exception, so a malformed query never blocks the vector
+    fallback. Without this, a prompt like "what does -x mean?" raises a
+    parser error that bubbles up and skips _vector_search entirely.
+    """
     raw_limit = max(limit * 3, limit + 5)
+    safe_query = _escape_lucene(query)
     cypher = """
     CALL db.index.fulltext.queryNodes('memory_fulltext', $query)
     YIELD node, score
@@ -74,10 +93,15 @@ def _fulltext_search(session, query: str, limit: int = MAX_PROMPT_HITS) -> list:
     ORDER BY score DESC
     LIMIT $limit
     """
-    rows = list(session.run(
-        cypher,
-        parameters={"query": query, "min_score": MIN_FULLTEXT_SCORE, "limit": raw_limit},
-    ))
+    try:
+        rows = list(session.run(
+            cypher,
+            parameters={"query": safe_query, "min_score": MIN_FULLTEXT_SCORE, "limit": raw_limit},
+        ))
+    except Exception as e:
+        # Don't let fulltext failures kill recall; vector fallback still runs.
+        print(f"inject_memory: fulltext query failed ({e}); falling back to vector only", file=sys.stderr)
+        return []
     return [{"path": r["path"], "content": r["content"], "project": r["project"], "score": r["score"]} for r in rows]
 
 
