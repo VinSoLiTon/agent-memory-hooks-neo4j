@@ -183,18 +183,25 @@ gate when tuning prompts or swapping models.
 | `unarchive <path>` | Restore an archived memory. |
 | `patterns [--show ...] [--since 7d]` | Surface repeated commands / hot files / prompt clusters. |
 | `patterns --promote <id> [-y]` | Convert a detected pattern into a draft memory. |
-| `backup [--out F] [--with-embeddings] [--with-sessions]` | JSON dump. |
-| `restore --in F [--with-embeddings]` | Idempotent upsert from a backup. |
+| `backup [--out F] [--with-embeddings] [--with-sessions] [--since 7d] [--no-tool-response] [--max-field-chars N]` | JSON dump. Default = memories only (~10KB). `--with-sessions` is unbounded; the size flags are essential. |
+| `restore --in F [--with-embeddings] [--dry-run]` | Idempotent upsert from a backup. |
+| `migrate` | Run full schema migration (idempotent). Run once after install or upgrade. |
+| `health` | Stack-readiness check: Neo4j, schema, hook wrappers, user configs, Ollama, scheduled task, last dream log. |
 
 ## Web dashboard
 
 ```bash
 pip install -r dashboard/requirements.txt
-python dashboard/app.py            # http://localhost:5000
+python dashboard/app.py                  # http://localhost:5000  (read-only by default)
+DASHBOARD_WRITE=1 python dashboard/app.py # enable edit / delete / archive
 ```
 
-View / edit / delete / archive memories, walk sessions, hybrid search.
-Binds to 127.0.0.1 by default; override with `DASHBOARD_HOST=0.0.0.0`.
+View memories, walk sessions, hybrid search. Edit / archive / delete are
+**off by default** — set `DASHBOARD_WRITE=1` to enable. The read-only
+default is intentional: even though the server binds to 127.0.0.1 only,
+any local process can hit it and we don't want a casual click to mutate
+the graph. A "read-only" pill renders in the header when writes are
+disabled. Override the bind interface with `DASHBOARD_HOST=0.0.0.0`.
 
 ## Memory paths (conventions)
 

@@ -803,6 +803,199 @@ def cmd_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_health(args: argparse.Namespace) -> int:
+    """Run a series of stack-readiness checks. Exit 0 if all OK or only WARN;
+    exit 1 if any FAIL.
+
+    Designed so a fresh user can run `njhook health` and see, at a glance,
+    whether the whole pipeline (Neo4j, hook wrappers, user-level configs,
+    Ollama, scheduled task, recent dream success) is operational.
+    """
+    import json as _json
+    import urllib.request as _ureq
+    import urllib.error as _uerr
+    import subprocess as _sp
+    repo = Path(__file__).resolve().parents[1]
+    home = Path.home()
+    sys.path.insert(0, str(repo / "hooks"))
+    import embeddings as _embeddings  # type: ignore
+
+    OK, WARN, FAIL = "ok", "warn", "fail"
+    rows: list[tuple[str, str, str]] = []  # (status, name, message)
+
+    # --- 1. Neo4j reachable ---
+    try:
+        with driver() as d, d.session() as s:
+            s.run("RETURN 1").single()
+        rows.append((OK, "neo4j", f"reachable at {NEO4J_URI}"))
+    except Exception as e:
+        rows.append((FAIL, "neo4j", f"unreachable: {type(e).__name__}: {str(e)[:80]}"))
+        # If Neo4j is down, schema/index/dream-history checks are pointless.
+        return _print_health(rows)
+
+    # --- 2. Required constraints ---
+    expected_constraints = [
+        ("Session", ["session_key"]),
+        ("Event", ["event_id"]),
+        ("Memory", ["path"]),
+    ]
+    try:
+        with driver() as d, d.session() as s:
+            existing = list(s.run("SHOW CONSTRAINTS YIELD labelsOrTypes, properties, type"))
+        present = {(r["labelsOrTypes"][0], tuple(r["properties"]))
+                   for r in existing if "UNIQUE" in (r["type"] or "").upper()}
+        missing = [(lbl, props) for lbl, props in expected_constraints
+                   if (lbl, tuple(props)) not in present]
+        if missing:
+            mlist = ", ".join(f"{l}.{p[0]}" for l, p in missing)
+            rows.append((FAIL, "constraints", f"missing UNIQUE constraints: {mlist} — run `njhook migrate`"))
+        else:
+            rows.append((OK, "constraints", f"{len(expected_constraints)} required UNIQUE constraints present"))
+    except Exception as e:
+        rows.append((WARN, "constraints", f"could not list: {e}"))
+
+    # --- 3. Indexes (informational) ---
+    try:
+        with driver() as d, d.session() as s:
+            indexes = list(s.run("SHOW INDEXES YIELD name, type"))
+        names = {r["name"] for r in indexes}
+        wanted = {
+            "memory_fulltext": "fulltext",
+            "memory_project": "btree/range",
+            "session_id_lookup": "btree/range",
+        }
+        missing = [n for n in wanted if n not in names]
+        if missing:
+            rows.append((WARN, "indexes", f"missing: {', '.join(missing)} — run `njhook migrate`"))
+        else:
+            rows.append((OK, "indexes", f"{len(wanted)} required indexes present"))
+        if "memory_embeddings" in names:
+            rows.append((OK, "vector_index", "memory_embeddings present"))
+        else:
+            rows.append((WARN, "vector_index",
+                         "memory_embeddings not yet created — run `njhook embed-backfill`"))
+    except Exception as e:
+        rows.append((WARN, "indexes", f"could not list: {e}"))
+
+    # --- 4. Hook wrappers (project-level) ---
+    for client_dir in (".claude", ".codex", ".cursor", ".gemini"):
+        log_event = repo / client_dir / "hooks" / "log_event.cmd"
+        inject = repo / client_dir / "hooks" / "inject_memory.cmd"
+        if log_event.exists() and inject.exists():
+            rows.append((OK, f"hooks {client_dir}", "wrappers present"))
+        else:
+            rows.append((WARN, f"hooks {client_dir}",
+                         f"missing {log_event.name if not log_event.exists() else inject.name}"))
+
+    # --- 5. User-level configs ---
+    user_configs = [
+        (home / ".claude" / "settings.json", "hooks", "claude"),
+        (home / ".codex" / "hooks.json", None, "codex"),
+        (home / ".gemini" / "settings.json", "hooks", "gemini"),
+    ]
+    for path, required_key, label in user_configs:
+        if not path.exists():
+            rows.append((WARN, f"user config {label}", f"{path} not found — global capture disabled for this client"))
+            continue
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            rows.append((WARN, f"user config {label}", f"unreadable: {e}"))
+            continue
+        if required_key and required_key not in data:
+            rows.append((WARN, f"user config {label}", f"{path.name} missing '{required_key}' key"))
+        else:
+            rows.append((OK, f"user config {label}", str(path)))
+
+    # --- 6. Env vars ---
+    for var in ("HOOKS_NEO4J_URI", "HOOKS_NEO4J_USER", "HOOKS_NEO4J_PASSWORD"):
+        if os.environ.get(var):
+            rows.append((OK, f"env {var}", "set"))
+        else:
+            rows.append((WARN, f"env {var}", "unset (using default)"))
+    if os.environ.get("EMBED_PROVIDER"):
+        rows.append((OK, "env EMBED_PROVIDER", os.environ["EMBED_PROVIDER"]))
+    else:
+        rows.append((WARN, "env EMBED_PROVIDER", "unset — semantic recall disabled, fulltext only"))
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        rows.append((OK, "env ANTHROPIC_API_KEY", "set"))
+    else:
+        rows.append((WARN, "env ANTHROPIC_API_KEY", "unset — only ollama dream provider available"))
+
+    # --- 7. Ollama (only if EMBED_PROVIDER=ollama or DREAM_PROVIDER=ollama) ---
+    needs_ollama = os.environ.get("EMBED_PROVIDER") == "ollama" or os.environ.get("DREAM_PROVIDER") == "ollama"
+    if needs_ollama:
+        host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        try:
+            with _ureq.urlopen(f"{host}/api/tags", timeout=3) as resp:
+                tags = _json.loads(resp.read().decode("utf-8"))
+            models = [m["name"] for m in tags.get("models", [])]
+            rows.append((OK, "ollama daemon", f"reachable at {host} ({len(models)} models)"))
+            if _embeddings.is_enabled():
+                want = _embeddings.model()
+                if want in models or any(m.split(":")[0] == want.split(":")[0] for m in models):
+                    rows.append((OK, "ollama embed model", want))
+                else:
+                    rows.append((FAIL, "ollama embed model",
+                                 f"{want} not pulled — run `ollama pull {want.split(':')[0]}`"))
+        except Exception as e:
+            rows.append((FAIL, "ollama daemon", f"unreachable at {host}: {e}"))
+
+    # --- 8. Scheduled task ---
+    try:
+        p = _sp.run(["schtasks.exe", "/Query", "/TN", "njhook-dream-nightly", "/FO", "LIST"],
+                    capture_output=True, text=True, timeout=5)
+        if p.returncode == 0:
+            next_run = "?"
+            for line in p.stdout.splitlines():
+                if line.strip().startswith("Next Run Time:"):
+                    next_run = line.split(":", 1)[1].strip()
+                    break
+            rows.append((OK, "scheduled task", f"njhook-dream-nightly registered, next run {next_run}"))
+        else:
+            rows.append((WARN, "scheduled task", "njhook-dream-nightly not registered — see README"))
+    except FileNotFoundError:
+        rows.append((WARN, "scheduled task", "schtasks.exe not available (non-Windows host?)"))
+    except Exception as e:
+        rows.append((WARN, "scheduled task", f"check failed: {e}"))
+
+    # --- 9. Last dream log ---
+    log_dir = repo / "dream" / "logs"
+    if not log_dir.exists():
+        rows.append((WARN, "dream log", f"{log_dir} not yet created (no dream has run)"))
+    else:
+        logs = sorted(log_dir.glob("dream_*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not logs:
+            rows.append((WARN, "dream log", "no dream logs yet"))
+        else:
+            latest = logs[0]
+            tail = latest.read_text(encoding="utf-8", errors="replace").splitlines()[-3:]
+            tail_text = " | ".join(t.strip() for t in tail if t.strip())[:140]
+            mtime = datetime.fromtimestamp(latest.stat().st_mtime, tz=timezone.utc).isoformat()[:19]
+            if "exit=0" in tail_text:
+                rows.append((OK, "dream log", f"{latest.name} latest exit=0  ({mtime})"))
+            else:
+                rows.append((WARN, "dream log", f"{latest.name} latest didn't end exit=0: ...{tail_text[-80:]}"))
+
+    return _print_health(rows)
+
+
+def _print_health(rows: list[tuple[str, str, str]]) -> int:
+    glyph = {"ok": " OK ", "warn": "WARN", "fail": "FAIL"}
+    width = max(len(name) for _, name, _ in rows)
+    fail_count = 0
+    for status, name, msg in rows:
+        if status == "fail":
+            fail_count += 1
+        print(f"[{glyph[status]}]  {name:<{width}}  {msg}")
+    print()
+    counts = {s: 0 for s in ("ok", "warn", "fail")}
+    for status, _, _ in rows:
+        counts[status] += 1
+    print(f"summary: {counts['ok']} ok, {counts['warn']} warn, {counts['fail']} fail")
+    return 1 if fail_count else 0
+
+
 def cmd_migrate(_: argparse.Namespace) -> int:
     """Run the full schema migration (drop legacy constraints, create the
     canonical set, backfill session_key on pre-PR-B sessions). Idempotent.
@@ -905,6 +1098,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     pmg = sub.add_parser("migrate", help="run full schema migration (idempotent; run after install or upgrade)")
     pmg.set_defaults(fn=cmd_migrate)
+
+    phl = sub.add_parser("health", help="check Neo4j, schema, hook wrappers, configs, Ollama, scheduled task, last dream")
+    phl.set_defaults(fn=cmd_health)
 
     pem = sub.add_parser(
         "embed-backfill",

@@ -40,6 +40,7 @@ from project import dominant_project  # noqa: E402
 from providers import get_provider, default_model  # noqa: E402
 import embeddings  # noqa: E402
 import consolidate as consolidate_mod  # noqa: E402
+import quality as quality_mod  # noqa: E402
 
 # Windows consoles default to cp1252; memories from Claude routinely include
 # em-dashes, arrows, smart quotes, etc. Force UTF-8 so the human-readable
@@ -220,7 +221,13 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
     still saved without embedding.
     """
     now = datetime.now(timezone.utc).isoformat()
-    valid = [m for m in memories if m.get("path") and m.get("content")]
+    # PR-H #2: quality gate before any DB write — reject malformed paths,
+    # missing/invalid frontmatter, oversize bodies, and any body that contains
+    # a secret-shaped string the model regenerated. Each rejection is logged
+    # to stderr; the dream run continues with the remaining valid memories.
+    valid = quality_mod.validate_batch(
+        m for m in memories if m.get("path") and m.get("content")
+    )
 
     embeds: list[list[float]] = []
     embed_dim: int | None = None

@@ -55,6 +55,18 @@ def driver():
 
 app = Flask(__name__)
 
+# PR-H #3: write routes (edit, delete, archive, save) are gated behind an
+# explicit env var. Dashboard binds to localhost by default but the routes are
+# still destructive and any local process can hit them; require opt-in.
+WRITE_ENABLED = os.environ.get("DASHBOARD_WRITE") == "1"
+
+
+def _require_write():
+    """abort(403) when write routes are disabled. Use as the first line of
+    every POST/destructive handler."""
+    if not WRITE_ENABLED:
+        abort(403, "dashboard is read-only; set DASHBOARD_WRITE=1 to enable edit/delete/archive")
+
 
 # --- minimal styling, embedded so there are no static-file deps -----------
 
@@ -105,6 +117,7 @@ BASE = """<!doctype html>
   <a href="{{url_for('memories')}}" {% if active=='memories' %}class="active"{% endif %}>Memories</a>
   <a href="{{url_for('sessions')}}" {% if active=='sessions' %}class="active"{% endif %}>Sessions</a>
   <a href="{{url_for('stats')}}" {% if active=='stats' %}class="active"{% endif %}>Stats</a>
+  {% if read_only %}<span class="pill" title="set DASHBOARD_WRITE=1 to enable">read-only</span>{% endif %}
   <form action="{{url_for('search')}}" method="get">
     <input type="search" name="q" placeholder="search memories…" value="{{q or ''}}" autofocus>
   </form>
@@ -115,7 +128,10 @@ BASE = """<!doctype html>
 
 
 def page(active: str, title: str, body_html: str, q: str | None = None) -> str:
-    return render_template_string(BASE, active=active, title=title, body=Markup(body_html), q=q)
+    return render_template_string(
+        BASE, active=active, title=title, body=Markup(body_html), q=q,
+        read_only=not WRITE_ENABLED,
+    )
 
 
 def fmt_ts(ts) -> str:
@@ -207,18 +223,21 @@ def memory_view(path: str):
         abort(404, f"no memory at {path}")
 
     body = f'<h1 class="mono">{escape(r["path"])}</h1>'
-    body += '<div class="toolbar">'
-    body += f'<a href="{url_for("memory_edit", path=path)}">Edit</a>'
-    arch_label = "Unarchive" if r["archived"] else "Archive"
-    body += (
-        f'<form method="post" action="{url_for("memory_archive", path=path)}">'
-        f'<button>{arch_label}</button></form>'
-    )
-    body += (
-        f'<form method="post" action="{url_for("memory_delete", path=path)}" '
-        f'onsubmit="return confirm(\'Delete {escape(path)}?\')"><button style="color:var(--bad)">Delete</button></form>'
-    )
-    body += "</div>"
+    if WRITE_ENABLED:
+        body += '<div class="toolbar">'
+        body += f'<a href="{url_for("memory_edit", path=path)}">Edit</a>'
+        arch_label = "Unarchive" if r["archived"] else "Archive"
+        body += (
+            f'<form method="post" action="{url_for("memory_archive", path=path)}">'
+            f'<button>{arch_label}</button></form>'
+        )
+        body += (
+            f'<form method="post" action="{url_for("memory_delete", path=path)}" '
+            f'onsubmit="return confirm(\'Delete {escape(path)}?\')"><button style="color:var(--bad)">Delete</button></form>'
+        )
+        body += "</div>"
+    else:
+        body += '<p class="muted small">Read-only mode. Set <code>DASHBOARD_WRITE=1</code> to enable edit / archive / delete.</p>'
 
     body += '<div class="row"><div>updated</div><div>' + escape(fmt_ts(r["u"])) + "</div></div>"
     if r["project"]:
@@ -240,6 +259,7 @@ def memory_view(path: str):
 
 @app.route("/memory/<path:path>/edit", methods=["GET", "POST"])
 def memory_edit(path: str):
+    _require_write()
     if request.method == "POST":
         new_content = request.form.get("content", "")
         with driver().session() as s:
@@ -264,6 +284,7 @@ def memory_edit(path: str):
 
 @app.route("/memory/<path:path>/delete", methods=["POST"])
 def memory_delete(path: str):
+    _require_write()
     with driver().session() as s:
         s.run("MATCH (m:Memory {path: $path}) DETACH DELETE m", parameters={"path": path})
     return redirect(url_for("memories"))
@@ -271,6 +292,7 @@ def memory_delete(path: str):
 
 @app.route("/memory/<path:path>/archive", methods=["POST"])
 def memory_archive(path: str):
+    _require_write()
     with driver().session() as s:
         s.run(
             "MATCH (m:Memory {path: $path}) "
