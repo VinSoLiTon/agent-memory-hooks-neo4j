@@ -311,6 +311,59 @@ def main() -> int:
         except FileNotFoundError:
             pass
 
+    # ---------------------------------------------------------------------
+    # PR-M: --allow-malformed must SKIP bad records, not crash on them and
+    # not invent `unknown:unknown` sentinel session keys.
+    # ---------------------------------------------------------------------
+    bad2 = Path(os.environ.get("TEMP", "/tmp")) / f"njhook-bad2-{SID}.json"
+    try:
+        cleanup()
+        seed()
+        backup = run_backup(bad2)
+        # 1) Inject a memory with no path.
+        backup["memories"].append({"content": "orphan memory body without a path"})
+        # 2) Inject a session with no session_key, client, OR session_id —
+        #    must NOT create unknown:unknown.
+        backup["sessions"].append({"events": []})
+        bad2.write_text(json.dumps(backup, indent=2), encoding="utf-8")
+
+        # Pre-condition: no Session with key 'unknown:unknown' exists yet.
+        with _driver() as d, d.session() as s:
+            pre = s.run(
+                "MATCH (s:Session {session_key: 'unknown:unknown'}) RETURN count(s) AS n"
+            ).single()
+        assert pre["n"] == 0, "test setup: unknown:unknown session pre-existed"
+
+        p3 = subprocess.run(
+            ["python", str(NJHOOK), "restore", "--in", str(bad2), "--allow-malformed"],
+            capture_output=True, text=True,
+        )
+        # Must not crash with KeyError on 'path'.
+        if p3.returncode != 0:
+            failures.append(
+                f"--allow-malformed crashed on missing path/id: rc={p3.returncode}; "
+                f"stderr={p3.stderr[:300]!r}"
+            )
+        if "KeyError" in p3.stderr:
+            failures.append(f"--allow-malformed leaked KeyError: {p3.stderr[:300]!r}")
+        if "skipping" not in p3.stderr:
+            failures.append(f"--allow-malformed didn't print skip-counts line: {p3.stderr[:200]!r}")
+        with _driver() as d, d.session() as s:
+            post = s.run(
+                "MATCH (s:Session {session_key: 'unknown:unknown'}) RETURN count(s) AS n"
+            ).single()
+            if post["n"] != 0:
+                failures.append("--allow-malformed: unknown:unknown sentinel session was created")
+    finally:
+        # Cleanup the sentinel if it leaked, plus the test's own session.
+        with _driver() as d, d.session() as s:
+            s.run("MATCH (s:Session {session_key: 'unknown:unknown'}) DETACH DELETE s")
+        cleanup()
+        try:
+            bad2.unlink()
+        except FileNotFoundError:
+            pass
+
     if failures:
         for f in failures:
             print(f"  FAIL {f}")

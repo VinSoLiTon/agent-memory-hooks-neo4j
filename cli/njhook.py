@@ -893,10 +893,58 @@ def cmd_restore(args: argparse.Namespace) -> int:
             print(f"  - {e}", file=sys.stderr)
         if len(validation_errors) > 20:
             print(f"  ... and {len(validation_errors) - 20} more", file=sys.stderr)
-        print("\naborting; nothing was written. Fix the backup or pass --allow-malformed.",
-              file=sys.stderr)
         if not args.allow_malformed:
+            print("\naborting; nothing was written. Fix the backup or pass --allow-malformed.",
+                  file=sys.stderr)
             return 2
+        # PR-M: --allow-malformed used to print errors and then proceed into
+        # write code that ASSUMED the bad fields existed (KeyError on
+        # m['path']) or invented sentinel keys like "unknown:unknown" for
+        # sessions missing identifiers. Both were silent corruption modes.
+        # Now: filter the bad records out, log a single skip-counts line,
+        # and only write the salvageable subset.
+        skipped_memories = 0
+        kept_memories = []
+        for m in memories:
+            if isinstance(m, dict) and m.get("path") and "content" in m:
+                kept_memories.append(m)
+            else:
+                skipped_memories += 1
+
+        skipped_sessions = 0
+        kept_sessions = []
+        skipped_events_total = 0
+        for sess in sessions:
+            if not isinstance(sess, dict):
+                skipped_sessions += 1
+                continue
+            sk = sess.get("session_key")
+            if not sk and sess.get("client") and sess.get("session_id"):
+                sk = f"{sess['client']}:{sess['session_id']}"
+            if not sk:
+                # No identifier and no derivation — never invent unknown:unknown.
+                skipped_sessions += 1
+                continue
+            sess = dict(sess)
+            sess["session_key"] = sk
+            events = sess.get("events") or []
+            kept_events = []
+            if isinstance(events, list):
+                for e in events:
+                    if isinstance(e, dict) and e.get("event_id"):
+                        kept_events.append(e)
+                    else:
+                        skipped_events_total += 1
+            sess["events"] = kept_events
+            kept_sessions.append(sess)
+
+        print(
+            f"--allow-malformed: skipping {skipped_memories} memories, "
+            f"{skipped_sessions} sessions, {skipped_events_total} events with missing required fields",
+            file=sys.stderr,
+        )
+        memories = kept_memories
+        sessions = kept_sessions
 
     print(f"restoring from {in_path}: {len(memories)} memories, {len(sessions)} sessions")
 
@@ -924,7 +972,18 @@ def cmd_restore(args: argparse.Namespace) -> int:
         # Sessions
         s.run("CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) REQUIRE s.session_key IS UNIQUE")
         for sess in sessions:
-            sk = sess.get("session_key") or f"{sess.get('client','unknown')}:{sess.get('session_id','unknown')}"
+            # PR-M: NEVER fabricate `unknown:unknown`. By this point either
+            # _validate_backup() has accepted the session (session_key is
+            # present or derivable from client+session_id), or
+            # --allow-malformed already filtered out unidentifiable sessions
+            # and stamped session_key on the survivors. Defensively skip if
+            # somehow we got here without one.
+            sk = sess.get("session_key")
+            if not sk and sess.get("client") and sess.get("session_id"):
+                sk = f"{sess['client']}:{sess['session_id']}"
+            if not sk:
+                print(f"  skip: session has no identifier ({sess!r:.80})", file=sys.stderr)
+                continue
             sess_props = {k: v for k, v in sess.items() if k not in ("events", "session_key") and v is not None}
             sess_props["session_key"] = sk
             s.run(
