@@ -109,12 +109,21 @@ _PROVIDERS: dict[str, Callable[[list[str]], list[list[float]]]] = {
 
 
 def embed(texts: list[str]) -> list[list[float]]:
-    """Embed a batch of strings. Returns a list-of-lists (floats) aligned to input."""
+    """Embed a batch of strings. Returns a list-of-lists (floats) aligned to input.
+
+    Inputs are truncated to EMBED_MAX_CHARS first. Backends with a small context
+    window (e.g. Ollama nomic-embed-text, ~2048 tokens) return HTTP 400 on an
+    over-long input — and since we batch, one oversize text would fail the whole
+    batch, silently dropping embeddings for every memory in it. The path plus the
+    opening lines carry most of the similarity signal, so truncating is safe.
+    """
     if not is_enabled():
         return []
     if not texts:
         return []
-    return _PROVIDERS[EMBED_PROVIDER](texts)
+    cap = int(os.environ.get("EMBED_MAX_CHARS", "6000"))
+    capped = [t[:cap] for t in texts]
+    return _PROVIDERS[EMBED_PROVIDER](capped)
 
 
 def memory_text(path: str, content: str) -> str:
