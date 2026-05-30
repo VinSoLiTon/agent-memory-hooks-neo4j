@@ -1223,6 +1223,32 @@ def cmd_health(args: argparse.Namespace) -> int:
             else:
                 rows.append((WARN, "dream log", f"{latest.name} latest didn't end exit=0: ...{tail_text[-80:]}"))
 
+    # --- 10. Dream freshness ---
+    # The dream-log check above only inspects the last log *line*; a nightly
+    # that "ran" but distilled nothing (or hasn't run in weeks) still looks
+    # fine there. This checks the graph itself: how stale is the newest memory,
+    # and how many sessions are still awaiting their first dream.
+    try:
+        stale_days = int(os.environ.get("NJHOOK_FRESHNESS_DAYS", "7"))
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=stale_days)).isoformat()
+        with driver() as d, d.session() as s:
+            newest_mem = s.run("MATCH (m:Memory) RETURN max(m.updated_at) AS t").single()["t"]
+            undreamed = s.run(
+                "MATCH (s:Session)-[:LATEST_EVENT]->(:Event) WHERE s.last_dreamed_at IS NULL "
+                "RETURN count(DISTINCT s) AS n"
+            ).single()["n"]
+        if not newest_mem:
+            rows.append((WARN, "dream freshness", "no memories in graph — has the dream phase ever produced output?"))
+        elif newest_mem < cutoff:
+            rows.append((WARN, "dream freshness",
+                         f"newest memory updated {newest_mem[:10]} (>{stale_days}d ago); "
+                         f"{undreamed} session(s) awaiting first dream — distillation may be stalled"))
+        else:
+            rows.append((OK, "dream freshness",
+                         f"newest memory {newest_mem[:10]}; {undreamed} session(s) awaiting first dream"))
+    except Exception as e:
+        rows.append((WARN, "dream freshness", f"check failed: {e}"))
+
     return _print_health(rows)
 
 

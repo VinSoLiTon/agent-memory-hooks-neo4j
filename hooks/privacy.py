@@ -68,7 +68,10 @@ def is_optout(cwd: str | None) -> bool:
 
 # Each entry: (compiled regex, replacement). Replacement may use \g<name> back-refs.
 # Order matters — more specific patterns first so general ones don't pre-empt.
-_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+# High-confidence patterns: distinctive shapes that are almost certainly a
+# real secret wherever they appear. Safe to treat a match as a hard signal
+# (e.g. to REJECT a generated memory — see quality.py).
+_HIGH_CONFIDENCE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Anthropic API keys (sk-ant-api...)
     (re.compile(r"sk-ant-(?:api\d+-|admin-)[A-Za-z0-9_\-]{20,}"), "<REDACTED:anthropic_key>"),
     # OpenAI / generic sk-... keys (after Anthropic so the more specific one wins)
@@ -84,6 +87,18 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(sk|pk|rk)_(live|test)_[A-Za-z0-9]{20,}"), "<REDACTED:stripe_key>"),
     # JWT (header.payload.signature, base64url segments)
     (re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), "<REDACTED:jwt>"),
+    # PEM-style private key blocks
+    (
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+        "<REDACTED:private_key>",
+    ),
+]
+
+# Heuristic patterns: useful for scrubbing captured events, but too eager to
+# use as a hard reject signal — they match ordinary documentation such as
+# `HOOKS_NEO4J_PASSWORD=password` or `Authorization: Bearer <token>`. Applied
+# by scrub() (capture path) but NOT by scrub_high_confidence().
+_HEURISTIC_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # HTTP Bearer tokens (when something like 'Authorization: Bearer xyz' shows up)
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_.~+/=\-]{20,}"), "Bearer <REDACTED>"),
     # .env-style KEY=VALUE for sensitive-looking names. Keep the name visible
@@ -95,12 +110,10 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         r"\g<k>=<REDACTED>",
     ),
-    # PEM-style private key blocks
-    (
-        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
-        "<REDACTED:private_key>",
-    ),
 ]
+
+# Order matters — high-confidence (more specific) first so general ones don't pre-empt.
+_PATTERNS: list[tuple[re.Pattern[str], str]] = _HIGH_CONFIDENCE_PATTERNS + _HEURISTIC_PATTERNS
 
 
 def scrub(text):
@@ -116,6 +129,27 @@ def scrub(text):
     try:
         out = text
         for pat, repl in _PATTERNS:
+            out = pat.sub(repl, out)
+        return out
+    except Exception:
+        return text
+
+
+def scrub_high_confidence(text):
+    """Like scrub(), but only the high-confidence secret shapes — not the
+    KEY=VALUE / Bearer heuristics that also match ordinary documentation.
+
+    Used by the dream-phase quality gate to decide whether a generated memory
+    leaked a real secret, without rejecting legitimate config docs like
+    `HOOKS_NEO4J_PASSWORD=password`.
+    """
+    if os.environ.get("HOOKS_DISABLE_SCRUB") == "1":
+        return text
+    if not isinstance(text, str) or not text:
+        return text
+    try:
+        out = text
+        for pat, repl in _HIGH_CONFIDENCE_PATTERNS:
             out = pat.sub(repl, out)
         return out
     except Exception:
