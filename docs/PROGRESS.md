@@ -20,15 +20,15 @@ Legend: ✅ done & merged · 🔵 in progress / open PR · ⏸ deferred (with re
 | Phase | Status | Delivered by | Acceptance evidence | Open items |
 |---|---|---|---|---|
 | **A** — Non-destructive history | ✅ merged | #4 | 7 tests; revision-chain on content change; `consolidate` supersedes (negative test: no `DETACH DELETE`); recall filters `status='active'`; `:DreamRun`-`WROTE` provenance | ⚠ **A#6** backup/restore of the new fields + `:MemoryRevision`/`:SUPERSEDED_BY` lineage **not yet verified** |
-| **B** — Durable capture (spool/inbox/DLQ) | ⬜ not started | — | — | all (F4, Gap 1 canonical schema, Gap 8 metrics) |
+| **B** — Durable capture (spool/inbox/DLQ) | 🔵 in progress (PR #11) | #11 | PR-1: append-only fsync spool + `njhook ingest` worker + idempotent replay (Event.event_id = inbox) + DLQ + health backlog row; 6 tests; `HOOKS_CAPTURE_MODE=spool` (default `direct`) | PR-2: canonical OTel `gen_ai.*` schema (Gap 1), DLQ-rate alerting, read-time upcasting, flip default→spool once ingest scheduled |
 | **C** — Shared recall + ranking | ✅ merged (C1–C3) | #5, #6, #9 | shared `recall.py` (negative test: no surface keeps own ranking math); importance×recency ranking + value-density budget; `event_fulltext` + `event_search`; 7+4+3 tests | ⏸ **C4** cross-encoder reranker deferred; ⚠ explicit **vector-only fallback** ranking test not yet written |
 | **D** — Typed memory + admission gate | ⬜ not started | — | — | all (F3 A-MAC gate, 13-type vocab, Gap 9 eval suites); also delivers `:EXTRACTED_FROM` |
 | **E** — Conflict & review | ⬜ not started | — | — | all (F6: contradiction detection, review queue) — needs A, D |
-| **F** — Evolution UI (north star) | 🔵 slice 1 open | #10 | `memory_history` engine; CLI `history --diff`; dashboard `/memory/<path>/history` timeline + diffs; 2 tests | slice 2: `--as-of` recall (buildable now), lineage graph (needs D `EXTRACTED_FROM` + E `CONTRADICTS`), inline citation footer (Q6) |
+| **F** — Evolution UI (north star) | 🔵 slice 1 merged (#10) | #10 | `memory_history` engine; CLI `history --diff`; dashboard `/memory/<path>/history` timeline + diffs; 2 tests | slice 2: `--as-of` recall (buildable now), lineage graph (needs D `EXTRACTED_FROM` + E `CONTRADICTS`), inline citation footer (Q6) |
 | **G** — Universal interfaces (REST/MCP) | ⬜ not started | — | — | all (F8: REST, MCP, `recall`/`write-event` CLI, file renderers) — needs C |
 | **H** — Governance & eval | ⬜ not started | — | — | all (Gap 7 egress, Gap 12 anti-poisoning, Gap 9 CI evals) — needs B, D |
 
-**Rollup:** A ✅ · C ✅ (sans C4) · F partial — ~2.5 of 8 phases. Critical path **A → C → F** is the most advanced; B, D, E, G, H not started.
+**Rollup:** A ✅ · C ✅ (sans C4) · F slice 1 ✅ · B started — ~3 of 8 phases touched. Critical path **A → C → F** is the most advanced; D, E, G, H not started.
 
 ## Acceptance gaps to close for full alignment
 
@@ -59,19 +59,20 @@ Not numbered phases, but delivered and acceptance-evidenced in their PRs:
 | PR | State | Summary |
 |---|---|---|
 | #1 | merged | dream large-session fix + quality-gate fix + health freshness + 3 PM reschedule |
-| #2 | open | docs: HTML reference |
-| #3 | open | docs: research + implementation plan + roadmap (+ this ledger) |
+| #2 | merged | docs: HTML reference |
+| #3 | merged | docs: research + implementation plan + roadmap (+ this ledger) |
 | #4 | merged | Phase A — non-destructive history |
 | #5 | merged | Phase C1 — shared recall engine |
 | #6 | merged | Phase C2 — recency + importance ranking |
 | #7 | merged | nightly fix — scope existing-context |
 | #8 | merged | nightly fix — transcript cap + hybrid fallback |
 | #9 | merged | Phase C3 — raw event retrieval |
-| #10 | open | Phase F (1/2) — memory evolution history (timeline + diff) |
+| #10 | merged | Phase F (1/2) — memory evolution history (timeline + diff) |
+| #11 | open | Phase B (PR-1) — durable capture spool + ingest worker |
 
 ## Metrics
 
-- Tests: **19 → 49** over the program (live Neo4j + pure).
+- Tests: **19 → 55** over the program (live Neo4j + pure).
 - `njhook health`: **21 ok / 0 warn / 0 fail**.
 - Graph: ~20 memories, ~34 sessions, ~9.5k events; nightly task registered at 3 PM.
 

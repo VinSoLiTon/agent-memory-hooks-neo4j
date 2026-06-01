@@ -66,7 +66,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase B — Durable capture (reliability core)
 
-**Status:** ⬜ Not started.
+**Status:** 🔵 In progress (PR #11). **PR-1**: append-only fsync spool (`hooks/spool.py`) + `njhook ingest` worker (`hooks/ingest.py`) with idempotent replay (the `Event.event_id` UNIQUE constraint is the inbox) + DLQ + `health` backlog row; `HOOKS_CAPTURE_MODE=spool` (default `direct`, opt-in until ingest is scheduled). Deferred to **PR-2**: canonical OTel `gen_ai.*` event schema (Gap 1), DLQ-*rate* alerting, read-time upcasting, and flipping the default to `spool`.
 
 **Goal:** an event is never silently lost when Neo4j is unavailable. (Roadmap Gap 1 + 2.)
 

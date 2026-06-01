@@ -28,6 +28,14 @@ NEO4J_URI = os.environ.get("HOOKS_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("HOOKS_NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.environ.get("HOOKS_NEO4J_PASSWORD", "password")
 
+# Phase B: capture mode. "direct" (default) writes the event straight to Neo4j on
+# the hook hot path (legacy behaviour). "spool" appends a durable JSONL record and
+# returns immediately; the `njhook ingest` worker drains it into Neo4j later. Spool
+# mode means capture never silently fails when Neo4j is down — at the cost of
+# needing the ingest worker scheduled. Flip the default to "spool" once ingest runs.
+CAPTURE_MODE = os.environ.get("HOOKS_CAPTURE_MODE", "direct").lower()
+SCHEMA_VERSION = 1
+
 
 MAX_RESPONSE_CHARS = 4000
 
@@ -122,6 +130,23 @@ def log_event(data: dict, client: str):
         "transcript": scrub(_read_transcript(data.get("transcript_path"))),
     }
     event_props = {k: v for k, v in event_props.items() if v is not None}
+
+    # Phase B: in spool mode, append a durable record and return — the ingest
+    # worker writes it to Neo4j later. Keeps the hot path bounded and lossless
+    # even when Neo4j is unavailable.
+    if CAPTURE_MODE == "spool":
+        import spool
+        spool.append(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "client": client,
+                "session_id": session_id,
+                "app_id": data.get("app_id") or client,
+                "event_props": event_props,
+            },
+            day=(timestamp or "")[:10] or "unknown",
+        )
+        return
 
     driver = get_driver()
     with driver.session() as session:
