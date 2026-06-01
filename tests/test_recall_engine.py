@@ -296,3 +296,21 @@ def test_memory_lineage_returns_source_events_and_supersession(lineage_driver):
     assert any(e["event_id"] == "__lin_e1" for e in lin["source_events"])
     assert "general/__lin_old.md" in lin["supersedes"]
     assert lin["superseded_by"] == []
+
+
+# --- Phase F finish: citation footer + CONTRADICTS in lineage ---------------
+
+def test_render_prompt_includes_citation_footer():
+    md, paths = recall.render_prompt(
+        [{"path": "general/a.md", "content": "body"}, {"path": "general/b.md", "content": "body2"}]
+    )
+    assert "_memory used: general/a.md, general/b.md_" in md
+    assert paths == ["general/a.md", "general/b.md"]
+
+
+def test_memory_lineage_includes_contradicts(lineage_driver):
+    with lineage_driver.session() as s:
+        s.run("CREATE (c:Memory {path:'general/__lin_c.md', content:'x', status:'active'}) "
+              "WITH c MATCH (m:Memory {path:'general/__lin.md'}) MERGE (m)-[:CONTRADICTS]->(c)")
+        lin = recall.memory_lineage(s, "general/__lin.md")
+    assert "general/__lin_c.md" in lin["contradicts"]

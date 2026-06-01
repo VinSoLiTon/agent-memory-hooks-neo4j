@@ -32,7 +32,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 | **C — Shared recall + ranking** | ✅ merged (#5,#6,#9); ⏸ C4 | One ranking engine; use the signals already stamped | F5, Q3, F7, F9 | A |
 | **D — Typed memory + admission gate** | ⬜ not started | Structured records; block ungrounded dream output | F3, Gap 3 (13-type vocab), Gap 9 evals | A, C |
 | **E — Conflict & review** | ⬜ not started | Contradictions can't silently become truth | F6 | A, D |
-| **F — Evolution UI (north-star payoff)** | 🔵 slice 1 open (#10) | `--as-of` recall + human timeline/diff/lineage | F2, Q6 | A, C |
+| **F — Evolution UI (north-star payoff)** | ✅ done (#10, #14, #21) | `--as-of` recall + human timeline/diff/lineage | F2, Q6 | A, C |
 | **G — Universal interfaces** | ⬜ not started | Attach any LLM, not just hook-capable CLIs | F8, Gap 10 (REST/CLI/renderers) | C |
 | **H — Governance & eval** | ⬜ not started | Trustworthy over months | Gap 7 egress, Gap 12 anti-poisoning, Gap 9 CI evals | B, D |
 
@@ -146,7 +146,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase F — Evolution UI (north-star payoff)
 
-**Status:** 🔵 In progress. **Slice 1** ✅ merged (#10) — memory history: `history --diff` + dashboard timeline/diffs. **Slice 2** (PR #14) — `content_as_of` + `history --as-of` point-in-time reconstruction; `memory_lineage` (source events via `:EXTRACTED_FROM` + supersession links) in CLI + dashboard. **Remaining**: inline citation footer (Q6); the `:CONTRADICTS` strand of lineage (needs Phase E).
+**Status:** ✅ Done & fully aligned (#10, #14, #21). Memory history + `history --diff` + `history --as-of` point-in-time reconstruction; `memory_lineage` (source events via `:EXTRACTED_FROM` + supersession + `:CONTRADICTS`) in CLI + dashboard `/memory/<path>/history`; inline citation footer in injected context (Q6). All four acceptance bars met. The north-star "trace how a memory came to be" UI is complete.
 
 **Goal:** the human-facing "trace how this memory evolved" experience. (F2, Q6.)
 

@@ -295,6 +295,8 @@ def cmd_history(args: argparse.Namespace) -> int:
         print("  supersedes:   " + ", ".join(hist["supersedes"]))
     if hist.get("superseded_by"):
         print("  superseded by: " + ", ".join(hist["superseded_by"]))
+    if hist.get("contradicts"):
+        print("  contradicts:  " + ", ".join(hist["contradicts"]))
     if hist.get("source_events"):
         print(f"  extracted from {len(hist['source_events'])} source event(s):")
         for e in hist["source_events"]:
