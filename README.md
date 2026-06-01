@@ -143,7 +143,7 @@ gemma4) and was registered via:
 
 ```powershell
 $action  = New-ScheduledTaskAction -Execute "C:\Projects\njhook\dream\run_dream.cmd"
-$trigger = New-ScheduledTaskTrigger -Daily -At 3am
+$trigger = New-ScheduledTaskTrigger -Daily -At 3pm
 Register-ScheduledTask -TaskName "njhook-dream-nightly" -Action $action -Trigger $trigger
 ```
 
@@ -249,7 +249,7 @@ indexes:     fulltext on (Memory.content, Memory.path), vector on Memory.embeddi
 1. Use any of the four CLIs as normal — hooks capture everything (with
    secrets scrubbed; opt out of specific projects via
    `HOOKS_OPT_OUT_PATHS`).
-2. Let `njhook-dream-nightly` run at 3 AM, or trigger ad-hoc with
+2. Let `njhook-dream-nightly` run at 3 PM, or trigger ad-hoc with
    `python dream/dream.py --since 24h`.
 3. Future sessions automatically receive distilled memories on
    `SessionStart` (profile + tools + current-project sections) and

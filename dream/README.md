@@ -92,7 +92,7 @@ Use it as a regression gate when tuning prompts or swapping models.
 
 ```powershell
 $action  = New-ScheduledTaskAction -Execute "C:\Projects\njhook\dream\run_dream.cmd"
-$trigger = New-ScheduledTaskTrigger -Daily -At 3am
+$trigger = New-ScheduledTaskTrigger -Daily -At 3pm
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
   -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName "njhook-dream-nightly" `
