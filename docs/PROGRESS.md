@@ -25,7 +25,7 @@ Legend: ✅ done & merged · 🔵 in progress / open PR · ⏸ deferred (with re
 | **D** — Typed memory + admission gate | 🔵 in progress (#13, #16) | #13, #16 | PR-1 `:EXTRACTED_FROM` (heuristic top-K, bounded); PR-2 A-MAC grounding gate (`quality.grounding_score`; low-grounding NEW memory → `pending_review`, doesn't gate existing-active); 3+3 tests | D1 typed `kind` vocab (design — see deviations); D3 eval suites; model-cited attribution upgrade |
 | **E** — Conflict & review | 🔵 in progress (PR #15) | #15 | PR-1: `review.py` engine (auto-resolve by authority×recency) + `njhook review list/approve/reject/supersede/flag` + `pending_review`/`rejected` lifecycle (recall hides them — acceptance #2/#3/#4); 5 tests | PR-2: pre-commit LLM contradiction detection (E1, acceptance #1) + dashboard conflict view + auto-resolve apply |
 | **F** — Evolution UI (north star) | 🔵 slice 1 ✅; slice 2 open (#14) | #10, #14 | slice 1: `memory_history` + `history --diff` + dashboard timeline/diffs. slice 2: `content_as_of` + `history --as-of`; `memory_lineage` (source events via `EXTRACTED_FROM` + supersession) in CLI + dashboard; 4 tests | inline citation footer (Q6); `CONTRADICTS` lineage (needs Phase E) |
-| **G** — Universal interfaces (REST/MCP) | 🔵 in progress (PR #17) | #17 | PR-1: shared `service.py` core + `njhook recall`/`write-event` CLI + REST API (`/recall`,`/events`,`/health`, `api/server.py`) — all reuse `recall.py` + `log_event`; REST↔service parity test; 5 tests | PR-2: MCP server (4 tools); PR-3: file renderers (AGENTS.md/CLAUDE.md/Cursor/Gemini) |
+| **G** — Universal interfaces (REST/MCP) | 🔵 in progress (#17, #18) | #17, #18 | PR-1 shared `service.py` + `njhook recall`/`write-event` CLI + REST API (`/recall`,`/events`,`/health`); PR-2 MCP server (`api/mcp_server.py`, 4 tools over the same service, lazy `mcp` import); all reuse `recall.py`+`log_event`; parity test; 5+5 tests | PR-3: file renderers (AGENTS.md/CLAUDE.md/Cursor/Gemini) |
 | **H** — Governance & eval | ⬜ not started | — | — | all (Gap 7 egress, Gap 12 anti-poisoning, Gap 9 CI evals) — needs B, D |
 
 **Rollup:** A ✅ · C ✅ (sans C4) · F slice 1 ✅ · B started — ~3 of 8 phases touched. Critical path **A → C → F** is the most advanced; D, E, G, H not started.
@@ -76,11 +76,12 @@ Not numbered phases, but delivered and acceptance-evidenced in their PRs:
 | #14 | merged | Phase F (slice 2) — `--as-of` recall + memory lineage view |
 | #15 | merged | Phase E (PR-1) — conflict/review workflow (review CLI + auto-resolve) |
 | #16 | merged | Phase D (PR-2) — A-MAC grounding admission gate |
-| #17 | open | Phase G (PR-1) — shared service + `recall`/`write-event` CLI + REST API |
+| #17 | merged | Phase G (PR-1) — shared service + `recall`/`write-event` CLI + REST API |
+| #18 | open | Phase G (PR-2) — MCP server (4 tools over the shared service) |
 
 ## Metrics
 
-- Tests: **19 → 75** over the program (live Neo4j + pure).
+- Tests: **19 → 80** over the program (live Neo4j + pure).
 - `njhook health`: **21 ok / 0 warn / 0 fail**.
 - Graph: ~20 memories, ~34 sessions, ~9.5k events; nightly task registered at 3 PM.
 
