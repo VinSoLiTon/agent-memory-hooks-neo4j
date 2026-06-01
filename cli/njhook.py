@@ -176,6 +176,16 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ingest(args: argparse.Namespace) -> int:
+    """Drain the durable event spool into Neo4j (Phase B). Idempotent — safe to
+    re-run; events already in the graph are skipped, malformed records dead-lettered."""
+    import ingest as ingest_mod
+    with driver() as d:
+        r = ingest_mod.ingest(d)
+    print(f"ingest: {r['processed']} ingested, {r['skipped']} already-present, {r['dlq']} dead-lettered")
+    return 0
+
+
 def cmd_history(args: argparse.Namespace) -> int:
     """Show a memory's revision timeline — how it evolved over dream runs."""
     with driver() as d, d.session() as s:
@@ -1276,6 +1286,20 @@ def cmd_health(args: argparse.Namespace) -> int:
     except Exception as e:
         rows.append((WARN, "dream freshness", f"check failed: {e}"))
 
+    # --- 11. Event spool / ingest (Phase B) ---
+    try:
+        import spool as _spool
+        backlog = _spool.backlog_count()
+        dlq = _spool.dlq_count()
+        if dlq > 0:
+            rows.append((WARN, "event spool", f"{backlog} spooled; {dlq} dead-lettered — inspect {_spool._dlq_file()}"))
+        elif backlog > 0:
+            rows.append((OK, "event spool", f"{backlog} event(s) spooled awaiting `njhook ingest`"))
+        else:
+            rows.append((OK, "event spool", "empty (no backlog, no dead-letters)"))
+    except Exception as e:
+        rows.append((WARN, "event spool", f"check failed: {e}"))
+
     return _print_health(rows)
 
 
@@ -1376,6 +1400,9 @@ def build_parser() -> argparse.ArgumentParser:
     phi.add_argument("path")
     phi.add_argument("--diff", action="store_true", help="show unified diffs between consecutive versions")
     phi.set_defaults(fn=cmd_history)
+
+    pin = sub.add_parser("ingest", help="drain the durable event spool into Neo4j (Phase B; idempotent)")
+    pin.set_defaults(fn=cmd_ingest)
 
     pe = sub.add_parser("edit", help="open a memory in $EDITOR (notepad on Windows)")
     pe.add_argument("path")
