@@ -35,12 +35,15 @@ Output STRICT JSON only, no prose, matching this schema:
   "memories": [
     {
       "path": "profile/role.md",
-      "content": "---\\ntitle: User role\\nkind: profile\\n---\\n\\n<markdown body>"
+      "content": "---\\ntitle: User role\\nkind: profile\\n---\\n\\n<markdown body>",
+      "importance": 8
     }
   ]
 }
 
 Frontmatter must include `title` and `kind` (one of: profile, tool, project, general).
+Optionally include `importance`: an integer 1-10 for how broadly and durably useful \
+this memory is (10 = core identity / standing rule, 1 = trivial detail). Omit if unsure.
 The body should be tight markdown a future agent can read cold."""
 
 
@@ -83,8 +86,8 @@ Example input (events):
 
 Example output (JSON):
 {"memories":[
-  {"path":"profile/role.md","content":"---\\ntitle: User role\\nkind: profile\\n---\\n\\nRust systems engineer."},
-  {"path":"project/rust-safety.md","content":"---\\ntitle: Rust safety rules\\nkind: project\\n---\\n\\n- No `unsafe` blocks without explicit user approval.\\n- Rationale: UAF incident last sprint."}
+  {"path":"profile/role.md","content":"---\\ntitle: User role\\nkind: profile\\n---\\n\\nRust systems engineer.","importance":9},
+  {"path":"project/rust-safety.md","content":"---\\ntitle: Rust safety rules\\nkind: project\\n---\\n\\n- No `unsafe` blocks without explicit user approval.\\n- Rationale: UAF incident last sprint.","importance":7}
 ]}
 
 Note: the role memory went to profile/ (cross-project). The safety rule went to project/ \
@@ -114,6 +117,7 @@ DREAM_JSON_SCHEMA = {
                         "pattern": r"^(profile|tools|project|general)/[A-Za-z0-9._/-]+\.md$",
                     },
                     "content": {"type": "string", "minLength": 10},
+                    "importance": {"type": "integer", "minimum": 1, "maximum": 10},
                 },
                 "required": ["path", "content"],
             },

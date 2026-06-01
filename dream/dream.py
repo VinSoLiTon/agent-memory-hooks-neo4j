@@ -263,6 +263,18 @@ def call_provider(provider_fn, transcript: str, existing: str, model: str,
     )
 
 
+def _coerce_importance(v):
+    """Clamp a model-supplied importance to an int in [1,10]; None if absent/invalid.
+    Phase C2: importance is optional — a missing/garbage value leaves the field
+    unset and recall treats it as neutral."""
+    if v is None:
+        return None
+    try:
+        return max(1, min(10, int(v)))
+    except (TypeError, ValueError):
+        return None
+
+
 def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None, provider: str = "unknown", model: str = "unknown") -> int:
     """Upsert memories and advance the session's last_dreamed_at watermark.
 
@@ -307,6 +319,7 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
             "content": m["content"],
             "updated_at": now,
             "created_by": f"dream_{provider}",
+            "importance": _coerce_importance(m.get("importance")),
             "project": None
             if m["path"].startswith(("profile/", "tools/")) or not project
             else project,
@@ -373,6 +386,7 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
                 m.ingested_at = $now,
                 m.status = 'active',
                 m.created_by = row.created_by,
+                m.importance = coalesce(row.importance, m.importance),
                 m.valid_from = coalesce(m.valid_from, $now),
                 // M3: cross-project paths (profile/, tools/) ALWAYS clear any
                 // stale project tag. Project-scoped paths get the new project
