@@ -118,6 +118,7 @@ BASE = """<!doctype html>
   <a href="{{url_for('memories')}}" {% if active=='memories' %}class="active"{% endif %}>Memories</a>
   <a href="{{url_for('sessions')}}" {% if active=='sessions' %}class="active"{% endif %}>Sessions</a>
   <a href="{{url_for('stats')}}" {% if active=='stats' %}class="active"{% endif %}>Stats</a>
+  <a href="{{url_for('review_view')}}" {% if active=='review' %}class="active"{% endif %}>Review</a>
   {% if read_only %}<span class="pill" title="set DASHBOARD_WRITE=1 to enable">read-only</span>{% endif %}
   <form action="{{url_for('search')}}" method="get">
     <input type="search" name="q" placeholder="search memories…" value="{{q or ''}}" autofocus>
@@ -484,6 +485,76 @@ def search():
             )
         body += "</table>"
     return page("memories", f"search: {q}", body, q=q)
+
+
+@app.route("/review")
+def review_view():
+    """Phase E — conflict/review queue: memories awaiting review + contradiction
+    pairs, with resolve actions (write-gated)."""
+    import review as rv
+    with driver().session() as s:
+        pending = rv.list_pending(s)
+        pairs = rv.list_contradictions(s)
+
+    body = "<h1>Review queue</h1>"
+    if not WRITE_ENABLED:
+        body += '<p class="muted small">Read-only. Set <code>DASHBOARD_WRITE=1</code> to resolve from here.</p>'
+    elif pairs:
+        body += (f'<form method="post" action="{url_for("review_action", action="auto-resolve")}" style="margin-bottom:12px">'
+                 f'<button>Auto-resolve all conflicts (authority × recency)</button></form>')
+
+    body += "<h2>pending review</h2>"
+    if not pending:
+        body += "<p class='muted'>none</p>"
+    else:
+        body += "<table><tr><th>path</th><th>by</th><th>updated</th><th></th></tr>"
+        for m in pending:
+            actions = ""
+            if WRITE_ENABLED:
+                for act, label in (("approve", "Approve"), ("reject", "Reject")):
+                    actions += (f'<form method="post" action="{url_for("review_action", action=act)}" style="display:inline">'
+                                f'<input type="hidden" name="path" value="{escape(m["path"])}">'
+                                f'<button>{label}</button></form> ')
+            body += (f'<tr><td><a class="mono" href="{url_for("memory_view", path=m["path"])}">{escape(m["path"])}</a></td>'
+                     f'<td class="small muted">{escape(m["created_by"] or "?")}</td>'
+                     f'<td class="small muted">{escape(fmt_ts(m["updated_at"]))}</td><td>{actions}</td></tr>')
+        body += "</table>"
+
+    body += "<h2>contradiction pairs</h2>"
+    if not pairs:
+        body += "<p class='muted'>none</p>"
+    else:
+        body += "<table><tr><th>A</th><th>B</th><th></th></tr>"
+        for c in pairs:
+            actions = ""
+            if WRITE_ENABLED:
+                for winner, loser, label in ((c["a"], c["b"], "keep A"), (c["b"], c["a"], "keep B")):
+                    actions += (f'<form method="post" action="{url_for("review_action", action="supersede")}" style="display:inline">'
+                                f'<input type="hidden" name="winner" value="{escape(winner)}">'
+                                f'<input type="hidden" name="loser" value="{escape(loser)}">'
+                                f'<button>{label}</button></form> ')
+            body += (f'<tr><td class="mono small">{escape(c["a"])}</td><td class="mono small">{escape(c["b"])}</td>'
+                     f'<td>{actions}</td></tr>')
+        body += "</table>"
+    return page("review", "Review", body)
+
+
+@app.route("/review/<action>", methods=["POST"])
+def review_action(action: str):
+    _require_write()
+    import review as rv
+    with driver().session() as s:
+        if action == "approve":
+            rv.approve(s, request.form["path"])
+        elif action == "reject":
+            rv.reject(s, request.form["path"])
+        elif action == "supersede":
+            rv.supersede(s, request.form["winner"], request.form["loser"])
+        elif action == "auto-resolve":
+            rv.auto_resolve_all(s)
+        else:
+            abort(400, f"unknown review action: {action}")
+    return redirect(url_for("review_view"))
 
 
 @app.route("/stats")
