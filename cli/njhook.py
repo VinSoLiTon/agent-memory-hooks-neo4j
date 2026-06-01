@@ -184,6 +184,28 @@ def cmd_eval_retrieval(args: argparse.Namespace) -> int:
     return eval_retrieval.main()
 
 
+def cmd_render(args: argparse.Namespace) -> int:
+    """Phase G (PR-3) — render project memory into an agent context file
+    (AGENTS.md / CLAUDE.md / GEMINI.md / Cursor rules) as a managed block, so a
+    runtime that can't run hooks still gets memory. Same recall core the hook
+    injects; content outside the markers is left untouched."""
+    import render as rndr
+    root = args.root or os.getcwd()
+    targets = sorted(rndr.RENDER_TARGETS) if args.target == "all" else [args.target]
+    with driver() as d, d.session() as s:
+        if args.stdout:
+            for t in targets:
+                text, _ = rndr.proposed_text(s, t, root, cwd=root)
+                if len(targets) > 1:
+                    print(f"\n===== {t} -> {rndr.target_path(t, root)} =====")
+                print(text)
+            return 0
+        results = [rndr.render_target(s, t, root, cwd=root) for t in targets]
+    for r in results:
+        print(f"{r['action']:>9}  {r['target']:<7} {r['path']}")
+    return 0
+
+
 def cmd_recall(args: argparse.Namespace) -> int:
     """Phase G — recall memories for a prompt over the shared core (same ranking
     the hook uses). For programmatic use by non-hook runtimes."""
@@ -1596,6 +1618,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     pev = sub.add_parser("eval-retrieval", help="seed a golden set and score recall (hit@k + MRR) — ranking regression guard")
     pev.set_defaults(fn=cmd_eval_retrieval)
+
+    prn = sub.add_parser("render", help="render project memory into an agent context file (AGENTS.md/CLAUDE.md/GEMINI.md/Cursor) as a managed block")
+    prn.add_argument("--target", default="agents", choices=["agents", "claude", "gemini", "cursor", "all"],
+                     help="which context file to write (default: agents); 'all' writes every target")
+    prn.add_argument("--root", help="directory to write into (default: cwd); also the project scope")
+    prn.add_argument("--stdout", action="store_true", help="print the rendered file instead of writing it")
+    prn.set_defaults(fn=cmd_render)
 
     pe = sub.add_parser("edit", help="open a memory in $EDITOR (notepad on Windows)")
     pe.add_argument("path")
