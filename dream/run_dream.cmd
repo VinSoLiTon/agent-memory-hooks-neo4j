@@ -14,6 +14,13 @@ rem Weekly Anthropic Opus consolidate handles cross-memory dedup separately.
 if "%DREAM_PROVIDER%"=="" set "DREAM_PROVIDER=ollama"
 if "%DREAM_OLLAMA_MODEL%"=="" set "DREAM_OLLAMA_MODEL=qwen3.5:latest"
 
+rem Hybrid yield safety net: small local models distil nothing for large/real
+rem sessions (verified: qwen3.5 returns empty, gemma4 hallucinates). When the local
+rem model yields 0 memories for a session, that session is retried on Anthropic
+rem (full context, reliable). Only the sessions the local model can't handle egress.
+rem Set DREAM_FALLBACK_PROVIDER=none to keep the nightly fully local (no egress).
+if "%DREAM_FALLBACK_PROVIDER%"=="" set "DREAM_FALLBACK_PROVIDER=anthropic"
+
 echo [%date% %time%] dream run start (provider=%DREAM_PROVIDER% model=%DREAM_OLLAMA_MODEL%) >> "%LOG%"
 python dream\dream.py --since 36h >> "%LOG%" 2>&1
 echo [%date% %time%] dream run end exit=%errorlevel% >> "%LOG%"

@@ -241,40 +241,70 @@ def _summarize_tool_response(tr) -> str:
     return snippet
 
 
-def render_events(events: list[dict]) -> str:
-    """PR-C: trim render — keep prompt full, but tool I/O collapses to a
-    one-liner. Smaller models drown in raw transcript dumps; signal-bearing
-    fields are what actually inform memory extraction.
-    """
-    lines = []
-    for e in events:
-        head = f"[{e.get('timestamp', '?')}] {e.get('event_name', '?')}"
-        if e.get("tool_name"):
-            head += f" tool={e['tool_name']}"
-        lines.append(head)
-        if e.get("prompt"):
-            # Keep the full prompt — it's the highest-signal field.
-            lines.append(f"  prompt: {e['prompt']}")
-        if e.get("tool_input"):
-            ti = e["tool_input"]
-            try:
-                # Pull just the canonical command/file_path field if present.
-                ti_obj = json.loads(ti) if isinstance(ti, str) else ti
-                if isinstance(ti_obj, dict):
-                    key_field = (
-                        ti_obj.get("command")
-                        or ti_obj.get("file_path")
-                        or ti_obj.get("path")
-                        or str(ti_obj)
-                    )
-                    lines.append(f"  input:  {str(key_field)[:200]}")
-                else:
-                    lines.append(f"  input:  {str(ti)[:200]}")
-            except Exception:
+def _render_one(e: dict) -> str:
+    """PR-C trim render of a single event — full prompt, but tool I/O collapses
+    to a one-liner. Signal-bearing fields are what inform memory extraction."""
+    lines = [f"[{e.get('timestamp', '?')}] {e.get('event_name', '?')}"
+             + (f" tool={e['tool_name']}" if e.get("tool_name") else "")]
+    if e.get("prompt"):
+        lines.append(f"  prompt: {e['prompt']}")  # highest-signal field — keep full
+    if e.get("tool_input"):
+        ti = e["tool_input"]
+        try:
+            ti_obj = json.loads(ti) if isinstance(ti, str) else ti
+            if isinstance(ti_obj, dict):
+                key_field = (ti_obj.get("command") or ti_obj.get("file_path")
+                             or ti_obj.get("path") or str(ti_obj))
+                lines.append(f"  input:  {str(key_field)[:200]}")
+            else:
                 lines.append(f"  input:  {str(ti)[:200]}")
-        if e.get("tool_response"):
-            lines.append(f"  output: {_summarize_tool_response(e['tool_response'])}")
+        except Exception:
+            lines.append(f"  input:  {str(ti)[:200]}")
+    if e.get("tool_response"):
+        lines.append(f"  output: {_summarize_tool_response(e['tool_response'])}")
     return "\n".join(lines)
+
+
+def render_events(events: list[dict], max_chars: int | None = None) -> str:
+    """Render events to a transcript, optionally bounded to `max_chars`.
+
+    Real sessions run to thousands of events (hundreds of KB); feeding that whole
+    transcript to a small local model overflows its context and it returns nothing
+    (qwen3.5 produced 0 memories on every real session until this cap). When
+    `max_chars` is set we keep a coherent, signal-first slice: the most-recent
+    UserPromptSubmit/BeforeAgent prompts first (they carry the session's intent),
+    then the most-recent tool events that still fit, re-emitted in chronological
+    order with a note of how many were dropped. `max_chars=None` = unbounded
+    (frontier models handle the full transcript and distil it better)."""
+    blocks = [(i, bool(e.get("prompt")), _render_one(e)) for i, e in enumerate(events)]
+    if max_chars is None:
+        return "\n".join(text for _, _, text in blocks)
+
+    chosen: dict[int, str] = {}
+    used = 0
+    # 1) most-recent prompt-bearing events first — the session's intent.
+    for i, has_prompt, text in reversed(blocks):
+        if not has_prompt:
+            continue
+        if used + len(text) + 1 > max_chars:
+            continue
+        chosen[i] = text
+        used += len(text) + 1
+    # 2) fill the remaining budget with the most-recent tool events.
+    for i, has_prompt, text in reversed(blocks):
+        if has_prompt or i in chosen:
+            continue
+        if used + len(text) + 1 > max_chars:
+            continue
+        chosen[i] = text
+        used += len(text) + 1
+
+    out = [chosen[i] for i in sorted(chosen)]
+    omitted = len(blocks) - len(chosen)
+    if omitted > 0:
+        out.append(f"\n[... {omitted} lower-signal events omitted to fit the "
+                   f"transcript budget ({max_chars} chars) ...]")
+    return "\n".join(out)
 
 
 def render_existing(memories: list[dict], paths_only: bool = False) -> str:
@@ -458,6 +488,19 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
     return len(rows)
 
 
+def resolve_fallback(primary_name: str, fallback_name: str | None, has_key) -> str | None:
+    """Which provider to retry a 0-yield session on, or None if hybrid fallback is
+    off/unavailable. `has_key(name)` reports whether that provider's API key is set.
+    Returns None when the fallback is disabled ('none'/empty), equals the primary,
+    or is a hosted provider whose key isn't configured (degrade to local-only)."""
+    fb = (fallback_name or "").strip().lower()
+    if not fb or fb in ("none", "off", primary_name):
+        return None
+    if fb in ("anthropic", "openai") and not has_key(fb):
+        return None
+    return fb
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--session", help="dream over a single session_id")
@@ -528,19 +571,52 @@ def main():
         # session's project + cross-project profile/tools so a growing graph never
         # swamps the model.
         paths_only = provider_name not in ("anthropic", "openai")
+        # Local models also get a bounded transcript (large real sessions overflow
+        # their context → 0 memories); frontier models get the full transcript.
+        transcript_cap = int(os.environ.get("DREAM_TRANSCRIPT_MAX_CHARS", "16000")) if paths_only else None
+
+        # Hybrid fallback: small local models reliably fail to distil large, real
+        # sessions (qwen returns empty, gemma hallucinates). When the local primary
+        # yields 0 for a session, retry just that session on a frontier fallback
+        # (default Anthropic) with the full transcript + full existing context.
+        # Only the sessions the local model can't handle egress; the rest stay local.
+        fallback = None
+        if paths_only:
+            fb_name = resolve_fallback(
+                provider_name, os.environ.get("DREAM_FALLBACK_PROVIDER", "anthropic"),
+                lambda n: bool(os.environ.get("ANTHROPIC_API_KEY")) if n == "anthropic"
+                else bool(os.environ.get("OPENAI_API_KEY")),
+            )
+            if fb_name:
+                _, fb_fn = get_provider(fb_name)
+                fb_model = default_model(fb_name)
+                fallback = (fb_name, fb_fn, fb_model, system_prompt_for(fb_name, fb_model))
+                print(f"hybrid: primary={provider_name}/{model}, fallback={fb_name}/{fb_model} on 0-yield sessions")
+
         for session_key, events in sessions:
             project = dominant_project([e.get("cwd") for e in events])
             existing = render_existing(fetch_existing_memories(driver, project), paths_only=paths_only)
             label = f"{session_key}" + (f"  project={project}" if project else "")
             print(f"\n=== dreaming over {label} ({len(events)} new events) ===")
-            memories = call_provider(provider_fn, render_events(events), existing, model, system_prompt)
+            used_name, used_model = provider_name, model
+            memories = call_provider(provider_fn, render_events(events, max_chars=transcript_cap), existing, model, system_prompt)
+            if not memories and fallback:
+                fb_name, fb_fn, fb_model, fb_system = fallback
+                print(f"  local yielded 0 — falling back to {fb_name}/{fb_model} for this session")
+                try:
+                    fb_existing = render_existing(fetch_existing_memories(driver, project), paths_only=False)
+                    fb_mems = call_provider(fb_fn, render_events(events), fb_existing, fb_model, fb_system)
+                    if fb_mems:
+                        memories, used_name, used_model = fb_mems, fb_name, fb_model
+                except Exception as e:
+                    print(f"  fallback failed: {e}", file=sys.stderr)
             for m in memories:
                 print(f"\n--- {m.get('path')} ---")
                 print(m.get("content", ""))
             if not args.dry_run:
                 watermark = events[-1].get("timestamp")
-                n = write_memories(driver, session_key, memories, watermark, project=project, provider=provider_name, model=model)
-                print(f"\n  wrote/updated {n} memories; watermark -> {watermark}")
+                n = write_memories(driver, session_key, memories, watermark, project=project, provider=used_name, model=used_model)
+                print(f"\n  wrote/updated {n} memories (via {used_name}); watermark -> {watermark}")
     finally:
         driver.close()
 
