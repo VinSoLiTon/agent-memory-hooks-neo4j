@@ -42,6 +42,10 @@ def create_constraints_and_indexes(tx) -> None:
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (m:Memory) REQUIRE m.path IS UNIQUE")
     tx.run("CREATE FULLTEXT INDEX memory_fulltext IF NOT EXISTS FOR (m:Memory) ON EACH [m.content, m.path]")
     tx.run("CREATE INDEX memory_project IF NOT EXISTS FOR (m:Memory) ON (m.project)")
+    # Phase A: lifecycle status index. Recall filters to status='active'; the CLI and
+    # dashboard surface superseded/pending memories. Keeps those scans cheap as
+    # :MemoryRevision history and superseded nodes accumulate.
+    tx.run("CREATE INDEX memory_status IF NOT EXISTS FOR (m:Memory) ON (m.status)")
 
 
 def backfill_session_keys(tx) -> int:

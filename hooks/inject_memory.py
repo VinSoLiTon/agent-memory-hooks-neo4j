@@ -92,6 +92,7 @@ def _fulltext_search(session, query: str, limit: int = MAX_PROMPT_HITS) -> list:
     CALL db.index.fulltext.queryNodes('memory_fulltext', $query)
     YIELD node, score
     WHERE score > $min_score AND coalesce(node.archived, false) = false
+      AND coalesce(node.status, 'active') = 'active'
     RETURN node.path AS path, node.content AS content,
            coalesce(node.project, '') AS project, score
     ORDER BY score DESC
@@ -127,6 +128,7 @@ def _vector_search(session, query: str, limit: int = MAX_PROMPT_HITS) -> list:
             CALL db.index.vector.queryNodes('memory_embeddings', $k, $qvec)
             YIELD node, score
             WHERE coalesce(node.archived, false) = false
+              AND coalesce(node.status, 'active') = 'active'
             RETURN node.path AS path, node.content AS content,
                    coalesce(node.project, '') AS project, score
             """,
@@ -167,6 +169,7 @@ def _fetch_bucket(s, prefix: str, limit: int) -> list:
     return list(s.run(
         "MATCH (m:Memory) WHERE m.path STARTS WITH $prefix "
         "AND coalesce(m.archived, false) = false "
+        "AND coalesce(m.status, 'active') = 'active' "
         "RETURN m.path AS path, m.content AS content "
         "ORDER BY coalesce(m.updated_at, '') DESC, m.path "
         "LIMIT $limit",
@@ -179,6 +182,7 @@ def _fetch_project(s, project: str, limit: int) -> list:
         "MATCH (m:Memory) WHERE m.project = $project "
         "AND NOT (m.path STARTS WITH 'profile/' OR m.path STARTS WITH 'tools/') "
         "AND coalesce(m.archived, false) = false "
+        "AND coalesce(m.status, 'active') = 'active' "
         "RETURN m.path AS path, m.content AS content "
         "ORDER BY coalesce(m.updated_at, '') DESC, m.path "
         "LIMIT $limit",
