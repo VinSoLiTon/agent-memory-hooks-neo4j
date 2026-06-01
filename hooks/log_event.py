@@ -22,7 +22,7 @@ from neo4j import GraphDatabase
 
 # privacy.py lives next to this script; allow direct invocation regardless of cwd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from privacy import is_optout, scrub  # noqa: E402
+from privacy import is_optout, scrub, sensitivity_for  # noqa: E402
 
 NEO4J_URI = os.environ.get("HOOKS_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("HOOKS_NEO4J_USER", "neo4j")
@@ -128,6 +128,10 @@ def log_event(data: dict, client: str):
         "stop_hook_active": data.get("stop_hook_active"),
         "transcript_path": data.get("transcript_path"),
         "transcript": scrub(_read_transcript(data.get("transcript_path"))),
+        # Phase H: tag high-sensitivity events (cwd under HOOKS_SENSITIVE_PATHS) so
+        # the dream phase can keep them off remote providers. Only 'high' is stored;
+        # 'normal' is the implicit default (stays None → filtered out below).
+        "sensitivity": (lambda s: s if s == "high" else None)(sensitivity_for(cwd)),
     }
     event_props = {k: v for k, v in event_props.items() if v is not None}
 

@@ -571,6 +571,13 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
     return len(rows)
 
 
+def egress_blocked(provider_name: str, session_sensitive: bool, allow_egress: bool) -> bool:
+    """Phase H egress policy: a high-sensitivity session must not be sent to a
+    remote dream provider (anthropic/openai) unless DREAM_ALLOW_SENSITIVE_EGRESS=1.
+    Local (ollama) is always allowed. Returns True when the call must be skipped."""
+    return provider_name in ("anthropic", "openai") and session_sensitive and not allow_egress
+
+
 def resolve_fallback(primary_name: str, fallback_name: str | None, has_key) -> str | None:
     """Which provider to retry a 0-yield session on, or None if hybrid fallback is
     off/unavailable. `has_key(name)` reports whether that provider's API key is set.
@@ -676,14 +683,25 @@ def main():
                 fallback = (fb_name, fb_fn, fb_model, system_prompt_for(fb_name, fb_model))
                 print(f"hybrid: primary={provider_name}/{model}, fallback={fb_name}/{fb_model} on 0-yield sessions")
 
+        # Phase H egress policy: high-sensitivity sessions stay off remote providers.
+        allow_egress = os.environ.get("DREAM_ALLOW_SENSITIVE_EGRESS") == "1"
+
         for session_key, events in sessions:
             project = dominant_project([e.get("cwd") for e in events])
+            session_sensitive = any(e.get("sensitivity") == "high" for e in events)
+            # Primary provider is remote + session is sensitive → don't egress; skip.
+            if egress_blocked(provider_name, session_sensitive, allow_egress):
+                print(f"\n=== skipping {session_key}: sensitive session, remote egress blocked "
+                      f"(DREAM_ALLOW_SENSITIVE_EGRESS=1 to allow) ===")
+                continue
             existing = render_existing(fetch_existing_memories(driver, project), paths_only=paths_only)
             label = f"{session_key}" + (f"  project={project}" if project else "")
-            print(f"\n=== dreaming over {label} ({len(events)} new events) ===")
+            print(f"\n=== dreaming over {label} ({len(events)} new events"
+                  + ("; SENSITIVE" if session_sensitive else "") + ") ===")
             used_name, used_model = provider_name, model
             memories = call_provider(provider_fn, render_events(events, max_chars=transcript_cap), existing, model, system_prompt)
-            if not memories and fallback:
+            # Fall back only if it won't egress a sensitive session to a remote provider.
+            if not memories and fallback and not egress_blocked(fallback[0], session_sensitive, allow_egress):
                 fb_name, fb_fn, fb_model, fb_system = fallback
                 print(f"  local yielded 0 — falling back to {fb_name}/{fb_model} for this session")
                 try:
@@ -693,6 +711,9 @@ def main():
                         memories, used_name, used_model = fb_mems, fb_name, fb_model
                 except Exception as e:
                     print(f"  fallback failed: {e}", file=sys.stderr)
+            elif not memories and fallback and session_sensitive:
+                print(f"  local yielded 0; {fallback[0]} fallback skipped (sensitive session, egress blocked)",
+                      file=sys.stderr)
             for m in memories:
                 print(f"\n--- {m.get('path')} ---")
                 print(m.get("content", ""))

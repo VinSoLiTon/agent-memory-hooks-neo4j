@@ -1444,6 +1444,20 @@ def cmd_health(args: argparse.Namespace) -> int:
     except Exception as e:
         rows.append((WARN, "event spool", f"check failed: {e}"))
 
+    # --- 12. Egress policy (Phase H) ---
+    try:
+        import privacy as _privacy
+        sensitive = _privacy._load_paths("HOOKS_SENSITIVE_PATHS", _privacy.SENSITIVE_FILE)
+        allow = os.environ.get("DREAM_ALLOW_SENSITIVE_EGRESS") == "1"
+        if allow:
+            rows.append((WARN, "egress policy",
+                         f"{len(sensitive)} sensitive path(s); remote egress ALLOWED for sensitive sessions"))
+        else:
+            rows.append((OK, "egress policy",
+                         f"{len(sensitive)} sensitive path(s); sensitive sessions kept off remote dream providers"))
+    except Exception as e:
+        rows.append((WARN, "egress policy", f"check failed: {e}"))
+
     return _print_health(rows)
 
 
