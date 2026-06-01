@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Memory Hooks — Implementation &amp; Usage</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161922; --panel2: #1c2030; --border: #2a2f3e;
+    --fg: #d7dbe6; --muted: #8b93a7; --accent: #6ea8fe; --accent2: #9d7bff;
+    --green: #4ec9a8; --amber: #e2b341; --red: #e06c75; --code-bg: #11141c;
+    --claude: #d97757; --codex: #10a37f; --cursor: #6ea8fe; --gemini: #9d7bff;
+    --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: var(--sans); line-height: 1.6; font-size: 15px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: var(--mono); }
+  code {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 1px 5px; border-radius: 4px; font-size: 0.88em; color: #e6e9f2;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 16px; overflow-x: auto; font-size: 13px;
+    line-height: 1.5;
+  }
+  pre code { background: none; border: none; padding: 0; }
+  .layout { display: flex; max-width: 1280px; margin: 0 auto; }
+  nav.toc {
+    width: 250px; flex: 0 0 250px; position: sticky; top: 0; align-self: flex-start;
+    height: 100vh; overflow-y: auto; padding: 24px 16px; border-right: 1px solid var(--border);
+    font-size: 13.5px;
+  }
+  nav.toc h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin: 18px 0 6px; }
+  nav.toc a { display: block; color: var(--muted); padding: 3px 8px; border-radius: 5px; }
+  nav.toc a:hover { color: var(--fg); background: var(--panel); text-decoration: none; }
+  nav.toc .lvl2 { padding-left: 20px; font-size: 13px; }
+  main { flex: 1 1 auto; min-width: 0; padding: 32px 40px 120px; }
+  header.hero { border-bottom: 1px solid var(--border); padding-bottom: 22px; margin-bottom: 8px; }
+  header.hero h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -.01em; }
+  header.hero p.sub { color: var(--muted); font-size: 16px; margin: 0; }
+  .pills { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .pill { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--fg); }
+  .pill.claude { border-color: var(--claude); color: var(--claude); }
+  .pill.codex  { border-color: var(--codex);  color: var(--codex); }
+  .pill.cursor { border-color: var(--cursor); color: var(--cursor); }
+  .pill.gemini { border-color: var(--gemini); color: var(--gemini); }
+  section { margin-top: 40px; scroll-margin-top: 16px; }
+  h2.sec { font-size: 23px; margin: 0 0 4px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
+    letter-spacing: -.01em; }
+  h3 { font-size: 18px; margin: 26px 0 8px; color: #eef1f8; }
+  h4 { font-size: 15px; margin: 18px 0 6px; color: var(--accent); font-family: var(--mono); }
+  p { margin: 10px 0; }
+  ul, ol { margin: 10px 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13.5px; }
+  th, td { text-align: left; padding: 7px 10px; border: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--panel2); color: #eef1f8; font-weight: 600; }
+  tr:nth-child(even) td { background: var(--panel); }
+  .note { border-left: 3px solid var(--accent); background: var(--panel);
+    padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 14px 0; }
+  .note.warn { border-left-color: var(--amber); }
+  .note.fix { border-left-color: var(--green); }
+  .note .lbl { font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); display: block; margin-bottom: 2px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+  .card h4 { margin-top: 0; }
+  .diagram-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; overflow-x: auto; margin: 16px 0; }
+  .kbd { font-family: var(--mono); font-size: 12px; background: var(--panel2);
+    border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 1px 6px; }
+  .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; font-family: var(--mono); }
+  .tag.online { background: rgba(78,201,168,.15); color: var(--green); border: 1px solid var(--green); }
+  .tag.offline { background: rgba(157,123,255,.15); color: var(--accent2); border: 1px solid var(--accent2); }
+  .filetag { color: var(--amber); font-family: var(--mono); font-size: 12.5px; }
+  svg text { font-family: var(--sans); }
+  .small { font-size: 13px; color: var(--muted); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 28px 0; }
+  @media (max-width: 900px) {
+    nav.toc { display: none; }
+    main { padding: 24px 18px 80px; }
+    .grid2 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <a href="#overview">Overview</a>
+  <a href="#diagram">System block diagram</a>
+  <a href="#schema">Graph schema</a>
+  <h2>Implementation</h2>
+  <a class="lvl2" href="#capture">Stage 1 · Capture (hooks)</a>
+  <a class="lvl2" href="#privacy">Privacy filters</a>
+  <a class="lvl2" href="#inject">Memory injection</a>
+  <a class="lvl2" href="#project">Project derivation</a>
+  <a class="lvl2" href="#embeddings">Embeddings</a>
+  <a class="lvl2" href="#dream">Stage 2 · Dream phase</a>
+  <a class="lvl2" href="#providers">Dream providers</a>
+  <a class="lvl2" href="#prompts">Per-provider prompts</a>
+  <a class="lvl2" href="#quality">Quality gates</a>
+  <a class="lvl2" href="#consolidate">Consolidate &amp; archive</a>
+  <a class="lvl2" href="#patterns">Pattern detection</a>
+  <a class="lvl2" href="#migrate">Schema migration</a>
+  <h2>Usage</h2>
+  <a class="lvl2" href="#install">Install &amp; setup</a>
+  <a class="lvl2" href="#wiring">Per-client wiring</a>
+  <a class="lvl2" href="#running-dream">Running the dream phase</a>
+  <a class="lvl2" href="#cli">CLI reference</a>
+  <a class="lvl2" href="#dashboard">Web dashboard</a>
+  <a class="lvl2" href="#tests">Tests</a>
+  <a class="lvl2" href="#workflows">Common workflows</a>
+  <a class="lvl2" href="#env">Environment variables</a>
+</nav>
+
+<main>
+<header class="hero">
+  <h1>Agent Memory Hooks</h1>
+  <p class="sub">A two-stage memory layer for Claude Code, Codex, Cursor, and Gemini CLI — backed by Neo4j.</p>
+  <div class="pills">
+    <span class="pill claude">claude_code</span>
+    <span class="pill codex">codex</span>
+    <span class="pill cursor">cursor</span>
+    <span class="pill gemini">gemini</span>
+    <span class="pill">Neo4j</span>
+    <span class="pill">Python 3.10+</span>
+  </div>
+</header>
+
+<!-- ================= OVERVIEW ================= -->
+<section id="overview">
+  <h2 class="sec">Overview</h2>
+  <p>
+    Four agent CLIs write into one shared Neo4j graph. The system has two stages that run on
+    completely different cadences:
+  </p>
+  <div class="grid2">
+    <div class="card">
+      <h4><span class="tag online">ONLINE</span> &nbsp;Stage 1 — Hooks</h4>
+      <p>Fire on every session event from any CLI. They <b>capture what happened</b> — prompts, tool
+      calls, tool responses — as a per-session linked list of <code>:Event</code> nodes, with secrets
+      scrubbed and opted-out directories dropped. They also <b>inject memory back</b> into the session
+      at <code>SessionStart</code> and on each user prompt.</p>
+      <p class="small">Latency-critical: runs inline with the agent. Touches only the two
+      <code>MERGE</code>-supporting UNIQUE constraints; never does schema-heavy work.</p>
+    </div>
+    <div class="card">
+      <h4><span class="tag offline">OFFLINE</span> &nbsp;Stage 2 — Dream phase</h4>
+      <p>Runs on a schedule (Windows Task Scheduler, daily 3 PM). Reads sessions newer than their
+      <code>last_dreamed_at</code> watermark, feeds the trimmed event log to an LLM
+      (Anthropic / OpenAI / local Ollama), and <b>decides what's worth remembering</b> — distilling
+      durable markdown <code>:Memory</code> nodes that future sessions automatically receive.</p>
+      <p class="small">Not latency-critical. Can spend real tokens and seconds per session.</p>
+    </div>
+  </div>
+  <p style="margin-top:16px">
+    The split is the core idea: <b>hooks record everything cheaply; the dream phase curates slowly.</b>
+    Recall combines fulltext and vector search and boosts in-project hits. Every node carries a
+    <code>client</code> property so the four CLIs share one graph without colliding.
+  </p>
+</section>
+
+<!-- ================= DIAGRAM ================= -->
+<section id="diagram">
+  <h2 class="sec">System block diagram</h2>
+  <div class="diagram-wrap">
+  <svg viewBox="0 0 980 620" width="100%" role="img" aria-label="System architecture data flow">
+    <defs>
+      <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L8,3 L0,6 Z" fill="#8b93a7"/>
+      </marker>
+      <marker id="arrowg" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L8,3 L0,6 Z" fill="#9d7bff"/>
+      </marker>
+      <style>
+        .box { fill:#1c2030; stroke:#2a2f3e; stroke-width:1.5; rx:8; }
+        .lbl { fill:#d7dbe6; font-size:13px; font-weight:600; }
+        .sub { fill:#8b93a7; font-size:11px; }
+        .edge { stroke:#8b93a7; stroke-width:1.5; fill:none; }
+        .edgeg { stroke:#9d7bff; stroke-width:1.5; fill:none; stroke-dasharray:5 4; }
+        .zone { fill:none; stroke:#2a2f3e; stroke-width:1; stroke-dasharray:4 4; rx:12; }
+        .zlbl { fill:#8b93a7; font-size:11px; font-weight:700; letter-spacing:.08em; }
+      </style>
+    </defs>
+
+    <!-- CLIENTS row -->
+    <text x="30" y="28" class="zlbl">AGENT CLIs</text>
+    <rect class="box" x="30"  y="38" width="130" height="46" rx="8"/>
+    <text x="95"  y="60" text-anchor="middle" class="lbl" fill="#d97757">Claude Code</text>
+    <text x="95"  y="75" text-anchor="middle" class="sub">.claude/settings.json</text>
+    <rect class="box" x="175" y="38" width="130" height="46" rx="8"/>
+    <text x="240" y="60" text-anchor="middle" class="lbl" fill="#10a37f">Codex</text>
+    <text x="240" y="75" text-anchor="middle" class="sub">.codex/hooks.json</text>
+    <rect class="box" x="320" y="38" width="130" height="46" rx="8"/>
+    <text x="385" y="60" text-anchor="middle" class="lbl" fill="#6ea8fe">Cursor</text>
+    <text x="385" y="75" text-anchor="middle" class="sub">.cursor/hooks.json</text>
+    <rect class="box" x="465" y="38" width="130" height="46" rx="8"/>
+    <text x="530" y="60" text-anchor="middle" class="lbl" fill="#9d7bff">Gemini CLI</text>
+    <text x="530" y="75" text-anchor="middle" class="sub">.gemini/settings.json</text>
+
+    <!-- wrappers -->
+    <rect class="box" x="30" y="120" width="565" height="40" rx="8"/>
+    <text x="312" y="138" text-anchor="middle" class="lbl">per-client .cmd / .sh wrappers</text>
+    <text x="312" y="152" text-anchor="middle" class="sub">forward stdin JSON → shared Python with --client &lt;name&gt;</text>
+
+    <!-- shared hooks -->
+    <text x="30" y="196" class="zlbl">STAGE 1 · HOOKS (online, latency-critical)</text>
+    <rect class="box" x="30" y="206" width="270" height="78" rx="8"/>
+    <text x="165" y="228" text-anchor="middle" class="lbl">hooks/log_event.py</text>
+    <text x="165" y="245" text-anchor="middle" class="sub">scrub → MERGE Session → append Event</text>
+    <text x="165" y="259" text-anchor="middle" class="sub">FIRST/NEXT/LATEST linked list</text>
+    <text x="165" y="273" text-anchor="middle" class="sub">privacy.py · opt-out + secret scrub</text>
+
+    <rect class="box" x="325" y="206" width="270" height="78" rx="8"/>
+    <text x="460" y="228" text-anchor="middle" class="lbl">hooks/inject_memory.py</text>
+    <text x="460" y="245" text-anchor="middle" class="sub">SessionStart → profile/tools/project</text>
+    <text x="460" y="259" text-anchor="middle" class="sub">Prompt → fulltext + vector (RRF)</text>
+    <text x="460" y="273" text-anchor="middle" class="sub">project boost · access tracking</text>
+
+    <!-- NEO4J -->
+    <rect class="box" x="690" y="206" width="260" height="200" rx="8" style="fill:#161922;stroke:#4ec9a8;stroke-width:2"/>
+    <text x="820" y="232" text-anchor="middle" class="lbl" fill="#4ec9a8">Neo4j graph</text>
+    <text x="820" y="255" text-anchor="middle" class="sub">(:Session)-[:FIRST_EVENT]→(:Event)</text>
+    <text x="820" y="271" text-anchor="middle" class="sub">(:Event)-[:NEXT]→(:Event)</text>
+    <text x="820" y="287" text-anchor="middle" class="sub">(:Session)-[:LATEST_EVENT]→(:Event)</text>
+    <text x="820" y="307" text-anchor="middle" class="sub">(:Session)-[:DREAMED]→(:Memory)</text>
+    <text x="820" y="323" text-anchor="middle" class="sub">(:Memory)-[:DERIVED_FROM]→(:Session)</text>
+    <text x="820" y="347" text-anchor="middle" class="sub">UNIQUE: session_key, event_id, path</text>
+    <text x="820" y="363" text-anchor="middle" class="sub">fulltext + vector + project indexes</text>
+    <text x="820" y="387" text-anchor="middle" class="sub">embeddings stored on :Memory</text>
+
+    <!-- DREAM -->
+    <text x="30" y="330" class="zlbl">STAGE 2 · DREAM (offline, scheduled 3 PM)</text>
+    <rect class="box" x="30" y="340" width="270" height="66" rx="8" style="stroke:#9d7bff"/>
+    <text x="165" y="362" text-anchor="middle" class="lbl" fill="#9d7bff">dream/dream.py</text>
+    <text x="165" y="379" text-anchor="middle" class="sub">watermark fetch · chain-walk · render</text>
+    <text x="165" y="393" text-anchor="middle" class="sub">quality gate → upsert :Memory + embed</text>
+
+    <rect class="box" x="325" y="340" width="270" height="66" rx="8" style="stroke:#9d7bff"/>
+    <text x="460" y="362" text-anchor="middle" class="lbl" fill="#9d7bff">dream/providers.py</text>
+    <text x="460" y="379" text-anchor="middle" class="sub">anthropic · openai · ollama</text>
+    <text x="460" y="393" text-anchor="middle" class="sub">JSON-constrained memory extraction</text>
+
+    <!-- operator surfaces -->
+    <text x="30" y="450" class="zlbl">OPERATOR SURFACES</text>
+    <rect class="box" x="30" y="460" width="180" height="56" rx="8"/>
+    <text x="120" y="482" text-anchor="middle" class="lbl">cli/njhook.py</text>
+    <text x="120" y="498" text-anchor="middle" class="sub">list · search · health · backup</text>
+    <text x="120" y="510" text-anchor="middle" class="sub">migrate · consolidate · archive</text>
+
+    <rect class="box" x="225" y="460" width="180" height="56" rx="8"/>
+    <text x="315" y="482" text-anchor="middle" class="lbl">dashboard/app.py</text>
+    <text x="315" y="498" text-anchor="middle" class="sub">Flask UI · read-only default</text>
+    <text x="315" y="510" text-anchor="middle" class="sub">browse · walk · hybrid search</text>
+
+    <rect class="box" x="420" y="460" width="180" height="56" rx="8"/>
+    <text x="510" y="482" text-anchor="middle" class="lbl">detect/patterns.py</text>
+    <text x="510" y="498" text-anchor="middle" class="sub">repeated cmds · hot files</text>
+    <text x="510" y="510" text-anchor="middle" class="sub">prompt clusters → promote</text>
+
+    <!-- EMBEDDINGS -->
+    <rect class="box" x="690" y="460" width="260" height="56" rx="8"/>
+    <text x="820" y="482" text-anchor="middle" class="lbl">hooks/embeddings.py</text>
+    <text x="820" y="498" text-anchor="middle" class="sub">openai (1536) · ollama nomic (768)</text>
+    <text x="820" y="510" text-anchor="middle" class="sub">batch embed · EMBED_MAX_CHARS cap</text>
+
+    <!-- EDGES -->
+    <!-- clients to wrappers -->
+    <path class="edge" d="M95,84 L95,120" marker-end="url(#arrow)"/>
+    <path class="edge" d="M240,84 L240,120" marker-end="url(#arrow)"/>
+    <path class="edge" d="M385,84 L385,120" marker-end="url(#arrow)"/>
+    <path class="edge" d="M530,84 L530,120" marker-end="url(#arrow)"/>
+    <!-- wrappers to hooks -->
+    <path class="edge" d="M165,160 L165,206" marker-end="url(#arrow)"/>
+    <path class="edge" d="M460,160 L460,206" marker-end="url(#arrow)"/>
+    <!-- log_event -> neo4j (write) -->
+    <path class="edge" d="M300,236 L690,250" marker-end="url(#arrow)"/>
+    <text x="500" y="234" class="sub">write events</text>
+    <!-- neo4j -> inject (read) -->
+    <path class="edge" d="M690,290 L595,262" marker-end="url(#arrow)"/>
+    <text x="600" y="300" class="sub">read memory</text>
+    <!-- dream <-> neo4j -->
+    <path class="edgeg" d="M300,366 L690,330" marker-end="url(#arrowg)"/>
+    <text x="470" y="324" class="sub" fill="#9d7bff">read events / write memories</text>
+    <!-- dream -> providers -->
+    <path class="edgeg" d="M300,376 L325,376" marker-end="url(#arrowg)"/>
+    <!-- embeddings -> neo4j -->
+    <path class="edge" d="M820,460 L820,406" marker-end="url(#arrow)"/>
+    <!-- cli/dash/patterns -> neo4j -->
+    <path class="edge" d="M210,470 Q650,440 690,400" marker-end="url(#arrow)"/>
+  </svg>
+  </div>
+  <p class="small">
+    Solid grey edges = online capture/recall path. Dashed purple edges = offline dream path.
+    Everything funnels through one Neo4j instance; the CLI, dashboard, and pattern detector are
+    read/curate surfaces over the same graph.
+  </p>
+</section>
+
+<!-- ================= SCHEMA ================= -->
+<section id="schema">
+  <h2 class="sec">Graph schema</h2>
+  <p>Each session is a linked list of events. The dream phase attaches memories with full provenance.</p>
+<pre><code>(:Session {session_key, session_id, client, created_at, last_dreamed_at})
+  -[:FIRST_EVENT]->  (:Event)            // head of the chain
+  -[:LATEST_EVENT]-> (:Event)            // tail (watermark anchor)
+  -[:DREAMED]->      (:Memory)           // provenance: this session produced it
+
+(:Event {event_id, event_name, client, timestamp, tool_name, tool_input,
+         tool_use_id, tool_response, prompt, model, source, turn_id,
+         last_assistant_message, stop_hook_active, transcript_path,
+         transcript, cwd})
+  -[:NEXT]-> (:Event)                    // chronological successor
+
+(:Memory {path, content, updated_at, project, archived, archived_at,
+          access_count, last_accessed_at, embedding, embedding_model,
+          embedding_dim, consolidated_from, promoted_from_pattern})
+  -[:DERIVED_FROM]-> (:Session)
+
+constraints: Session.session_key UNIQUE, Event.event_id UNIQUE, Memory.path UNIQUE
+indexes:     memory_fulltext (Memory.content, Memory.path),
+             memory_embeddings (vector on Memory.embedding, cosine),
+             memory_project (Memory.project), session_id_lookup (Session.session_id)</code></pre>
+  <table>
+    <tr><th>Key</th><th>Why it exists</th></tr>
+    <tr><td><code>session_key = "&lt;client&gt;:&lt;session_id&gt;"</code></td>
+        <td>Composite so two CLIs can reuse the same raw <code>session_id</code> without merging into one chain. The original <code>Session.session_id UNIQUE</code> constraint is dropped by the migration.</td></tr>
+    <tr><td><code>event_id = "&lt;client&gt;_&lt;session_id&gt;_&lt;ts&gt;_&lt;event&gt;"</code></td>
+        <td>Client-namespaced and timestamped so events never collide; <code>MERGE</code>-safe.</td></tr>
+    <tr><td><code>last_dreamed_at</code></td>
+        <td>Watermark — the dream phase only re-reads events newer than this, and always advances it (even when 0 memories result) so low-signal sessions aren't re-dreamed forever.</td></tr>
+    <tr><td><code>project</code> on <code>:Memory</code></td>
+        <td>Set for <code>project/</code> &amp; <code>general/</code> memories; always <code>null</code> for cross-project <code>profile/</code> &amp; <code>tools/</code>. Drives the recall boost.</td></tr>
+  </table>
+</section>
+
+<hr>
+
+<!-- ================= STAGE 1 CAPTURE ================= -->
+<section id="capture">
+  <h2 class="sec">Implementation — Stage 1 · Capture</h2>
+  <p class="filetag">hooks/log_event.py</p>
+  <p>One shared writer for all four clients; <code>--client</code> tags the origin. The CLIs' hook payloads
+  share almost all fields (<code>session_id</code>, <code>hook_event_name</code>, <code>tool_name</code>,
+  <code>tool_input</code>, <code>tool_response</code>, <code>prompt</code>, …); Codex adds
+  <code>turn_id</code>, <code>tool_use_id</code>, <code>last_assistant_message</code>,
+  <code>stop_hook_active</code>.</p>
+
+  <h4>Append algorithm</h4>
+  <p>Each event is appended to the session's linked list in one idempotent Cypher write that relinks the
+  <code>LATEST_EVENT</code> pointer:</p>
+<pre><code>MERGE (s:Session {session_key: $session_key})
+  ON CREATE SET s.created_at = $timestamp, s.session_id = $session_id, s.client = $client
+WITH s
+CREATE (e:Event $event_props)
+WITH s, e
+OPTIONAL MATCH (s)-[old_latest:LATEST_EVENT]->(prev:Event)
+DELETE old_latest
+WITH s, e, prev
+FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
+    CREATE (prev)-[:NEXT]->(e))          // link onto the tail
+FOREACH (_ IN CASE WHEN prev IS NULL THEN [1] ELSE [] END |
+    CREATE (s)-[:FIRST_EVENT]->(e))      // first event of the session
+CREATE (s)-[:LATEST_EVENT]->(e)          // new tail</code></pre>
+
+  <h4>Design points</h4>
+  <ul>
+    <li><b>Minimal hot-path schema.</b> The hook only runs <code>CREATE CONSTRAINT IF NOT EXISTS</code> for the
+      two UNIQUE constraints its <code>MERGE</code>s depend on (<code>session_key</code>, <code>event_id</code>).
+      Everything heavier — dropping legacy constraints, indexes, backfills — lives in <code>njhook migrate</code>.</li>
+    <li><b>Field hygiene.</b> <code>tool_response</code> is capped at 4000 chars; <code>tool_input</code> is JSON-stringified
+      then scrubbed. Empty dicts/strings are kept (present-but-empty ≠ missing); only <code>None</code> fields are stripped.</li>
+    <li><b>Transcripts off by default.</b> Set <code>HOOKS_CAPTURE_TRANSCRIPT=1</code> to opt in (capped at
+      <code>HOOKS_TRANSCRIPT_MAX_CHARS</code>). They're duplicate data — every event is already stored.</li>
+    <li><b>Never blocks the agent.</b> The whole hook is wrapped so any exception prints to stderr and returns;
+      a Neo4j outage degrades to "no capture", not a broken CLI.</li>
+  </ul>
+</section>
+
+<!-- ================= PRIVACY ================= -->
+<section id="privacy">
+  <h3>Privacy filters</h3>
+  <p class="filetag">hooks/privacy.py</p>
+  <p>Runs on every captured event, in two stages — both best-effort (an exception never blocks capture):</p>
+  <ol>
+    <li><b>CWD opt-out.</b> Drop the event entirely if <code>cwd</code> (or any parent) matches the blocklist from
+      <code>HOOKS_OPT_OUT_PATHS</code> (semicolon-separated) or <code>~/.njhook/optout.txt</code>. Match is a
+      case-folded, forward-slashed prefix compare so it's stable across Windows/POSIX.</li>
+    <li><b>Secret scrubbing.</b> Regex-redact secrets in every captured string before write.</li>
+  </ol>
+  <div class="note fix">
+    <span class="lbl">Two pattern tiers</span>
+    The patterns are split so the same regexes aren't over-applied where they'd cause false positives:
+    <ul style="margin-bottom:0">
+      <li><b>High-confidence</b> — distinctive real-secret shapes: <code>sk-ant-…</code>, generic <code>sk-…</code>,
+        GitHub <code>gh[oprsu]_…</code>, AWS <code>AKIA…</code> / <code>aws_secret_access_key</code>, Slack
+        <code>xox[baprs]-…</code>, Stripe, JWT <code>eyJ…</code>, PEM private-key blocks.</li>
+      <li><b>Heuristic</b> — <code>Bearer &lt;token&gt;</code> and <code>KEY=VALUE</code> for sensitive-looking names.
+        Useful for scrubbing captured events but too eager elsewhere.</li>
+    </ul>
+    <code>scrub()</code> (capture path) applies <b>both</b>. <code>scrub_high_confidence()</code> applies only the first
+    tier and is used by the dream quality gate — so a memory documenting
+    <code>HOOKS_NEO4J_PASSWORD=password</code> is accepted, while a real <code>sk-ant-</code> key is still rejected.
+  </div>
+</section>
+
+<!-- ================= INJECT ================= -->
+<section id="inject">
+  <h3>Memory injection (recall)</h3>
+  <p class="filetag">hooks/inject_memory.py</p>
+  <p>The other half of Stage 1: handing relevant memories back to the agent. Two trigger points, both emitting
+  <code>{"hookSpecificOutput": {"hookEventName": …, "additionalContext": …}}</code>:</p>
+
+  <h4>SessionStart</h4>
+  <ul>
+    <li>Loads three buckets ordered by recency: <code>profile/*</code> (≤ <code>INJECT_PROFILE_LIMIT</code>),
+      <code>tools/*</code> (≤ <code>INJECT_TOOLS_LIMIT</code>), and memories tagged with the current project
+      (≤ <code>INJECT_PROJECT_LIMIT</code>).</li>
+    <li>Concatenated under a markdown header until <code>INJECT_CHAR_BUDGET</code> (default 4000) is hit, then a
+      <code>_(further memories omitted…)_</code> marker is appended. Archived memories are excluded.</li>
+  </ul>
+
+  <h4>UserPromptSubmit / BeforeAgent / beforeSubmitPrompt</h4>
+  <p>Hybrid recall against the prompt:</p>
+  <ol>
+    <li><b>Fulltext</b> — Lucene over <code>(m.content, m.path)</code>. Reserved characters are escaped so a prompt
+      like <code>"what does -x mean?"</code> can't raise a parser error; on any failure it returns <code>[]</code>
+      so the vector path still runs. If the raw query returns nothing, it retries with the prompt's content words
+      OR-joined (stopwords stripped).</li>
+    <li><b>Vector</b> — ANN over the <code>memory_embeddings</code> index against the verbatim prompt. Returns
+      <code>[]</code> when <code>EMBED_PROVIDER</code> is unset or the index isn't populated, so recall degrades
+      gracefully to fulltext-only.</li>
+    <li><b>Fusion</b> — Reciprocal Rank Fusion (<code>k=60</code>) merges the two ranked lists; an in-project match
+      adds a small <code>INJECT_PROJECT_BOOST</code> nudge in the same magnitude as RRF scores.</li>
+  </ol>
+  <p>Returned memories get a best-effort <code>access_count</code> + <code>last_accessed_at</code> bump (used by
+  <code>archive</code> and <code>stats</code>); failure there never blocks recall.</p>
+</section>
+
+<!-- ================= PROJECT ================= -->
+<section id="project">
+  <h3>Project derivation</h3>
+  <p class="filetag">hooks/project.py</p>
+  <p>Single source of truth for "what project is this cwd?", shared by injection (scoping/boost) and dream (tagging).
+  Walk up from <code>cwd</code> to the nearest <code>.git</code> ancestor and use that folder's lower-cased name;
+  fall back to the leaf folder name. <code>dominant_project()</code> picks the most frequent project across a
+  session's event cwds.</p>
+</section>
+
+<!-- ================= EMBEDDINGS ================= -->
+<section id="embeddings">
+  <h3>Embeddings</h3>
+  <p class="filetag">hooks/embeddings.py</p>
+  <p>Optional semantic layer; controlled by <code>EMBED_PROVIDER</code> (<code>openai</code> | <code>ollama</code> | unset).
+  When unset, the whole system runs fulltext-only.</p>
+  <table>
+    <tr><th>Provider</th><th>Default model</th><th>Dim</th><th>Notes</th></tr>
+    <tr><td>openai</td><td><code>text-embedding-3-small</code></td><td>1536</td><td>via <code>openai</code> SDK</td></tr>
+    <tr><td>ollama</td><td><code>nomic-embed-text:latest</code></td><td>768</td><td>local <code>/api/embed</code>, batched, no key</td></tr>
+  </table>
+  <ul>
+    <li><b>Batched</b> — all texts in one request. <code>memory_text()</code> embeds <code>path + "\n\n" + content</code>
+      so file-naming signal contributes to similarity.</li>
+    <li><b>Input cap</b> — every text is truncated to <code>EMBED_MAX_CHARS</code> (6000) first. Small-context backends
+      (nomic ~2048 tokens) return HTTP 400 on overlong input, and since the call is batched, one oversize memory would
+      have silently dropped vectors for the whole batch.</li>
+    <li><b>Dim tracking</b> — <code>embedding_model</code> + <code>embedding_dim</code> are stored on each memory so
+      <code>njhook reindex</code> can detect a model swap and rebuild the vector index.</li>
+  </ul>
+</section>
+
+<hr>
+
+<!-- ================= DREAM ================= -->
+<section id="dream">
+  <h2 class="sec">Implementation — Stage 2 · Dream phase</h2>
+  <p class="filetag">dream/dream.py</p>
+  <p>Reads sessions with events past their watermark, distills memories via the chosen provider, upserts them.</p>
+
+  <h4>Fetch — watermark + explicit chain walk</h4>
+  <ol>
+    <li>List candidate sessions with their <code>last_dreamed_at</code> and the timestamp of their
+      <code>LATEST_EVENT</code> — one cheap hop, no chain walk.</li>
+    <li>Skip any session whose latest event is <code>≤</code> watermark (nothing new) or predates <code>--since</code>.</li>
+    <li>For the rest, walk the <code>NEXT</code> chain <b>one hop at a time</b>, then filter to events past the watermark.</li>
+  </ol>
+  <div class="note fix">
+    <span class="lbl">Why single-hop, not a variable-length path</span>
+    The obvious query <code>MATCH (s)-[:FIRST_EVENT|NEXT*0..]-&gt;(e)</code> materializes a path for every reachable
+    event and blows Neo4j's transaction-memory pool (<code>MemoryPoolOutOfMemoryError</code>, ~2.7 GiB default) on
+    any session past ~150 events. Walking the linked list explicitly is a series of O(1) lookups with bounded memory;
+    a <code>seen</code> set guards corrupted/branching chains from looping forever. A 1741-event session fetches in ~3 s.
+  </div>
+
+  <h4>Render — trim to signal</h4>
+  <p>Prompts are kept in full (highest signal); tool input collapses to its <code>command</code>/<code>file_path</code>
+  field, and tool responses collapse to an 80-char one-liner. Smaller local models drown in raw transcript dumps.</p>
+
+  <h4>Write — quality gate, upsert, embed, advance watermark</h4>
+  <ul>
+    <li>Memories pass through the <a href="#quality">quality gate</a>; rejects are logged, the run continues.</li>
+    <li><code>profile/</code> &amp; <code>tools/</code> paths are forced <code>project = null</code> (cross-project);
+      everything else is tagged with the session's dominant project.</li>
+    <li>If embeddings are enabled, all bodies are embedded in one batch and the vector index is lazily created at the
+      model's dimension.</li>
+    <li>Upsert is <code>MERGE (m:Memory {path})</code> + <code>MERGE (s)-[:DREAMED]-&gt;(m)</code> +
+      <code>MERGE (m)-[:DERIVED_FROM]-&gt;(s)</code>.</li>
+    <li>The watermark advances to the latest dreamed event's timestamp <b>even if zero memories were produced</b>.</li>
+  </ul>
+  <div class="note warn">
+    <span class="lbl">Token ceiling</span>
+    <code>DREAM_MAX_TOKENS</code> defaults to 16384 (was 4096). 4096 truncated the LLM's memory JSON mid-string on
+    large sessions, producing unparseable output. It's a ceiling — you only pay for tokens generated.
+  </div>
+</section>
+
+<!-- ================= PROVIDERS ================= -->
+<section id="providers">
+  <h3>Dream providers</h3>
+  <p class="filetag">dream/providers.py</p>
+  <p>Three adapters, one shape:
+  <code>dream(transcript, existing, system, model, max_tokens) -&gt; list[dict]</code>. Precedence:
+  <code>--provider</code> flag &gt; <code>$DREAM_PROVIDER</code> &gt; <code>anthropic</code>.</p>
+  <table>
+    <tr><th>Provider</th><th>Default model</th><th>How JSON is constrained</th></tr>
+    <tr><td>anthropic</td><td><code>claude-opus-4-7</code></td><td>Prompt-cached system block; parse the outermost <code>{…}</code> from the text response.</td></tr>
+    <tr><td>openai</td><td><code>gpt-4o-mini</code></td><td><code>response_format={"type":"json_object"}</code>.</td></tr>
+    <tr><td>ollama</td><td><code>qwen3.5:latest</code></td><td>Real JSON Schema in <code>format=</code> (path regex-constrained), assistant turn pre-filled with <code>{"memories":[</code>, <code>think=False</code>, temp 0.1. Retries once without the prefix if parsing fails.</td></tr>
+  </table>
+  <p class="small">All provider-specific JSON recovery lives here so <code>dream.py</code> stays clean. Imports are lazy
+  so an unselected provider's SDK need not be installed.</p>
+</section>
+
+<!-- ================= PROMPTS ================= -->
+<section id="prompts">
+  <h3>Per-provider prompts</h3>
+  <p class="filetag">dream/prompts.py</p>
+  <p>Shared core rules (what counts as a memory, path conventions, a hard project-discrimination rule, merge/dedup
+  rules) compose into two system prompts:</p>
+  <ul>
+    <li><b>Frontier</b> (Anthropic/OpenAI) — lean, no examples; these models follow abstract rules well.</li>
+    <li><b>Ollama</b> — same rules <b>plus a concrete few-shot example</b> anchoring format and the cross-project vs
+      scoped distinction, since 14B-class models need stricter cues.</li>
+  </ul>
+  <p><code>DREAM_JSON_SCHEMA</code> pins the output shape (<code>{"memories":[{path, content}]}</code>) with the path
+  regex <code>^(profile|tools|project|general)/…\.md$</code> — passed straight to Ollama's <code>format=</code>.</p>
+</section>
+
+<!-- ================= QUALITY ================= -->
+<section id="quality">
+  <h3>Quality gates</h3>
+  <p class="filetag">dream/quality.py</p>
+  <p>Every memory is validated before any DB write, so a malformed model response can't corrupt the graph:</p>
+  <ul>
+    <li>Path matches <code>^(profile|tools|project|general)/.+\.md$</code>.</li>
+    <li>Body starts with <code>---</code> YAML frontmatter containing <code>title:</code> and a valid
+      <code>kind:</code> (one of profile/tool/project/general).</li>
+    <li>Body length in <code>[DREAM_MEMORY_MIN_CHARS, DREAM_MEMORY_MAX_CHARS]</code> (30–20000).</li>
+    <li><b>Secret defense-in-depth</b> — reject if <code>scrub_high_confidence(body) != body</code> (the model can
+      regenerate a real key from scrubbed context). Uses the high-confidence tier only, so config docs survive.</li>
+  </ul>
+  <p><code>validate_batch()</code> filters to the valid memories and logs each rejection to stderr.</p>
+</section>
+
+<!-- ================= CONSOLIDATE ================= -->
+<section id="consolidate">
+  <h3>Consolidate &amp; archive</h3>
+  <p class="filetag">dream/consolidate.py</p>
+  <h4>consolidate()</h4>
+  <p>Greedy de-duplication: query the vector index for memory pairs above a cosine threshold (default 0.92), ask the
+  LLM to merge the strongest pair, write the merged memory and <b>rewire provenance</b> (every <code>:Session</code>
+  that DREAMED either original now DREAMs the merged one), then <code>DETACH DELETE</code> the originals. Repeats up to
+  <code>--rounds</code>. <code>consolidated_from</code> records the source paths. Requires both an embedding provider
+  and a dream provider.</p>
+  <h4>archive()</h4>
+  <p>Set <code>archived=true</code> on memories whose <code>last_accessed_at</code> AND <code>updated_at</code> are both
+  older than <code>--stale-days</code> (default 60). <code>profile/*</code> is exempt. Recall already filters
+  <code>archived=false</code>, so archived memories vanish from sessions but remain queryable via
+  <code>list --include-archived</code> / <code>unarchive</code>. Needs no LLM.</p>
+</section>
+
+<!-- ================= PATTERNS ================= -->
+<section id="patterns">
+  <h3>Pattern detection</h3>
+  <p class="filetag">detect/patterns.py</p>
+  <p>Three detectors surface repeated signal across captured sessions; each result carries a stable 6-char
+  <code>id</code> (sha1 of defining content) so you can reference it across runs.</p>
+  <table>
+    <tr><th>Detector</th><th>What it finds</th></tr>
+    <tr><td><code>repeated_commands()</code></td><td>Exact-normalized Bash/shell commands run ≥ <code>min_count</code> times (flags kept — <code>pytest -x</code> ≠ <code>pytest -xvs</code>).</td></tr>
+    <tr><td><code>hot_files()</code></td><td>File paths Read/Edit/Write'd ≥ <code>min_count</code> times, with a per-tool breakdown.</td></tr>
+    <tr><td><code>prompt_clusters()</code></td><td>User prompts greedily clustered by embedding cosine similarity (≥ threshold, default 0.8). Requires <code>EMBED_PROVIDER</code>.</td></tr>
+  </table>
+  <p><code>draft_memory_from_pattern()</code> deterministically (no LLM) converts a pattern into a draft <code>:Memory</code>
+  — a command → <code>tools/&lt;binary&gt;/usage.md</code>, a hot file → <code>project/hot-file-*.md</code>, a prompt
+  cluster → <code>general/recurring-*.md</code>, each tagged <code>promoted_from_pattern</code>. Surface and promote
+  via <code>njhook patterns --promote &lt;id&gt;</code>.</p>
+</section>
+
+<!-- ================= MIGRATE ================= -->
+<section id="migrate">
+  <h3>Schema migration</h3>
+  <p class="filetag">hooks/schema.py</p>
+  <p>Run from <code>njhook migrate</code> (never the hot path). Three separate transactions — Neo4j forbids mixing
+  schema and data writes:</p>
+  <ol>
+    <li><b>Drop legacy constraints</b> — finds and drops the old <code>Session.session_id UNIQUE</code> via
+      <code>SHOW CONSTRAINTS</code>.</li>
+    <li><b>Create constraints + indexes</b> — <code>session_key</code>/<code>event_id</code>/<code>path</code> UNIQUE,
+      the fulltext index, <code>memory_project</code>, and <code>session_id_lookup</code>.</li>
+    <li><b>Backfill</b> — set <code>session_key = "&lt;client&gt;:&lt;session_id&gt;"</code> on pre-existing sessions.</li>
+  </ol>
+  <p>Idempotent — re-running after a pull is safe and quick.</p>
+</section>
+
+<hr>
+
+<!-- ================= INSTALL ================= -->
+<section id="install">
+  <h2 class="sec">Usage — Install &amp; setup</h2>
+<pre><code># 1. dependencies
+pip install -r requirements.txt
+pip install -r dream/requirements.txt        # dream phase
+pip install -r dashboard/requirements.txt    # optional web UI
+
+# 2. point at Neo4j (defaults shown)
+export HOOKS_NEO4J_URI=bolt://localhost:7687
+export HOOKS_NEO4J_USER=neo4j
+export HOOKS_NEO4J_PASSWORD=password
+
+# 3. run the schema migration once (idempotent)
+./njhook.cmd migrate
+
+# 4. (optional) enable semantic recall + local dreaming
+export EMBED_PROVIDER=ollama
+ollama pull nomic-embed-text
+
+# 5. verify the whole stack
+./njhook.cmd health</code></pre>
+  <p class="small">On POSIX hosts, run <code>python cli/njhook.py &lt;subcommand&gt;</code> directly instead of the
+  <code>njhook.cmd</code> launcher.</p>
+</section>
+
+<!-- ================= WIRING ================= -->
+<section id="wiring">
+  <h3>Per-client wiring</h3>
+  <p>The hooks are wired at the project level — open this directory in any CLI and they fire automatically.</p>
+  <table>
+    <tr><th>CLI</th><th>Config file</th><th>Notes</th></tr>
+    <tr><td>Claude Code</td><td><code>.claude/settings.json</code></td><td>Just run Claude Code in this dir.</td></tr>
+    <tr><td>Codex</td><td><code>.codex/hooks.json</code></td><td>Set <code>[features] codex_hooks = true</code> in <code>~/.codex/config.toml</code>.</td></tr>
+    <tr><td>Cursor</td><td><code>.cursor/hooks.json</code> (or legacy <code>settings.json</code>)</td><td>Open the folder.</td></tr>
+    <tr><td>Gemini CLI</td><td><code>.gemini/settings.json</code></td><td>Uses <code>BeforeAgent</code> as the user-prompt analog.</td></tr>
+  </table>
+  <p>Each config calls a per-client wrapper (<code>.cmd</code> on Windows / <code>.sh</code> on POSIX) that forwards the
+  hook's stdin JSON to the shared Python with <code>--client &lt;name&gt;</code>. For <b>global capture</b> across all
+  projects, merge a <code>hooks</code> block into your user-level config pointing at the absolute path of the wrappers
+  in this repo.</p>
+  <div class="note warn">
+    <span class="lbl">Windows gotcha</span>
+    In Claude Code hook commands, bash strips unquoted Windows backslashes — quote the path and use forward slashes.
+  </div>
+</section>
+
+<!-- ================= RUNNING DREAM ================= -->
+<section id="running-dream">
+  <h3>Running the dream phase</h3>
+<pre><code>python dream/dream.py                          # default provider (anthropic)
+python dream/dream.py --since 24h              # only events newer than 24h / 7d / 30m
+python dream/dream.py --dry-run                # preview, don't write
+python dream/dream.py --provider ollama        # local, no API key
+python dream/dream.py --provider openai --model gpt-4o-mini
+python dream/dream.py --session claude_code:&lt;id&gt;
+python dream/dream.py --consolidate            # LLM-merge near-duplicates
+python dream/dream.py --archive --stale-days 60</code></pre>
+  <h4>Scheduled (Windows Task Scheduler) — daily 3 PM</h4>
+<pre><code>$action  = New-ScheduledTaskAction -Execute "C:\Projects\njhook\dream\run_dream.cmd"
+$trigger = New-ScheduledTaskTrigger -Daily -At 3pm
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
+  -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "njhook-dream-nightly" `
+  -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited</code></pre>
+  <p class="small"><code>StartWhenAvailable=True</code> means a run missed while the machine is off catches up on next
+  power-on. Logs land in <code>dream/logs/dream_YYYY-MM-DD.log</code>; <code>njhook health</code> surfaces the last
+  exit code and a dream-freshness check.</p>
+</section>
+
+<!-- ================= CLI ================= -->
+<section id="cli">
+  <h3>CLI reference</h3>
+  <p class="small">Full reference with every flag lives in <code>cli/README.md</code>. Quick map below.</p>
+  <table>
+    <tr><th>Group</th><th>Subcommands</th></tr>
+    <tr><td>Setup / health</td><td><code>migrate</code>, <code>health</code></td></tr>
+    <tr><td>Inspect / curate</td><td><code>list</code>, <code>show</code>, <code>search</code>, <code>edit</code>, <code>delete</code>, <code>unarchive</code>, <code>stats</code></td></tr>
+    <tr><td>Sessions / events</td><td><code>sessions</code>, <code>session &lt;id&gt; [-v]</code></td></tr>
+    <tr><td>Recall / embeddings</td><td><code>embed-backfill</code>, <code>reindex</code></td></tr>
+    <tr><td>Maintenance</td><td><code>consolidate</code>, <code>archive</code></td></tr>
+    <tr><td>Backup / restore</td><td><code>backup</code>, <code>restore --in FILE</code></td></tr>
+    <tr><td>Discovery</td><td><code>patterns [--promote &lt;id&gt;]</code></td></tr>
+  </table>
+  <div class="note">
+    <span class="lbl">Backup safety guards</span>
+    <code>backup</code> defaults to memories only (~10 KB). <code>--with-sessions</code> requires an explicit scope
+    flag (<code>--since</code> / <code>--session-key</code> / <code>--limit</code> / <code>--all-sessions</code>), and
+    <code>--all-sessions</code> additionally requires a trim flag (<code>--no-tool-response</code> or
+    <code>--max-field-chars</code>) — both are OOM guards. <code>restore</code> validates backup shape up front and
+    rebuilds each session's event chain idempotently.
+  </div>
+</section>
+
+<!-- ================= DASHBOARD ================= -->
+<section id="dashboard">
+  <h3>Web dashboard</h3>
+  <p class="filetag">dashboard/app.py</p>
+<pre><code>python dashboard/app.py                    # http://localhost:5000 (read-only)
+DASHBOARD_WRITE=1 python dashboard/app.py  # enable edit / delete / archive</code></pre>
+  <p>Flask UI to browse memories, walk session event chains, and run hybrid search. Mutations are <b>off by default</b>
+  (a "read-only" pill shows in the header) — even bound to <code>127.0.0.1</code>, any local process can hit it, so a
+  casual click shouldn't mutate the graph. Routes: <code>/memories</code>, <code>/memory/&lt;path&gt;</code>,
+  <code>/sessions</code>, <code>/session/&lt;sid&gt;</code>, <code>/search</code>, <code>/stats</code>.</p>
+</section>
+
+<!-- ================= TESTS ================= -->
+<section id="tests">
+  <h3>Tests</h3>
+<pre><code>python tests/test_privacy.py        # unit — secret scrubbing + opt-out (no Neo4j)
+python tests/test_project.py        # unit — project derivation (no Neo4j)
+python test_hooks.py                # integration — needs a live Neo4j
+python -m pytest -q                 # full suite
+python dream/eval.py --provider ollama --model qwen3.5:latest   # dream regression gate</code></pre>
+  <p class="small"><code>dream/eval.py</code> seeds a synthetic session, dreams it <code>--dry-run</code>, and asserts
+  JSON validity, ≥2 memories, path schema, project discrimination, and keyword coverage — a regression gate when
+  tuning prompts or swapping models.</p>
+</section>
+
+<!-- ================= WORKFLOWS ================= -->
+<section id="workflows">
+  <h3>Common workflows</h3>
+<pre><code># after install
+./njhook.cmd migrate && ./njhook.cmd health
+
+# after enabling EMBED_PROVIDER for the first time
+./njhook.cmd embed-backfill
+./njhook.cmd reindex                 # after switching embedding models
+
+# daily inspection
+./njhook.cmd stats
+./njhook.cmd list --kind project --since 7d
+./njhook.cmd patterns --since 7d
+
+# promote a recurring pattern to a memory
+./njhook.cmd patterns --promote 135e52        # preview
+./njhook.cmd patterns --promote 135e52 -y     # write
+
+# clean up
+./njhook.cmd consolidate --dry-run            # preview merges
+./njhook.cmd consolidate
+./njhook.cmd archive --stale-days 60
+
+# disaster prep / recovery
+./njhook.cmd backup --with-embeddings --out backup.json
+./njhook.cmd restore --in backup.json --with-embeddings --dry-run
+./njhook.cmd restore --in backup.json --with-embeddings</code></pre>
+</section>
+
+<!-- ================= ENV ================= -->
+<section id="env">
+  <h3>Environment variables</h3>
+  <table>
+    <tr><th>Var</th><th>Default</th><th>Purpose</th></tr>
+    <tr><td><code>HOOKS_NEO4J_URI</code></td><td><code>bolt://localhost:7687</code></td><td>Neo4j Bolt endpoint</td></tr>
+    <tr><td><code>HOOKS_NEO4J_USER</code> / <code>_PASSWORD</code></td><td><code>neo4j</code> / <code>password</code></td><td>Neo4j auth</td></tr>
+    <tr><td><code>EMBED_PROVIDER</code></td><td>unset (recall = fulltext only)</td><td><code>openai</code> | <code>ollama</code></td></tr>
+    <tr><td><code>EMBED_MODEL</code></td><td>per-provider default</td><td>Override the active embedding model</td></tr>
+    <tr><td><code>EMBED_MAX_CHARS</code></td><td>6000</td><td>Truncate embedding inputs (small-context backends)</td></tr>
+    <tr><td><code>OLLAMA_HOST</code></td><td><code>http://localhost:11434</code></td><td>Local Ollama daemon</td></tr>
+    <tr><td><code>DREAM_PROVIDER</code></td><td><code>anthropic</code></td><td>Dream LLM backend</td></tr>
+    <tr><td><code>DREAM_MAX_TOKENS</code></td><td>16384</td><td>Output-token ceiling for memory JSON</td></tr>
+    <tr><td><code>DREAM_ANTHROPIC_MODEL</code></td><td><code>claude-opus-4-7</code></td><td>(also <code>_OPENAI_</code>, <code>_OLLAMA_</code>)</td></tr>
+    <tr><td><code>ANTHROPIC_API_KEY</code> / <code>OPENAI_API_KEY</code></td><td>—</td><td>Required by their dream/embedding providers</td></tr>
+    <tr><td><code>DREAM_MEMORY_MIN_CHARS</code> / <code>_MAX_CHARS</code></td><td>30 / 20000</td><td>Quality-gate body length bounds</td></tr>
+    <tr><td><code>INJECT_PROFILE_LIMIT</code> / <code>_TOOLS_</code> / <code>_PROJECT_</code></td><td>5 each</td><td>SessionStart per-bucket caps</td></tr>
+    <tr><td><code>INJECT_CHAR_BUDGET</code></td><td>4000</td><td>SessionStart total-chars soft cap</td></tr>
+    <tr><td><code>INJECT_PROJECT_BOOST</code></td><td>0.5</td><td>RRF tie-break for in-project hits</td></tr>
+    <tr><td><code>HOOKS_OPT_OUT_PATHS</code></td><td>—</td><td>Semicolon-separated cwds to never capture</td></tr>
+    <tr><td><code>HOOKS_DISABLE_SCRUB</code></td><td>off</td><td><code>1</code> disables secret scrubbing (tests only)</td></tr>
+    <tr><td><code>HOOKS_CAPTURE_TRANSCRIPT</code></td><td>off</td><td><code>1</code> enables transcript capture</td></tr>
+    <tr><td><code>HOOKS_TRANSCRIPT_MAX_CHARS</code></td><td>20000</td><td>Cap for captured transcripts</td></tr>
+    <tr><td><code>DASHBOARD_WRITE</code></td><td>off</td><td><code>1</code> enables dashboard mutations</td></tr>
+    <tr><td><code>DASHBOARD_HOST</code> / <code>_PORT</code></td><td><code>127.0.0.1</code> / 5000</td><td>Dashboard bind</td></tr>
+  </table>
+</section>
+
+<hr>
+<p class="small">Generated for the <code>njhook</code> repo · self-contained HTML, no external dependencies ·
+open <code>docs/index.html</code> in any browser.</p>
+
+</main>
+</div>
+</body>
+</html>
