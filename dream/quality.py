@@ -71,6 +71,76 @@ def grounding_score(content: str, source_text: str) -> float:
     return len(mem & src) / len(mem)
 
 
+# --- Phase H3: anti-poisoning admission signals -----------------------------
+#
+# A memory layer that ingests agent output has a poisoning surface: one short or
+# adversarial session can inject a durable, authoritative-sounding *rule* that
+# then steers every future session. The defence is a closed-vocabulary, threshold
+# gate (no LLM) over three independent signals — a candidate is quarantined to
+# `pending_review` only when ALL THREE fire, so well-corroborated memories pass:
+#   1. directive    — the body asserts a rule/command (closed marker set below),
+#                     the dangerous-if-wrong kind. (Stands in for the typed
+#                     rule/procedure/constraint kinds — D1 typed-kind vocab is
+#                     deferred — so we detect directive *content* instead.)
+#   2. thin source  — distilled from a session with few events → little
+#                     corroboration (`source_event_count < POISON_MIN_EVENTS`).
+#   3. novel        — low token overlap with existing trusted memory, so it
+#                     can't be cross-checked (`novelty >= POISON_NOVELTY_MIN`).
+
+# Closed vocabulary of directive markers (matched as lowercased substrings of the
+# frontmatter-stripped body). Imperative / command shapes, deliberately narrow.
+DIRECTIVE_MARKERS = frozenset({
+    "always", "never", "must ", "do not", "don't",
+    "delete", "remove", "drop", "disable", "enable",
+    "overwrite", "the command is", "rm -", "sudo", "run ",
+})
+
+POISON_MIN_EVENTS = int(os.environ.get("DREAM_POISON_MIN_EVENTS", "5"))
+POISON_NOVELTY_MIN = float(os.environ.get("DREAM_POISON_NOVELTY_MIN", "0.6"))
+
+
+def _strip_frontmatter(content: str) -> str:
+    body = content or ""
+    fm = _FRONTMATTER_RE.match(body)
+    return body[fm.end():] if fm else body
+
+
+def is_directive(content: str) -> bool:
+    """True if the memory body asserts a rule/command (per DIRECTIVE_MARKERS).
+    Frontmatter is stripped first so a `kind:`/`title:` value can't trip it."""
+    body = _strip_frontmatter(content).lower()
+    return any(marker in body for marker in DIRECTIVE_MARKERS)
+
+
+def novelty_score(content: str, existing_corpus: str) -> float:
+    """1.0 = entirely new (no distinctive-token overlap with existing memory),
+    0.0 = fully covered. Empty corpus → 1.0 (nothing to corroborate against =
+    maximally novel); a body with no distinctive tokens → 0.0 (can't be novel).
+    The inverse of grounding's overlap, but with the opposite empty-default: an
+    uncorroborated new claim should read as novel, not as 'can't judge'."""
+    mem = set(_GROUND_TOKEN_RE.findall(_strip_frontmatter(content).lower()))
+    if not mem:
+        return 0.0
+    corpus = set(_GROUND_TOKEN_RE.findall((existing_corpus or "").lower()))
+    if not corpus:
+        return 1.0
+    return 1.0 - len(mem & corpus) / len(mem)
+
+
+def poisoning_risk(content: str, source_event_count: int, novelty: float,
+                   min_events: int = POISON_MIN_EVENTS,
+                   novelty_min: float = POISON_NOVELTY_MIN) -> bool:
+    """True → quarantine to `pending_review`. Fires only when the candidate is a
+    directive AND thinly sourced AND novel (all three). Absence of any signal →
+    False: a directive that's well-corroborated, or emerges from a rich session,
+    or overlaps trusted memory, is NOT held. Defence, not paranoia."""
+    return (
+        is_directive(content)
+        and source_event_count < min_events
+        and novelty >= novelty_min
+    )
+
+
 def validate_memory(memory: dict) -> list[str]:
     """Return a list of error messages. Empty list means the memory is valid."""
     errors: list[str] = []

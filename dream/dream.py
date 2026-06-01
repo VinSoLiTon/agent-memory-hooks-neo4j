@@ -435,6 +435,40 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
         print(f"  grounding gate: {held} low-grounding memory(ies) → pending_review "
               f"(adjudicate with `njhook review`)", file=sys.stderr)
 
+    # Phase H3 — anti-poisoning quarantine. A NEW directive memory (asserts a
+    # rule/command) from a THIN session (few events → little corroboration) that
+    # is also UNSUPPORTED by existing memory (high novelty) is the poisoning
+    # vector: one short session injecting a durable, unverifiable rule. Route it
+    # to pending_review regardless of grounding. Updates to an existing-active
+    # memory are never quarantined (consistent with the grounding gate). Skipped
+    # when no events were provided — we can't assess provenance, so don't gate.
+    if valid and events:
+        ev_count = len(events)
+        new_paths = [m["path"] for m in valid
+                     if m["path"] not in existing_active and mem_status.get(m["path"]) == "active"]
+        corpus_by_prefix: dict = {}
+        if new_paths:
+            cand_paths = [m["path"] for m in valid]
+            with driver.session() as _ses:
+                for r in _ses.run(
+                    "MATCH (m:Memory) WHERE coalesce(m.status, 'active') = 'active' "
+                    "AND m.content IS NOT NULL AND NOT m.path IN $exclude "
+                    "RETURN m.path AS p, m.content AS c LIMIT 1000",
+                    exclude=cand_paths):
+                    corpus_by_prefix.setdefault(r["p"].split("/", 1)[0], []).append(r["c"])
+        quarantined = 0
+        for path in new_paths:
+            content = next(m["content"] for m in valid if m["path"] == path)
+            corpus = " ".join(corpus_by_prefix.get(path.split("/", 1)[0], []))
+            nov = quality_mod.novelty_score(content, corpus)
+            if quality_mod.poisoning_risk(content, ev_count, nov):
+                mem_status[path] = "pending_review"
+                quarantined += 1
+        if quarantined:
+            print(f"  anti-poisoning gate: {quarantined} directive memory(ies) from a "
+                  f"thin/novel session → pending_review (adjudicate with `njhook review`)",
+                  file=sys.stderr)
+
     embeds: list[list[float]] = []
     embed_dim: int | None = None
     if valid and embeddings.is_enabled():
