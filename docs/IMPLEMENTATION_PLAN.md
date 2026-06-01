@@ -167,7 +167,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase G — Universal interfaces
 
-**Status:** ⬜ Not started. (Needs C — the shared recall engine, ✅ done.)
+**Status:** 🔵 In progress (PR #17). **PR-1**: shared `hooks/service.py` core + `njhook recall` / `njhook write-event` CLI + REST API (`api/server.py`: `POST /recall`, `POST /events`, `GET /health`). All interfaces route through the same `recall.py` (recall) and `log_event` (capture) the hook uses — a REST↔service parity test pins acceptance #2. **Remaining**: G3 MCP server (4 tools — `search_memory`/`get_project_context`/`record_event`/`propose_memory`); G4 file renderers (AGENTS.md/CLAUDE.md/Cursor/Gemini).
 
 **Goal:** attach arbitrary LLM runtimes over the same recall + write core. (Gap 10, F8.)
 

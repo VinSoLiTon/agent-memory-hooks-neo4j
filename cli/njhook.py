@@ -176,6 +176,42 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recall(args: argparse.Namespace) -> int:
+    """Phase G — recall memories for a prompt over the shared core (same ranking
+    the hook uses). For programmatic use by non-hook runtimes."""
+    import service
+    with driver() as d, d.session() as s:
+        hits = service.recall_context(s, args.prompt, cwd=args.cwd, limit=args.limit)
+    if args.json:
+        import json as _json
+        print(_json.dumps(hits, indent=2))
+    elif not hits:
+        print("(no matches)")
+    else:
+        for h in hits:
+            print(f"[{h['score']:.4f}] {h['path']}\n         {_preview(h['content'], 90)}")
+    return 0
+
+
+def cmd_write_event(args: argparse.Namespace) -> int:
+    """Phase G — capture an event from JSON (stdin or --json FILE) through the same
+    capture path the hooks use (scrub + opt-out + spool/direct)."""
+    import json as _json
+    import log_event
+    if args.json and args.json != "-":
+        raw = open(args.json, encoding="utf-8").read()
+    else:
+        raw = sys.stdin.read()
+    try:
+        data = _json.loads(raw) if raw.strip() else {}
+    except Exception as e:
+        print(f"invalid JSON: {e}", file=sys.stderr)
+        return 2
+    log_event.log_event(data, client=args.client)
+    print("event captured")
+    return 0
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     """Phase E review queue: list / approve / reject / supersede / flag conflicts."""
     import review as rv
@@ -1517,6 +1553,18 @@ def build_parser() -> argparse.ArgumentParser:
     prv.add_argument("action", choices=["list", "approve", "reject", "supersede", "flag"])
     prv.add_argument("paths", nargs="*", help="memory path(s) — 1 for approve/reject, 2 for supersede/flag")
     prv.set_defaults(fn=cmd_review)
+
+    prc = sub.add_parser("recall", help="recall memories for a prompt (Phase G; same core as the hook)")
+    prc.add_argument("prompt")
+    prc.add_argument("--cwd", help="project scope — derive the project from this cwd")
+    prc.add_argument("--limit", type=int, default=5)
+    prc.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    prc.set_defaults(fn=cmd_recall)
+
+    pwe = sub.add_parser("write-event", help="capture an event from JSON (stdin or --json FILE) via the shared capture path")
+    pwe.add_argument("--client", required=True, choices=["claude_code", "codex", "cursor", "gemini"])
+    pwe.add_argument("--json", help="path to a JSON file; '-' or omit reads stdin")
+    pwe.set_defaults(fn=cmd_write_event)
 
     pe = sub.add_parser("edit", help="open a memory in $EDITOR (notepad on Windows)")
     pe.add_argument("path")
