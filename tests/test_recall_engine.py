@@ -13,6 +13,7 @@ import os
 import sys
 
 import pytest
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -89,3 +90,49 @@ def test_all_surfaces_call_the_shared_engine():
     assert "queryNodes('memory_fulltext'" not in dash
     assert "queryNodes('memory_fulltext'" not in cli
     assert "1.0 / (k + rank" not in dash  # old inline dashboard RRF removed
+
+
+# --- C2: ranking signals (importance x decayed recency) ---------------------
+
+def test_importance_factor_is_neutral_at_5_and_clamped():
+    assert recall.importance_factor(5) == 1.0
+    assert recall.importance_factor(10) == 2.0
+    assert recall.importance_factor(1) == 0.2
+    assert recall.importance_factor(99) == 2.0     # clamped to 10
+    assert recall.importance_factor(None) == 1.0   # missing → neutral
+    assert recall.importance_factor("bad") == 1.0  # malformed → neutral
+
+
+def test_recency_factor_decays_and_defaults_to_one():
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    old = recall.recency_factor({"path": "project/x.md", "last_accessed_at": "2025-06-01T00:00:00+00:00"}, now)
+    fresh = recall.recency_factor({"path": "project/y.md", "last_accessed_at": "2026-06-01T00:00:00+00:00"}, now)
+    none = recall.recency_factor({"path": "project/z.md"}, now)
+    assert 0.0 < old < 0.5      # ~1y old at a 30d half-life → heavily decayed
+    assert abs(fresh - 1.0) < 1e-6
+    assert none == 1.0          # no timestamp → treated as fresh, not penalized
+
+
+def test_importance_promotes_a_lower_ranked_hit():
+    # b is ranked below a by RRF, but its high importance must lift it to #1.
+    ft = [
+        {"path": "a", "content": "x", "project": "", "score": 9.0, "importance": 2},
+        {"path": "b", "content": "x", "project": "", "score": 8.0, "importance": 10},
+    ]
+    out = recall.hybrid_merge(ft, [], None, 10, now=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    assert out[0]["path"] == "b"
+
+
+def test_value_density_orders_session_start_truncation():
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    buckets = {
+        "profile": [
+            {"path": "profile/long.md", "content": "L" * 1000, "importance": 2},   # bulky + trivial
+            {"path": "profile/short.md", "content": "short", "importance": 9},      # concise + important
+        ],
+        "tools": [], "project": [],
+    }
+    md, paths = recall.render_session_start(buckets, None, char_budget=5000, now=now)
+    # concise high-importance memory is ordered ahead of the bulky trivial one
+    assert md.index("profile/short.md") < md.index("profile/long.md")
+    assert paths[0] == "profile/short.md"
