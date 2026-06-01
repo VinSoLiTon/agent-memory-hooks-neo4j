@@ -23,12 +23,15 @@ import re
 import sys
 from typing import Iterable
 
-# Pull in privacy.scrub for the secret-leak check. dream/ is imported with
-# hooks/ already on sys.path (set by dream.py before this module loads).
+# Pull in privacy.scrub_high_confidence for the secret-leak check. dream/ is
+# imported with hooks/ already on sys.path (set by dream.py before this loads).
+# We use the high-confidence variant (not scrub()) so the gate rejects only
+# real key shapes, not config docs like `HOOKS_NEO4J_PASSWORD=password` that
+# the KEY=VALUE heuristic would otherwise flag.
 try:
-    from privacy import scrub  # type: ignore
+    from privacy import scrub_high_confidence  # type: ignore
 except ImportError:
-    def scrub(s):  # type: ignore
+    def scrub_high_confidence(s):  # type: ignore
         return s
 
 
@@ -81,10 +84,11 @@ def validate_memory(memory: dict) -> list[str]:
                 f"(allowed: {sorted(VALID_KINDS)})"
             )
 
-    # Defense in depth: a model can hallucinate a secret-shaped string from
-    # scrubbed input. Scrub the body and reject if anything matched.
-    scrubbed = scrub(content)
-    if scrubbed != content:
+    # Defense in depth: a model can hallucinate a real secret from scrubbed
+    # input. Reject only on high-confidence key shapes (sk-ant-, AKIA, JWT,
+    # PEM, ...) — NOT the KEY=VALUE heuristic, which fires on legitimate
+    # config documentation (e.g. `HOOKS_NEO4J_PASSWORD=password`).
+    if scrub_high_confidence(content) != content:
         errors.append("body contains a secret-shaped string the dream phase generated; rejecting")
 
     return errors

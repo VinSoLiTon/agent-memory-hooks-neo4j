@@ -53,7 +53,11 @@ NEO4J_URI = os.environ.get("HOOKS_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("HOOKS_NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.environ.get("HOOKS_NEO4J_PASSWORD", "password")
 
-MAX_TOKENS = 4096
+# Output-token ceiling for the LLM's memory JSON. 4096 truncated the response
+# mid-string on large sessions (many memories), producing invalid JSON that
+# _extract_json_object couldn't parse. Bumped + env-overridable. It's only a
+# ceiling — you pay for tokens actually generated, not this number.
+MAX_TOKENS = int(os.environ.get("DREAM_MAX_TOKENS", "16384"))
 
 # System prompts now live in dream/prompts.py (per-provider variants).
 from prompts import system_prompt_for  # type: ignore  # noqa: E402
@@ -76,11 +80,52 @@ def parse_since(s: str) -> datetime:
     return datetime.now(timezone.utc) - delta
 
 
+def _walk_session_events(ses, session_key: str) -> list[dict]:
+    """Walk one session's event chain a single NEXT hop at a time.
+
+    Why not `MATCH (s)-[:FIRST_EVENT|NEXT*0..]->(e:Event)`? That unbounded
+    variable-length expansion materializes a path for every reachable event and
+    blows Neo4j's transaction-memory pool
+    (Neo.TransientError.General.MemoryPoolOutOfMemoryError, default 2.7 GiB) on
+    long or branched chains — in practice any session past ~150 events fails
+    outright. Walking the linked list explicitly is a series of O(1) single-hop
+    lookups with bounded memory. A `seen` set guards against corrupted chains
+    (duplicate / branching NEXT edges) so a damaged graph can't loop forever.
+
+    Returns the event property dicts in chain order (== append/timestamp order).
+    """
+    first = ses.run(
+        "MATCH (s:Session {session_key: $sk})-[:FIRST_EVENT]->(e:Event) RETURN e",
+        sk=session_key,
+    ).single()
+    if not first:
+        return []
+    events: list[dict] = []
+    seen: set[str] = set()
+    node = dict(first["e"])
+    while node is not None:
+        eid = node.get("event_id")
+        if not eid or eid in seen:
+            break  # missing id or a cycle/branch — stop rather than loop
+        seen.add(eid)
+        events.append(node)
+        nxt = ses.run(
+            "MATCH (:Event {event_id: $eid})-[:NEXT]->(n:Event) RETURN n LIMIT 1",
+            eid=eid,
+        ).single()
+        node = dict(nxt["n"]) if nxt else None
+    return events
+
+
 def fetch_events(driver, session_id: str | None, since: datetime | None):
     """Return list of (session_key, [event_props, ...]) ordered chronologically.
 
     A session is included if it has at least one event newer than its
-    `last_dreamed_at` watermark (or has never been dreamed).
+    `last_dreamed_at` watermark (or has never been dreamed). Events are read by
+    walking each session's NEXT chain (see _walk_session_events) rather than via
+    an unbounded variable-length path, which OOMs Neo4j's transaction-memory
+    pool on large sessions. A cheap LATEST_EVENT timestamp check lets us skip
+    walking sessions that have nothing new since their watermark.
 
     PR-G #5: --session accepts either the composite session_key or a raw
     session_id for ergonomics. If a raw id matches multiple sessions (across
@@ -88,48 +133,62 @@ def fetch_events(driver, session_id: str | None, since: datetime | None):
     candidate list and ask for the explicit session_key. Same disambiguation
     rule as `njhook session <id>`.
     """
-    where, params = ["(s.last_dreamed_at IS NULL OR e.timestamp > s.last_dreamed_at)"], {}
+    since_iso = since.isoformat() if since else None
 
-    if session_id:
-        # Resolve --session to a single session_key first.
-        with driver.session() as ses:
+    with driver.session() as ses:
+        # 1. Resolve the candidate sessions, each with its watermark and the
+        #    timestamp of its LATEST_EVENT (cheap — one hop, no chain walk).
+        if session_id:
             candidates = list(ses.run(
                 "MATCH (s:Session) "
                 "WHERE s.session_key = $sid OR s.session_id = $sid "
+                "OPTIONAL MATCH (s)-[:LATEST_EVENT]->(last:Event) "
                 "RETURN coalesce(s.session_key, s.client + ':' + s.session_id) AS sk, "
-                "       s.client AS client",
+                "       s.client AS client, s.last_dreamed_at AS wm, last.timestamp AS latest",
                 parameters={"sid": session_id},
             ))
-        if not candidates:
-            print(f"--session: no session matching {session_id!r}", file=sys.stderr)
-            return []
-        if len(candidates) > 1:
-            print(
-                f"--session: raw id {session_id!r} matches {len(candidates)} sessions across clients:",
-                file=sys.stderr,
-            )
-            for c in candidates:
-                print(f"  {c['sk']}  (client={c['client']})", file=sys.stderr)
-            print("\nRe-run with the explicit session_key (e.g. claude_code:<id>).", file=sys.stderr)
-            return []
-        where.append("s.session_key = $session_key")
-        params["session_key"] = candidates[0]["sk"]
+            if not candidates:
+                print(f"--session: no session matching {session_id!r}", file=sys.stderr)
+                return []
+            if len(candidates) > 1:
+                print(
+                    f"--session: raw id {session_id!r} matches {len(candidates)} sessions across clients:",
+                    file=sys.stderr,
+                )
+                for c in candidates:
+                    print(f"  {c['sk']}  (client={c['client']})", file=sys.stderr)
+                print("\nRe-run with the explicit session_key (e.g. claude_code:<id>).", file=sys.stderr)
+                return []
+            targets = candidates
+        else:
+            targets = list(ses.run(
+                "MATCH (s:Session) "
+                "OPTIONAL MATCH (s)-[:LATEST_EVENT]->(last:Event) "
+                "RETURN coalesce(s.session_key, s.client + ':' + s.session_id) AS sk, "
+                "       s.last_dreamed_at AS wm, last.timestamp AS latest"
+            ))
 
-    if since:
-        where.append("e.timestamp >= $since")
-        params["since"] = since.isoformat()
-
-    query = f"""
-    MATCH (s:Session)-[:FIRST_EVENT|NEXT*0..]->(e:Event)
-    WHERE {' AND '.join(where)}
-    RETURN coalesce(s.session_key, s.session_id) AS session_key, e
-    ORDER BY session_key, e.timestamp
-    """
-    grouped: dict[str, list] = {}
-    with driver.session() as ses:
-        for record in ses.run(query, **params):
-            grouped.setdefault(record["session_key"], []).append(dict(record["e"]))
-    return list(grouped.items())
+        # 2. Walk only sessions that have something new; filter to the events
+        #    past the watermark (and >= --since) in Python.
+        out: list[tuple[str, list[dict]]] = []
+        for t in targets:
+            sk, wm, latest = t["sk"], t["wm"], t["latest"]
+            if latest is None:
+                continue  # no events (no LATEST_EVENT) — nothing to dream
+            if wm is not None and latest <= wm:
+                continue  # nothing newer than the watermark
+            if since_iso is not None and latest < since_iso:
+                continue  # newest event predates the --since window
+            events = _walk_session_events(ses, sk)
+            qualifying = [
+                e for e in events
+                if (wm is None or (e.get("timestamp") or "") > wm)
+                and (since_iso is None or (e.get("timestamp") or "") >= since_iso)
+            ]
+            if qualifying:
+                qualifying.sort(key=lambda e: e.get("timestamp") or "")
+                out.append((sk, qualifying))
+    return out
 
 
 def fetch_existing_memories(driver) -> list[dict]:
