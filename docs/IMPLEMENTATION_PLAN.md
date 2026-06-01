@@ -127,7 +127,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase E — Conflict & review workflow
 
-**Status:** ⬜ Not started. (Needs A + D.)
+**Status:** 🔵 In progress (PR #15). **PR-1**: `hooks/review.py` engine (`auto_resolve` by source-authority×recency) + `njhook review list/approve/reject/supersede/flag` + the `pending_review`/`rejected` lifecycle (recall hides non-active) — satisfies acceptance #2/#3/#4. **Remaining (PR-2)**: pre-commit LLM contradiction *detection* (E1, acceptance #1 — the expensive dream-path piece) + the dashboard conflict view + applying `auto_resolve` to the queue.
 
 **Goal:** contradictory memories are detected pre-commit and surfaced, not auto-activated. (Gap 4, F6.)
 
