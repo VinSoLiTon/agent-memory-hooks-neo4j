@@ -12,6 +12,8 @@ North star: *a universal memory layer for LLMs with a human-friendly interface f
 
 This plan turns the research findings into a sequenced, dependency-ordered build. It maps every work item to concrete files, gives a numbered acceptance bar (with negative tests), and gates each phase behind explicit sign-off. Research item refs (`Q1`, `F4`, …) point at `docs/UNIVERSAL_MEMORY_RESEARCH.md §7`.
 
+> **Execution status** is tracked in [`docs/PROGRESS.md`](PROGRESS.md) (status table, acceptance evidence, open acceptance gaps, deviations). Per-phase status tags appear under each heading below — ✅ done & merged · 🔵 in progress / open PR · ⏸ deferred · ⬜ not started. **The program's overall acceptance bar is: every phase's acceptance bar below met (tests + live verification) and merged to `main`** — full alignment between this plan and the shipped system.
+
 ## Guiding constraints (apply to every phase)
 
 - **Additive migration windows.** New `:Memory` properties default to `null`/`active`; legacy `{path, content}` rows keep working untouched. New node labels (`:MemoryRevision`, `:DreamRun`) and relationships are introduced alongside, never by rewriting existing nodes. Each schema change lands in `hooks/schema.py` behind idempotent `IF NOT EXISTS`.
@@ -23,22 +25,24 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Program overview
 
-| Phase | Goal | Research items | Depends on | Est. PRs |
+| Phase | Status | Goal | Research items | Depends on |
 |---|---|---|---|---|
-| **A — Non-destructive history** | Stop destroying memory state; seed the bi-temporal/provenance schema | Q1, Q2, Q5, F1 (data model) | — | 2–3 |
-| **B — Durable capture** | No silent event loss when Neo4j is down | F4, Gap 1 canonical schema, Gap 8 metrics | — (parallel to A) | 2–3 |
-| **C — Shared recall + ranking** | One ranking engine; use the signals already stamped | F5, Q3, F7, F9 | A | 2–3 |
-| **D — Typed memory + admission gate** | Structured records; block ungrounded dream output | F3, Gap 3 (13-type vocab), Gap 9 evals | A, C | 2–3 |
-| **E — Conflict & review** | Contradictions can't silently become truth | F6 | A, D | 2 |
-| **F — Evolution UI (north-star payoff)** | `--as-of` recall + human timeline/diff/lineage | F2, Q6 | A, C | 2 |
-| **G — Universal interfaces** | Attach any LLM, not just hook-capable CLIs | F8, Gap 10 (REST/CLI/renderers) | C | 2–3 |
-| **H — Governance & eval** | Trustworthy over months | Gap 7 egress, Gap 12 anti-poisoning, Gap 9 CI evals | B, D | 2–3 |
+| **A — Non-destructive history** | ✅ merged (#4) | Stop destroying memory state; seed the bi-temporal/provenance schema | Q1, Q2, Q5, F1 (data model) | — |
+| **B — Durable capture** | ⬜ not started | No silent event loss when Neo4j is down | F4, Gap 1 canonical schema, Gap 8 metrics | — (parallel to A) |
+| **C — Shared recall + ranking** | ✅ merged (#5,#6,#9); ⏸ C4 | One ranking engine; use the signals already stamped | F5, Q3, F7, F9 | A |
+| **D — Typed memory + admission gate** | ⬜ not started | Structured records; block ungrounded dream output | F3, Gap 3 (13-type vocab), Gap 9 evals | A, C |
+| **E — Conflict & review** | ⬜ not started | Contradictions can't silently become truth | F6 | A, D |
+| **F — Evolution UI (north-star payoff)** | 🔵 slice 1 open (#10) | `--as-of` recall + human timeline/diff/lineage | F2, Q6 | A, C |
+| **G — Universal interfaces** | ⬜ not started | Attach any LLM, not just hook-capable CLIs | F8, Gap 10 (REST/CLI/renderers) | C |
+| **H — Governance & eval** | ⬜ not started | Trustworthy over months | Gap 7 egress, Gap 12 anti-poisoning, Gap 9 CI evals | B, D |
 
 **Critical path to the north star:** A → C → F. Phases B, D, E, G, H hang off that spine. A and B are independent and can run concurrently.
 
 ---
 
 ## Phase A — Non-destructive history (the cheap north-star unblocker)
+
+**Status:** ✅ Done — PR #4 merged. Acceptance 1–5 met (7 tests). ⚠ **#6 (backup/restore round-trip of the new fields + `:MemoryRevision`/`:SUPERSEDED_BY` lineage) is OPEN** — see `docs/PROGRESS.md`.
 
 **Goal:** memory writes stop destroying prior state; the additive schema for time + provenance + revisions exists. This is the foundation the evolution UI (Phase F) renders.
 
@@ -62,6 +66,8 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase B — Durable capture (reliability core)
 
+**Status:** ⬜ Not started.
+
 **Goal:** an event is never silently lost when Neo4j is unavailable. (Roadmap Gap 1 + 2.)
 
 **Work items**
@@ -82,6 +88,8 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase C — Shared recall engine + ranking
 
+**Status:** ✅ Done — C1 (#5), C2 (#6), C3 (#9) merged. ⏸ **C4 (cross-encoder reranker) deferred**; ⚠ explicit **vector-only fallback** ranking test still to add — see `docs/PROGRESS.md`.
+
 **Goal:** one ranking implementation reused everywhere; use the recency/importance signals already stamped but unused.
 
 **Work items**
@@ -100,6 +108,8 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase D — Typed memory + admission gate
 
+**Status:** ⬜ Not started. (Also delivers `:EXTRACTED_FROM`, which unblocks Phase F's lineage graph and C3's deferred nucleus expansion.)
+
 **Goal:** structured records; ungrounded dream output can't enter the graph. (Gap 3, 9.)
 
 **Work items**
@@ -117,6 +127,8 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase E — Conflict & review workflow
 
+**Status:** ⬜ Not started. (Needs A + D.)
+
 **Goal:** contradictory memories are detected pre-commit and surfaced, not auto-activated. (Gap 4, F6.)
 
 **Work items**
@@ -133,6 +145,8 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 ---
 
 ## Phase F — Evolution UI (north-star payoff)
+
+**Status:** 🔵 In progress. **Slice 1** (memory history: CLI `history --diff` + dashboard `/memory/<path>/history` timeline + diffs) — PR #10 open. **Slice 2** pending: `--as-of` recall (buildable now), lineage graph (needs D `:EXTRACTED_FROM` + E `:CONTRADICTS`), inline citation footer (Q6).
 
 **Goal:** the human-facing "trace how this memory evolved" experience. (F2, Q6.)
 
@@ -153,6 +167,8 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase G — Universal interfaces
 
+**Status:** ⬜ Not started. (Needs C — the shared recall engine, ✅ done.)
+
 **Goal:** attach arbitrary LLM runtimes over the same recall + write core. (Gap 10, F8.)
 
 **Work items**
@@ -169,6 +185,8 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 ---
 
 ## Phase H — Governance & evaluation
+
+**Status:** ⬜ Not started. (Needs B + D.)
 
 **Goal:** trustworthy over months of multi-agent use. (Gap 7, 12.)
 
