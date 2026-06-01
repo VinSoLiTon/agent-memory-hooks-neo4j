@@ -108,7 +108,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase D — Typed memory + admission gate
 
-**Status:** ⬜ Not started. (Also delivers `:EXTRACTED_FROM`, which unblocks Phase F's lineage graph and C3's deferred nucleus expansion.)
+**Status:** 🔵 In progress (PR #13). **PR-1**: `:EXTRACTED_FROM` claim-level provenance via heuristic top-K overlap attribution (`dream.attribute_events`; bounded edges, no explosion; `DREAM_EXTRACT_TOPK`/`_MIN_OVERLAP`) — unblocks Phase F's lineage graph + C3 nucleus expansion. **Remaining**: D1 typed `kind` vocabulary (deferred — the 9 Memanto types don't map cleanly to identity memories; needs design, see PROGRESS deviations), D2 A-MAC admission gate (build with the Phase E review surface), D3 eval suites. Model-cited attribution precision is a later upgrade.
 
 **Goal:** structured records; ungrounded dream output can't enter the graph. (Gap 3, 9.)
 
