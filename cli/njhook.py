@@ -33,6 +33,7 @@ if hasattr(sys.stdout, "reconfigure"):
 # Bring in embeddings module (lives next to hooks/) for the backfill command.
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "hooks"))
 import embeddings  # noqa: E402
+import recall  # noqa: E402
 
 NEO4J_URI = os.environ.get("HOOKS_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("HOOKS_NEO4J_USER", "neo4j")
@@ -151,27 +152,21 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def cmd_search(args: argparse.Namespace) -> int:
-    # Escape Lucene reserved chars so prompts with `:`, `-`, `(`, etc. work.
-    import re as _re
-    safe_q = _re.sub(r'([+\-!(){}\[\]^"~*?:\\/]|&&|\|\|)', r'\\\1', args.query)
+    # Phase C: route through the shared recall engine (hooks/recall.py) — same
+    # hybrid RRF + lifecycle filtering as the hook and dashboard. This upgrades
+    # the CLI from fulltext-only to hybrid (vector hits fold in when
+    # EMBED_PROVIDER is set); --min-score still gates the fulltext stage and the
+    # printed score is the fused RRF score.
     with driver() as d, d.session() as s:
-        rows = list(
-            s.run(
-                """
-                CALL db.index.fulltext.queryNodes('memory_fulltext', $q)
-                YIELD node, score
-                WHERE score > $min
-                RETURN node.path AS path, node.content AS content, score
-                ORDER BY score DESC LIMIT $limit
-                """,
-                parameters={"q": safe_q, "min": args.min_score, "limit": args.limit},
-            )
+        rows = recall.prompt_query(
+            s, args.query, current_project=None,
+            limit=args.limit, min_score=args.min_score,
         )
     if not rows:
         print("(no matches)")
         return 0
     for r in rows:
-        print(f"[{r['score']:5.2f}] {r['path']}\n         {_preview(r['content'], 90)}")
+        print(f"[{r['score']:6.4f}] {r['path']}\n         {_preview(r['content'], 90)}")
     return 0
 
 
