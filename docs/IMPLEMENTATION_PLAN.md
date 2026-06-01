@@ -108,7 +108,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase D — Typed memory + admission gate
 
-**Status:** 🔵 In progress (#13, #16). **PR-1**: `:EXTRACTED_FROM` claim-level provenance via heuristic top-K overlap attribution (`dream.attribute_events`; bounded, no explosion). **PR-2**: A-MAC grounding admission gate — `quality.grounding_score` (memory body vs source transcript); a NEW memory below `DREAM_GROUNDING_MIN` (0.10) is routed to `pending_review` (recall hides it; `njhook review` adjudicates — Phase E loop), while updates to existing-active memories are never gated (no clobber). **Remaining**: D1 typed `kind` vocabulary (deferred — the 9 Memanto types don't map cleanly to identity memories; needs design), D3 eval suites; model-cited attribution precision upgrade. (Caveat: grounding catches off-topic fabrication, not subtle factual errors.)
+**Status:** 🔵 In progress (#13, #16, #22). **PR-1**: `:EXTRACTED_FROM` claim-level provenance via heuristic top-K overlap attribution (`dream.attribute_events`; bounded, no explosion). **PR-2**: A-MAC grounding admission gate — `quality.grounding_score` (memory body vs source transcript); a NEW memory below `DREAM_GROUNDING_MIN` (0.10) is routed to `pending_review` (recall hides it; `njhook review` adjudicates — Phase E loop), while updates to existing-active memories are never gated (no clobber). **PR-3 (D3 retrieval eval)**: `dream/eval_retrieval.py` — a deterministic golden-set retrieval eval over the shared `recall.prompt_query` reporting hit@k + MRR; coined `qqz*` tokens isolate the fixture from any live graph and a shared-token pair exercises ranking discrimination; exposed as `njhook eval-retrieval` and gated by `tests/test_eval_retrieval.py` (fulltext-only for CI determinism: `hit@5==1.0`, `MRR≥0.75`). Partially closes acceptance #3 (retrieval half). **Remaining**: D1 typed `kind` vocabulary (deferred — the 9 Memanto types don't map cleanly to identity memories; needs design); D3 distillation eval (output-path/type quality across providers); model-cited attribution precision upgrade. (Caveat: grounding catches off-topic fabrication, not subtle factual errors.)
 
 **Goal:** structured records; ungrounded dream output can't enter the graph. (Gap 3, 9.)
 
@@ -120,7 +120,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 **Acceptance bar**
 1. `kind` round-trips Python frozenset ↔ JSON-schema enum ↔ Cypher ↔ dashboard; an out-of-vocab kind is rejected by the quality gate.
 2. A memory not grounded in source events (ROUGE-L below θ) is routed to `pending_review`, not `active`. **Negative test:** ungrounded memory absent from injection.
-3. Eval matrix reports pass/fail per provider/model; CI fails on a deterministic semantic regression.
+3. Eval matrix reports pass/fail per provider/model; CI fails on a deterministic semantic regression. *(Retrieval half ✅ — `tests/test_eval_retrieval.py` gates hit@5/MRR on a golden set, deterministic in CI; distillation half — output-path/type quality across providers — still open.)*
 4. Legacy memories with only a path-prefix kind still validate (migration window).
 
 ---
