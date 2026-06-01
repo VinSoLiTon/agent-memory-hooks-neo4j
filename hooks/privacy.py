@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 
 OPTOUT_FILE = Path.home() / ".njhook" / "optout.txt"
+SENSITIVE_FILE = Path.home() / ".njhook" / "sensitive.txt"
 
 
 def _normalize(p: str) -> str:
@@ -35,14 +36,16 @@ def _normalize(p: str) -> str:
         return p.replace("\\", "/").lower()
 
 
-def _load_blocklist() -> list[str]:
+def _load_paths(env_var: str, file_path: Path) -> list[str]:
+    """Normalized prefix list from a ';'-separated env var + an optional
+    one-path-per-line file ('#' comments allowed)."""
     paths: list[str] = []
-    env = os.environ.get("HOOKS_OPT_OUT_PATHS", "")
+    env = os.environ.get(env_var, "")
     if env:
         paths.extend(s.strip() for s in env.split(";") if s.strip())
-    if OPTOUT_FILE.exists():
+    if file_path.exists():
         try:
-            for line in OPTOUT_FILE.read_text(encoding="utf-8").splitlines():
+            for line in file_path.read_text(encoding="utf-8").splitlines():
                 line = line.split("#", 1)[0].strip()
                 if line:
                     paths.append(line)
@@ -51,17 +54,31 @@ def _load_blocklist() -> list[str]:
     return [_normalize(p) for p in paths]
 
 
-def is_optout(cwd: str | None) -> bool:
-    """Return True if `cwd` (or any parent) is in the blocklist."""
+def _load_blocklist() -> list[str]:
+    return _load_paths("HOOKS_OPT_OUT_PATHS", OPTOUT_FILE)
+
+
+def _under_any(cwd: str | None, prefixes: list[str]) -> bool:
     if not cwd:
         return False
     norm = _normalize(cwd)
-    for bad in _load_blocklist():
-        if not bad:
-            continue
-        if norm == bad or norm.startswith(bad.rstrip("/") + "/"):
+    for p in prefixes:
+        if p and (norm == p or norm.startswith(p.rstrip("/") + "/")):
             return True
     return False
+
+
+def is_optout(cwd: str | None) -> bool:
+    """Return True if `cwd` (or any parent) is in the opt-out blocklist."""
+    return _under_any(cwd, _load_blocklist())
+
+
+def sensitivity_for(cwd: str | None) -> str:
+    """Phase H — classify an event's sensitivity by cwd. 'high' when cwd is under a
+    configured sensitive path (HOOKS_SENSITIVE_PATHS, ';'-separated, or
+    ~/.njhook/sensitive.txt); else 'normal'. High-sensitivity sessions are kept off
+    remote dream providers unless DREAM_ALLOW_SENSITIVE_EGRESS=1."""
+    return "high" if _under_any(cwd, _load_paths("HOOKS_SENSITIVE_PATHS", SENSITIVE_FILE)) else "normal"
 
 
 # --- Secret scrubbing ----------------------------------------------------

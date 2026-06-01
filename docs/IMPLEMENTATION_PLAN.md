@@ -186,7 +186,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase H — Governance & evaluation
 
-**Status:** ⬜ Not started. (Needs B + D.)
+**Status:** 🔵 In progress (PR #19). **PR-1 (H1)**: sensitivity tagging — `privacy.sensitivity_for` classifies events by cwd (`HOOKS_SENSITIVE_PATHS` / `~/.njhook/sensitive.txt`), stamped at capture; egress policy — `dream.egress_blocked` keeps high-sensitivity sessions off remote providers (remote primary skipped; remote fallback suppressed) unless `DREAM_ALLOW_SENSITIVE_EGRESS=1`; `health` reports the policy. **Remaining**: H2 audit CLI/dashboard (the `:MemoryRevision`/`:DreamRun` log already records mutations), H3 anti-poisoning / confidence annealing, H4 backup/restore-rehearsal check in health.
 
 **Goal:** trustworthy over months of multi-agent use. (Gap 7, 12.)
 

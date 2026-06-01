@@ -26,9 +26,9 @@ Legend: ✅ done & merged · 🔵 in progress / open PR · ⏸ deferred (with re
 | **E** — Conflict & review | 🔵 in progress (PR #15) | #15 | PR-1: `review.py` engine (auto-resolve by authority×recency) + `njhook review list/approve/reject/supersede/flag` + `pending_review`/`rejected` lifecycle (recall hides them — acceptance #2/#3/#4); 5 tests | PR-2: pre-commit LLM contradiction detection (E1, acceptance #1) + dashboard conflict view + auto-resolve apply |
 | **F** — Evolution UI (north star) | 🔵 slice 1 ✅; slice 2 open (#14) | #10, #14 | slice 1: `memory_history` + `history --diff` + dashboard timeline/diffs. slice 2: `content_as_of` + `history --as-of`; `memory_lineage` (source events via `EXTRACTED_FROM` + supersession) in CLI + dashboard; 4 tests | inline citation footer (Q6); `CONTRADICTS` lineage (needs Phase E) |
 | **G** — Universal interfaces (REST/MCP) | 🔵 in progress (#17, #18) | #17, #18 | PR-1 shared `service.py` + `njhook recall`/`write-event` CLI + REST API (`/recall`,`/events`,`/health`); PR-2 MCP server (`api/mcp_server.py`, 4 tools over the same service, lazy `mcp` import); all reuse `recall.py`+`log_event`; parity test; 5+5 tests | PR-3: file renderers (AGENTS.md/CLAUDE.md/Cursor/Gemini) |
-| **H** — Governance & eval | ⬜ not started | — | — | all (Gap 7 egress, Gap 12 anti-poisoning, Gap 9 CI evals) — needs B, D |
+| **H** — Governance & eval | 🔵 in progress (PR #19) | #19 | PR-1: sensitivity tagging (`privacy.sensitivity_for`, `HOOKS_SENSITIVE_PATHS`) + egress policy (`dream.egress_blocked` — sensitive sessions kept off remote providers; primary skipped, fallback suppressed) + health egress row; 3 tests | PR-2: H2 audit CLI/dashboard, H3 anti-poisoning/confidence annealing, H4 restore-rehearsal check |
 
-**Rollup:** A ✅ · C ✅ (sans C4) · F slice 1 ✅ · B started — ~3 of 8 phases touched. Critical path **A → C → F** is the most advanced; D, E, G, H not started.
+**Rollup:** **all 8 phases A–H now touched.** Complete & aligned: A, C, F (history/diff/as-of/lineage). In progress: B (durable capture PR-1), D (`EXTRACTED_FROM` + grounding gate), E (review workflow), G (CLI+REST+MCP), H (egress policy). Both north-star halves — *trustworthy evolution-tracing* and *universal layer* — are working end-to-end; remaining work is finishing the in-progress phases (no new territory).
 
 ## Acceptance gaps — all resolved (PR #12)
 
@@ -77,11 +77,12 @@ Not numbered phases, but delivered and acceptance-evidenced in their PRs:
 | #15 | merged | Phase E (PR-1) — conflict/review workflow (review CLI + auto-resolve) |
 | #16 | merged | Phase D (PR-2) — A-MAC grounding admission gate |
 | #17 | merged | Phase G (PR-1) — shared service + `recall`/`write-event` CLI + REST API |
-| #18 | open | Phase G (PR-2) — MCP server (4 tools over the shared service) |
+| #18 | merged | Phase G (PR-2) — MCP server (4 tools over the shared service) |
+| #19 | open | Phase H (PR-1) — sensitivity + egress policy |
 
 ## Metrics
 
-- Tests: **19 → 80** over the program (live Neo4j + pure).
+- Tests: **19 → 83** over the program (live Neo4j + pure).
 - `njhook health`: **21 ok / 0 warn / 0 fail**.
 - Graph: ~20 memories, ~34 sessions, ~9.5k events; nightly task registered at 3 PM.
 
