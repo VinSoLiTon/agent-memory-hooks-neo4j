@@ -224,6 +224,7 @@ def memory_view(path: str):
         abort(404, f"no memory at {path}")
 
     body = f'<h1 class="mono">{escape(r["path"])}</h1>'
+    body += f'<p><a href="{url_for("memory_history_view", path=path)}">View history / evolution &rarr;</a></p>'
     if WRITE_ENABLED:
         body += '<div class="toolbar">'
         body += f'<a href="{url_for("memory_edit", path=path)}">Edit</a>'
@@ -256,6 +257,51 @@ def memory_view(path: str):
             body += f'<li><a class="mono" href="{url_for("session_view", sid=sid)}">{escape(sid)}</a></li>'
         body += "</ul>"
     return page("memories", path, body)
+
+
+@app.route("/memory/<path:path>/history")
+def memory_history_view(path: str):
+    """Phase F — the memory-evolution view: revision timeline + diffs between
+    consecutive versions, so a human can trace how a memory came to its current form."""
+    with driver().session() as s:
+        hist = recall.memory_history(s, path)
+    if not hist:
+        abort(404, f"no memory at {path}")
+    vs = hist["versions"]
+
+    body = f'<h1 class="mono">{escape(path)} &mdash; history</h1>'
+    body += f'<p><a href="{url_for("memory_view", path=path)}">&larr; back to memory</a></p>'
+    body += f'<p class="muted small">{len(vs)} version(s); status <code>{escape(hist["status"])}</code></p>'
+    body += "<table><tr><th>version</th><th>when</th><th>operation</th><th>by</th><th class='small'>chars</th></tr>"
+    for v in vs:
+        body += (
+            f"<tr><td><b>{escape(v['label'])}</b></td>"
+            f"<td class='muted small'>{escape(fmt_ts(v['ts']))}</td>"
+            f"<td>{escape(v['operation'] or '')}</td>"
+            f"<td class='small muted'>{escape(v['actor'] or '?')}</td>"
+            f"<td class='small muted'>{len(v['content'])}</td></tr>"
+        )
+    body += "</table>"
+
+    if len(vs) > 1:
+        import difflib
+        body += "<h2>diffs</h2>"
+        for i in range(len(vs) - 1):
+            a, b = vs[i], vs[i + 1]
+            body += f"<h3 class='mono'>{escape(a['label'])} &rarr; {escape(b['label'])}</h3><pre>"
+            for line in difflib.unified_diff(
+                a["content"].splitlines(), b["content"].splitlines(), lineterm="", n=2
+            ):
+                style = ""
+                if line.startswith("+") and not line.startswith("+++"):
+                    style = "color:#3a3"
+                elif line.startswith("-") and not line.startswith("---"):
+                    style = "color:#d33"
+                body += f'<span style="{style}">{escape(line)}</span>\n'
+            body += "</pre>"
+    else:
+        body += "<p class='muted'>Only one version so far &mdash; no history to diff yet.</p>"
+    return page("memories", f"{path} history", body)
 
 
 @app.route("/memory/<path:path>/edit", methods=["GET", "POST"])
