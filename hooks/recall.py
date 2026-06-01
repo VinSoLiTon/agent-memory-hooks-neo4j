@@ -367,6 +367,54 @@ def render_session_start(buckets: dict, current_project: str | None = None,
     return "\n".join(parts), emitted_paths
 
 
+EVENT_MIN_SCORE = float(os.environ.get("RECALL_EVENT_MIN_SCORE", "1.0"))
+
+
+def event_search(session, query: str, limit: int = 3) -> list:
+    """Fulltext over raw :Event prompt/tool_response — surfaces relevant session
+    activity that hasn't been distilled into a memory yet (MemMachine: the
+    episodic record is a first-class retrieval target). Returns event snippets
+    (no path — events aren't memories). [] on any error or if the index is absent.
+    A min-score gate keeps raw-event noise out."""
+    if not (query or "").strip():
+        return []
+    raw_limit = max(limit * 3, limit + 5)
+    try:
+        rows = list(session.run(
+            """
+            CALL db.index.fulltext.queryNodes('event_fulltext', $q) YIELD node, score
+            WHERE score > $min_score
+            RETURN coalesce(node.prompt, node.tool_response, '') AS text,
+                   node.event_name AS event_name, coalesce(node.tool_name, '') AS tool,
+                   node.timestamp AS ts, score
+            ORDER BY score DESC
+            LIMIT $limit
+            """,
+            parameters={"q": escape_lucene(query), "min_score": EVENT_MIN_SCORE, "limit": raw_limit},
+        ))
+    except Exception:
+        return []
+    out = []
+    for r in rows:
+        snip = " ".join((r["text"] or "").split())[:200]
+        if snip:
+            out.append({"event_name": r["event_name"], "tool": r["tool"],
+                        "ts": r["ts"], "snippet": snip, "score": r["score"]})
+    return out[:limit]
+
+
+def render_event_context(ev_rows: list) -> str:
+    """Render raw-event hits as a clearly-labelled, separate section (kept apart
+    from curated memories so the two are never confused)."""
+    if not ev_rows:
+        return ""
+    lines = ["# Relevant prior activity (raw events, not yet distilled)\n"]
+    for r in ev_rows:
+        head = r["event_name"] + (f" {r['tool']}" if r.get("tool") else "")
+        lines.append(f"- [{r.get('ts', '?')}] {head}: {r['snippet']}")
+    return "\n".join(lines)
+
+
 def render_prompt(rows: list) -> tuple[str, list[str]]:
     """Render hybrid hits to injection markdown. Returns (markdown, paths)."""
     if not rows:

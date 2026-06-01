@@ -162,11 +162,17 @@ def cmd_search(args: argparse.Namespace) -> int:
             s, args.query, current_project=None,
             limit=args.limit, min_score=args.min_score,
         )
-    if not rows:
+        events = recall.event_search(s, args.query, limit=args.limit) if getattr(args, "events", False) else []
+    if not rows and not events:
         print("(no matches)")
         return 0
     for r in rows:
         print(f"[{r['score']:6.4f}] {r['path']}\n         {_preview(r['content'], 90)}")
+    if events:
+        print("\nraw events (not yet distilled):")
+        for r in events:
+            head = r["event_name"] + (f" {r['tool']}" if r["tool"] else "")
+            print(f"[{r['score']:6.2f}] {r['ts']} {head}\n         {r['snippet'][:90]}")
     return 0
 
 
@@ -1333,10 +1339,11 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("path")
     ps.set_defaults(fn=cmd_show)
 
-    psr = sub.add_parser("search", help="fulltext search memories")
+    psr = sub.add_parser("search", help="hybrid search memories (and optionally raw events)")
     psr.add_argument("query")
     psr.add_argument("--min-score", type=float, default=0.5, dest="min_score")
     psr.add_argument("--limit", type=int, default=10)
+    psr.add_argument("--events", action="store_true", help="also search raw session events (not yet distilled)")
     psr.set_defaults(fn=cmd_search)
 
     pe = sub.add_parser("edit", help="open a memory in $EDITOR (notepad on Windows)")
