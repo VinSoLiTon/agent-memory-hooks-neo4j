@@ -19,9 +19,9 @@ Legend: ✅ done & merged · 🔵 in progress / open PR · ⏸ deferred (with re
 
 | Phase | Status | Delivered by | Acceptance evidence | Open items |
 |---|---|---|---|---|
-| **A** — Non-destructive history | ✅ merged | #4 | 7 tests; revision-chain on content change; `consolidate` supersedes (negative test: no `DETACH DELETE`); recall filters `status='active'`; `:DreamRun`-`WROTE` provenance | ⚠ **A#6** backup/restore of the new fields + `:MemoryRevision`/`:SUPERSEDED_BY` lineage **not yet verified** |
+| **A** — Non-destructive history | ✅ merged & fully aligned | #4, #12 | 7 tests; revision-chain; `consolidate` supersedes (no `DETACH DELETE`); recall filters `status='active'`; backup/restore round-trips new fields + revision/supersession lineage (PR #12) | — (all 6 acceptance items met) |
 | **B** — Durable capture (spool/inbox/DLQ) | 🔵 in progress (PR #11) | #11 | PR-1: append-only fsync spool + `njhook ingest` worker + idempotent replay (Event.event_id = inbox) + DLQ + health backlog row; 6 tests; `HOOKS_CAPTURE_MODE=spool` (default `direct`) | PR-2: canonical OTel `gen_ai.*` schema (Gap 1), DLQ-rate alerting, read-time upcasting, flip default→spool once ingest scheduled |
-| **C** — Shared recall + ranking | ✅ merged (C1–C3) | #5, #6, #9 | shared `recall.py` (negative test: no surface keeps own ranking math); importance×recency ranking + value-density budget; `event_fulltext` + `event_search`; 7+4+3 tests | ⏸ **C4** cross-encoder reranker deferred; ⚠ explicit **vector-only fallback** ranking test not yet written |
+| **C** — Shared recall + ranking | ✅ merged & fully aligned | #5, #6, #9, #12 | shared `recall.py`; importance×recency + value-density budget; `event_fulltext` + `event_search`; vector-only fallback test (PR #12); 7+4+3+1 tests | ⏸ **C4** reranker formally deferred (decision recorded) — out-of-scope for alignment |
 | **D** — Typed memory + admission gate | ⬜ not started | — | — | all (F3 A-MAC gate, 13-type vocab, Gap 9 eval suites); also delivers `:EXTRACTED_FROM` |
 | **E** — Conflict & review | ⬜ not started | — | — | all (F6: contradiction detection, review queue) — needs A, D |
 | **F** — Evolution UI (north star) | 🔵 slice 1 merged (#10) | #10 | `memory_history` engine; CLI `history --diff`; dashboard `/memory/<path>/history` timeline + diffs; 2 tests | slice 2: `--as-of` recall (buildable now), lineage graph (needs D `EXTRACTED_FROM` + E `CONTRADICTS`), inline citation footer (Q6) |
@@ -30,13 +30,13 @@ Legend: ✅ done & merged · 🔵 in progress / open PR · ⏸ deferred (with re
 
 **Rollup:** A ✅ · C ✅ (sans C4) · F slice 1 ✅ · B started — ~3 of 8 phases touched. Critical path **A → C → F** is the most advanced; D, E, G, H not started.
 
-## Acceptance gaps to close for full alignment
+## Acceptance gaps — all resolved (PR #12)
 
-These are delivered-but-incomplete items the "full alignment" goal must resolve:
+1. ✅ **A#6 — backup/restore of new fields + revision lineage.** `cli/njhook.py` backup now exports the Phase A scalar fields (`status`/`ingested_at`/`valid_from`/`valid_until`/`created_by`/`importance`) plus `memory_revisions` + `supersessions` lists; restore recreates the `:MemoryRevision` chain + `:SUPERSEDED_BY` edges idempotently. Round-trip test: `tests/test_backup_phase_a.py`.
+2. ✅ **C — vector-only fallback test.** `tests/test_recall_engine.py::test_hybrid_merge_vector_only_when_fulltext_empty` pins the fulltext-empty / vector-only ranking path.
+3. ✅ **C4 — reranker: formally deferred (decision recorded).** No cross-encoder reranker until an eval suite proves RRF leaves quality on the table — don't add latency + a dependency without evidence (Ollama has no `/api/rerank`; HF `FlagReranker` is the CPU path if/when justified). C4 is **out-of-scope for Phase C "fully aligned"**; revisit once the Phase D/H eval matrix exists.
 
-1. **A#6 — backup/restore of new fields + revision lineage.** PR #4 added the schema (`ingested_at`/`valid_from`/`valid_until`/`status`/`created_by`, `:MemoryRevision`, `:SUPERSEDED_BY`, `:DreamRun`) but did **not** update `cli/njhook.py` backup/restore to round-trip them. The event-projection field list and the memory projection need the new fields, and the revision/supersession lineage needs export/restore. **Action:** a small follow-up PR + round-trip test.
-2. **C — vector-only fallback test.** Phase C acceptance item 2 lists "vector-only fallback" among the ranking behaviours to pin; `test_recall_engine.py` covers fusion, project boost, budget, modes, importance, recency — but not an explicit fulltext-empty / vector-only case. **Action:** add one test.
-3. **C4 — reranker (deferred, not cancelled).** Optional cross-encoder rerank (HF `FlagReranker` CPU path). Deferred in favour of Phase F; revisit before closing Phase C as fully aligned, or explicitly mark C4 out-of-scope in the plan.
+→ **Phases A and C are now fully aligned** with the plan's acceptance bars.
 
 ## Out-of-plan work (shipped)
 
@@ -68,11 +68,12 @@ Not numbered phases, but delivered and acceptance-evidenced in their PRs:
 | #8 | merged | nightly fix — transcript cap + hybrid fallback |
 | #9 | merged | Phase C3 — raw event retrieval |
 | #10 | merged | Phase F (1/2) — memory evolution history (timeline + diff) |
-| #11 | open | Phase B (PR-1) — durable capture spool + ingest worker |
+| #11 | merged | Phase B (PR-1) — durable capture spool + ingest worker |
+| #12 | open | acceptance alignment — A#6 backup/restore lineage + C vector-only test + C4 deferral |
 
 ## Metrics
 
-- Tests: **19 → 55** over the program (live Neo4j + pure).
+- Tests: **19 → 57** over the program (live Neo4j + pure).
 - `njhook health`: **21 ok / 0 warn / 0 fail**.
 - Graph: ~20 memories, ~34 sessions, ~9.5k events; nightly task registered at 3 PM.
 

@@ -42,7 +42,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase A — Non-destructive history (the cheap north-star unblocker)
 
-**Status:** ✅ Done — PR #4 merged. Acceptance 1–5 met (7 tests). ⚠ **#6 (backup/restore round-trip of the new fields + `:MemoryRevision`/`:SUPERSEDED_BY` lineage) is OPEN** — see `docs/PROGRESS.md`.
+**Status:** ✅ Done & fully aligned — PR #4 (acceptance 1–5, 7 tests) + PR #12 (#6: backup/restore round-trips the new fields + `:MemoryRevision`/`:SUPERSEDED_BY` lineage, round-trip test). All 6 acceptance items met.
 
 **Goal:** memory writes stop destroying prior state; the additive schema for time + provenance + revisions exists. This is the foundation the evolution UI (Phase F) renders.
 
@@ -88,7 +88,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase C — Shared recall engine + ranking
 
-**Status:** ✅ Done — C1 (#5), C2 (#6), C3 (#9) merged. ⏸ **C4 (cross-encoder reranker) deferred**; ⚠ explicit **vector-only fallback** ranking test still to add — see `docs/PROGRESS.md`.
+**Status:** ✅ Done & fully aligned — C1 (#5), C2 (#6), C3 (#9); vector-only fallback test added in PR #12. **C4 (cross-encoder reranker) formally deferred** — no reranker until an eval proves RRF leaves quality on the table; out-of-scope for Phase C alignment.
 
 **Goal:** one ranking implementation reused everywhere; use the recency/importance signals already stamped but unused.
 

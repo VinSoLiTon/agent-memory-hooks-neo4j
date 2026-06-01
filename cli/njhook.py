@@ -723,6 +723,8 @@ def cmd_backup(args: argparse.Namespace) -> int:
         "version": 2,
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "memories": [],
+        "memory_revisions": [],   # Phase A: evolution history
+        "supersessions": [],      # Phase A: (old)-[:SUPERSEDED_BY]->(new) edges
         "sessions": [],
     }
 
@@ -742,12 +744,30 @@ def cmd_backup(args: argparse.Namespace) -> int:
             "       m.last_accessed_at AS last_accessed_at, "
             "       m.consolidated_from AS consolidated_from, "
             "       m.promoted_from_pattern AS promoted_from_pattern, "
+            "       m.status AS status, m.ingested_at AS ingested_at, "
+            "       m.valid_from AS valid_from, m.valid_until AS valid_until, "
+            "       m.created_by AS created_by, m.importance AS importance, "
             f"      {emb_clause}"
             "       null AS _end "
             "ORDER BY m.path"
         ):
             d_ = {k: r[k] for k in r.keys() if k != "_end" and r[k] is not None}
             payload["memories"].append(d_)
+
+        # --- Phase A lineage: revision chain + supersession edges (small; always) ---
+        for r in s.run(
+            "MATCH (rev:MemoryRevision)-[:VERSION_OF]->(m:Memory) "
+            "RETURN m.path AS path, rev.content_snapshot AS content_snapshot, "
+            "       rev.status AS status, rev.operation AS operation, "
+            "       rev.actor AS actor, rev.ts AS ts "
+            "ORDER BY m.path, rev.ts"
+        ):
+            payload["memory_revisions"].append({k: r[k] for k in r.keys() if r[k] is not None})
+        for r in s.run(
+            "MATCH (old:Memory)-[:SUPERSEDED_BY]->(new:Memory) "
+            "RETURN old.path AS from_path, new.path AS to_path"
+        ):
+            payload["supersessions"].append({"from_path": r["from_path"], "to_path": r["to_path"]})
 
         # --- sessions (streaming, scoped) ---------------------------------
         if args.with_sessions:
@@ -926,6 +946,8 @@ def cmd_restore(args: argparse.Namespace) -> int:
     payload = _json.loads(in_path.read_text(encoding="utf-8"))
     memories = payload.get("memories") or []
     sessions = payload.get("sessions") or []
+    revisions = payload.get("memory_revisions") or []     # Phase A lineage
+    supersessions = payload.get("supersessions") or []
 
     validation_errors = _validate_backup(memories, sessions)
     if validation_errors:
@@ -1016,6 +1038,28 @@ def cmd_restore(args: argparse.Namespace) -> int:
             s.run(
                 "MERGE (m:Memory {path: $path}) SET m += $props",
                 parameters={"path": m["path"], "props": props},
+            )
+
+        # Phase A lineage — recreate the :MemoryRevision chain + :SUPERSEDED_BY
+        # edges idempotently (MERGE by target-path + ts + snapshot / by path pair).
+        for rev in revisions:
+            p = rev.get("path")
+            if not p:
+                continue
+            s.run(
+                "MATCH (m:Memory {path: $path}) "
+                "MERGE (m)<-[:VERSION_OF]-(r:MemoryRevision {ts: $ts, content_snapshot: $cs}) "
+                "SET r.status = $st, r.operation = $op, r.actor = $ac",
+                parameters={"path": p, "ts": rev.get("ts"), "cs": rev.get("content_snapshot"),
+                            "st": rev.get("status"), "op": rev.get("operation"), "ac": rev.get("actor")},
+            )
+        for sup in supersessions:
+            fr, to = sup.get("from_path"), sup.get("to_path")
+            if not fr or not to:
+                continue
+            s.run(
+                "MATCH (a:Memory {path: $fr}), (b:Memory {path: $to}) MERGE (a)-[:SUPERSEDED_BY]->(b)",
+                parameters={"fr": fr, "to": to},
             )
 
         # Sessions
