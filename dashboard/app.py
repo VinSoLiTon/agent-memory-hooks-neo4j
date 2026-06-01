@@ -34,6 +34,7 @@ from markupsafe import Markup, escape
 # Pull in the shared modules from hooks/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
 import embeddings  # noqa: E402
+import recall  # noqa: E402
 
 NEO4J_URI = os.environ.get("HOOKS_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("HOOKS_NEO4J_USER", "neo4j")
@@ -387,57 +388,18 @@ def search():
     if not q:
         return redirect(url_for("memories"))
 
-    # Escape Lucene reserved chars so user queries with `:`, `-`, `(`, etc. work.
-    import re as _re
-    safe_q = _re.sub(r'([+\-!(){}\[\]^"~*?:\\/]|&&|\|\|)', r'\\\1', q)
-
-    rows = []
+    # Phase C: one shared recall engine (hooks/recall.py) — same hybrid RRF +
+    # lifecycle filtering the hook uses, so dashboard search can't drift from it.
+    # This also picks up the Phase A status filter (superseded / pending_review
+    # memories are excluded), which the old inline query did not apply.
     with driver().session() as s:
-        try:
-            rows.extend(s.run(
-                """
-                CALL db.index.fulltext.queryNodes('memory_fulltext', $q)
-                YIELD node, score
-                WHERE coalesce(node.archived,false) = false
-                RETURN node.path AS path, node.content AS content, score, 'fulltext' AS source
-                ORDER BY score DESC LIMIT 20
-                """,
-                parameters={"q": safe_q},
-            ).data())
-        except Exception:
-            pass
-        if embeddings.is_enabled():
-            try:
-                qvec = embeddings.embed([q])
-                if qvec:
-                    rows.extend(s.run(
-                        """
-                        CALL db.index.vector.queryNodes('memory_embeddings', 20, $qvec)
-                        YIELD node, score
-                        WHERE coalesce(node.archived,false) = false
-                        RETURN node.path AS path, node.content AS content, score, 'vector' AS source
-                        """,
-                        parameters={"qvec": qvec[0]},
-                    ).data())
-            except Exception:
-                pass
-
-    # Reciprocal Rank Fusion across the two streams.
-    by_path: dict[str, dict] = {}
-    rrf: dict[str, float] = {}
-    k = 60
-    for source in ("fulltext", "vector"):
-        ranked = [r for r in rows if r["source"] == source]
-        for rank, r in enumerate(ranked):
-            rrf[r["path"]] = rrf.get(r["path"], 0.0) + 1.0 / (k + rank + 1)
-            by_path.setdefault(r["path"], r)
-    ordered = sorted(by_path.values(), key=lambda r: rrf[r["path"]], reverse=True)[:30]
+        ordered = recall.prompt_query(s, q, current_project=None, limit=30)
 
     body = f"<h1>Search results for <code>{escape(q)}</code></h1>"
     if not ordered:
         body += "<p class='muted'>no matches</p>"
     else:
-        body += "<table><tr><th>path</th><th>preview</th><th class='small'>rrf</th></tr>"
+        body += "<table><tr><th>path</th><th>preview</th><th class='small'>score</th></tr>"
         for r in ordered:
             preview = (r["content"] or "").splitlines()
             # skip frontmatter
@@ -453,7 +415,7 @@ def search():
             body += (
                 f'<tr><td><a class="mono" href="{url_for("memory_view", path=r["path"])}">{escape(r["path"])}</a></td>'
                 f'<td class="small muted">{escape(line[:160])}</td>'
-                f'<td class="small muted">{rrf[r["path"]]:.4f}</td></tr>'
+                f'<td class="small muted">{r["score"]:.4f}</td></tr>'
             )
         body += "</table>"
     return page("memories", f"search: {q}", body, q=q)
