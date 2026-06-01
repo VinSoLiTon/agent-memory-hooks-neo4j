@@ -244,3 +244,55 @@ def test_value_density_orders_session_start_truncation():
     # concise high-importance memory is ordered ahead of the bulky trivial one
     assert md.index("profile/short.md") < md.index("profile/long.md")
     assert paths[0] == "profile/short.md"
+
+
+# --- Phase F slice 2: as-of reconstruction + lineage ------------------------
+
+def test_content_as_of_reconstructs_point_in_time():
+    versions = [
+        {"label": "v1", "ts": "2026-06-02T00:00:00+00:00", "content": "C0 oldest"},
+        {"label": "v2", "ts": "2026-06-03T00:00:00+00:00", "content": "C1 middle"},
+        {"label": "current", "ts": "2026-06-03T00:00:00+00:00", "content": "C2 current"},
+    ]
+    assert recall.content_as_of(versions, "2026-06-01T12:00:00+00:00") == "C0 oldest"   # before first change
+    assert recall.content_as_of(versions, "2026-06-02T12:00:00+00:00") == "C1 middle"   # between changes
+    assert recall.content_as_of(versions, "2026-06-04T00:00:00+00:00") == "C2 current"  # after all changes
+
+
+@pytest.fixture()
+def lineage_driver():
+    d = GraphDatabase.driver(_URI, auth=(_USER, _PWD),
+                             notifications_disabled_classifications=["UNRECOGNIZED"])
+
+    def _clean(s):
+        s.run("MATCH (r:MemoryRevision)-[:VERSION_OF]->(m:Memory) WHERE m.path STARTS WITH 'general/__lin' DETACH DELETE r")
+        s.run("MATCH (m:Memory) WHERE m.path STARTS WITH 'general/__lin' DETACH DELETE m")
+        s.run("MATCH (e:Event) WHERE e.event_id STARTS WITH '__lin_' DETACH DELETE e")
+
+    with d.session() as s:
+        _clean(s)
+        s.run(
+            """
+            CREATE (m:Memory {path:$cur, content:'current', status:'active', updated_at:'2026-06-03T00:00:00+00:00'})
+            CREATE (old:Memory {path:$old, content:'old', status:'superseded'})
+            CREATE (old)-[:SUPERSEDED_BY]->(m)
+            CREATE (e:Event {event_id:'__lin_e1', event_name:'UserPromptSubmit', prompt:'the source prompt', timestamp:'2026-06-02T00:00:00+00:00'})
+            CREATE (m)-[:EXTRACTED_FROM]->(e)
+            """,
+            cur="general/__lin.md", old="general/__lin_old.md",
+        )
+    try:
+        yield d
+    finally:
+        with d.session() as s:
+            _clean(s)
+        d.close()
+
+
+def test_memory_lineage_returns_source_events_and_supersession(lineage_driver):
+    with lineage_driver.session() as s:
+        lin = recall.memory_lineage(s, "general/__lin.md")
+    assert lin is not None
+    assert any(e["event_id"] == "__lin_e1" for e in lin["source_events"])
+    assert "general/__lin_old.md" in lin["supersedes"]
+    assert lin["superseded_by"] == []

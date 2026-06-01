@@ -146,7 +146,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase F — Evolution UI (north-star payoff)
 
-**Status:** 🔵 In progress. **Slice 1** (memory history: CLI `history --diff` + dashboard `/memory/<path>/history` timeline + diffs) — PR #10 open. **Slice 2** pending: `--as-of` recall (buildable now), lineage graph (needs D `:EXTRACTED_FROM` + E `:CONTRADICTS`), inline citation footer (Q6).
+**Status:** 🔵 In progress. **Slice 1** ✅ merged (#10) — memory history: `history --diff` + dashboard timeline/diffs. **Slice 2** (PR #14) — `content_as_of` + `history --as-of` point-in-time reconstruction; `memory_lineage` (source events via `:EXTRACTED_FROM` + supersession links) in CLI + dashboard. **Remaining**: inline citation footer (Q6); the `:CONTRADICTS` strand of lineage (needs Phase E).
 
 **Goal:** the human-facing "trace how this memory evolved" experience. (F2, Q6.)
 

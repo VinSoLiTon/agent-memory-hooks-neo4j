@@ -264,7 +264,7 @@ def memory_history_view(path: str):
     """Phase F — the memory-evolution view: revision timeline + diffs between
     consecutive versions, so a human can trace how a memory came to its current form."""
     with driver().session() as s:
-        hist = recall.memory_history(s, path)
+        hist = recall.memory_lineage(s, path)
     if not hist:
         abort(404, f"no memory at {path}")
     vs = hist["versions"]
@@ -272,6 +272,25 @@ def memory_history_view(path: str):
     body = f'<h1 class="mono">{escape(path)} &mdash; history</h1>'
     body += f'<p><a href="{url_for("memory_view", path=path)}">&larr; back to memory</a></p>'
     body += f'<p class="muted small">{len(vs)} version(s); status <code>{escape(hist["status"])}</code></p>'
+
+    # Lineage — how this memory came to be (Phase F slice 2).
+    if hist.get("supersedes") or hist.get("superseded_by") or hist.get("source_events"):
+        body += "<h2>lineage</h2>"
+        for older in hist.get("supersedes", []):
+            body += (f'<div class="row"><div>supersedes</div><div><a class="mono" '
+                     f'href="{url_for("memory_view", path=older)}">{escape(older)}</a></div></div>')
+        for newer in hist.get("superseded_by", []):
+            body += (f'<div class="row"><div>superseded by</div><div><a class="mono" '
+                     f'href="{url_for("memory_view", path=newer)}">{escape(newer)}</a></div></div>')
+        if hist.get("source_events"):
+            body += "<h3>extracted from source events</h3><table><tr><th>when</th><th>event</th><th>excerpt</th></tr>"
+            for e in hist["source_events"]:
+                head = escape(e["event_name"] + (f" {e['tool']}" if e["tool"] else ""))
+                body += (f"<tr><td class='muted small'>{escape(fmt_ts(e['ts']))}</td><td>{head}</td>"
+                         f"<td class='small muted'>{escape(e['snippet'])}</td></tr>")
+            body += "</table>"
+
+    body += "<h2>versions</h2>"
     body += "<table><tr><th>version</th><th>when</th><th>operation</th><th>by</th><th class='small'>chars</th></tr>"
     for v in vs:
         body += (

@@ -187,17 +187,38 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def cmd_history(args: argparse.Namespace) -> int:
-    """Show a memory's revision timeline — how it evolved over dream runs."""
+    """Show a memory's revision timeline + lineage — how it evolved and came to be."""
     with driver() as d, d.session() as s:
-        hist = recall.memory_history(s, args.path)
+        hist = recall.memory_lineage(s, args.path)
     if hist is None:
         print(f"no memory at path: {args.path}", file=sys.stderr)
         return 1
     vs = hist["versions"]
+
+    # --as-of: reconstruct the body that was current at the given timestamp.
+    if getattr(args, "as_of", None):
+        body = recall.content_as_of(vs, args.as_of)
+        print(f"# {hist['path']} as of {args.as_of}\n")
+        print(body or "(no content)")
+        return 0
+
     print(f"{hist['path']}  [{hist['status']}]  ({len(vs)} version(s))")
     for v in vs:
         when = str(v["ts"])[:19].replace("T", " ") if v["ts"] else "?"
         print(f"  {v['label']:<8} {when}  {v['operation'] or ''} by {v['actor'] or '?'}  ({len(v['content'])} chars)")
+
+    # Lineage: where this memory came from / what it superseded.
+    if hist.get("supersedes"):
+        print("  supersedes:   " + ", ".join(hist["supersedes"]))
+    if hist.get("superseded_by"):
+        print("  superseded by: " + ", ".join(hist["superseded_by"]))
+    if hist.get("source_events"):
+        print(f"  extracted from {len(hist['source_events'])} source event(s):")
+        for e in hist["source_events"]:
+            when = str(e["ts"])[:19].replace("T", " ") if e["ts"] else "?"
+            head = e["event_name"] + (f" {e['tool']}" if e["tool"] else "")
+            print(f"    [{when}] {head}: {e['snippet'][:80]}")
+
     if args.diff and len(vs) > 1:
         import difflib
         for i in range(len(vs) - 1):
@@ -1443,6 +1464,7 @@ def build_parser() -> argparse.ArgumentParser:
     phi = sub.add_parser("history", help="show a memory's revision timeline (how it evolved)")
     phi.add_argument("path")
     phi.add_argument("--diff", action="store_true", help="show unified diffs between consecutive versions")
+    phi.add_argument("--as-of", dest="as_of", help="reconstruct the body that was current at this ISO timestamp")
     phi.set_defaults(fn=cmd_history)
 
     pin = sub.add_parser("ingest", help="drain the durable event spool into Neo4j (Phase B; idempotent)")
