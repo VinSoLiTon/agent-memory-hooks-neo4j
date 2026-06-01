@@ -33,7 +33,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 | **D — Typed memory + admission gate** | ⬜ not started | Structured records; block ungrounded dream output | F3, Gap 3 (13-type vocab), Gap 9 evals | A, C |
 | **E — Conflict & review** | ⬜ not started | Contradictions can't silently become truth | F6 | A, D |
 | **F — Evolution UI (north-star payoff)** | ✅ done (#10, #14, #21) | `--as-of` recall + human timeline/diff/lineage | F2, Q6 | A, C |
-| **G — Universal interfaces** | ⬜ not started | Attach any LLM, not just hook-capable CLIs | F8, Gap 10 (REST/CLI/renderers) | C |
+| **G — Universal interfaces** | ✅ done (#17,#18,#23) | Attach any LLM, not just hook-capable CLIs | F8, Gap 10 (REST/CLI/renderers) | C |
 | **H — Governance & eval** | ⬜ not started | Trustworthy over months | Gap 7 egress, Gap 12 anti-poisoning, Gap 9 CI evals | B, D |
 
 **Critical path to the north star:** A → C → F. Phases B, D, E, G, H hang off that spine. A and B are independent and can run concurrently.
@@ -167,7 +167,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase G — Universal interfaces
 
-**Status:** 🔵 In progress (#17, #18). **PR-1**: shared `hooks/service.py` + `njhook recall`/`write-event` CLI + REST API (`api/server.py`). **PR-2**: MCP server (`api/mcp_server.py`) — 4 tools (`search_memory`/`get_project_context`/`record_event`/`propose_memory`) over the same `service.py`; `mcp` imported lazily so tools are unit-tested without the package; `propose_memory` is synchronous (not the experimental MCP Tasks primitive). All interfaces route through the same `recall.py` + `log_event` (acceptance #1/#2 — parity test). **Remaining**: G4 file renderers (AGENTS.md/CLAUDE.md/Cursor/Gemini).
+**Status:** ✅ Done & fully aligned (#17, #18, #23) — all four work items shipped. **PR-1**: shared `hooks/service.py` + `njhook recall`/`write-event` CLI + REST API (`api/server.py`). **PR-2**: MCP server (`api/mcp_server.py`) — 4 tools (`search_memory`/`get_project_context`/`record_event`/`propose_memory`) over the same `service.py`; `mcp` imported lazily so tools are unit-tested without the package; `propose_memory` is synchronous (not the experimental MCP Tasks primitive). **PR-3 (G4)**: file renderers — `hooks/render.py` + `njhook render --target agents|claude|gemini|cursor|all` writes the session-start memory into each runtime's startup context file as a delimited *managed block*, preserving human content outside the markers (idempotent; Cursor `.mdc` frontmatter kept outside the block). Content comes from the same `session_start_buckets` + `render_session_start` the hook injects, so file and hook can't disagree. All interfaces route through the same `recall.py` + `log_event` (acceptance #1/#2 — parity + closed-vocab tests). 13 render tests.
 
 **Goal:** attach arbitrary LLM runtimes over the same recall + write core. (Gap 10, F8.)
 
@@ -175,7 +175,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 - **G1 — `njhook recall`/`write-event`/`write-memory`** CLI over `recall.py` + the spool.
 - **G2 — REST API** (`POST /events`, `POST /recall`, `POST /memories`, `GET /health`) — thin layer over the same core.
 - **G3 — MCP server** — 4-tool minimum (`search_memory`, `get_project_context`, `record_event`, `propose_memory`). `propose_memory` async via MCP Tasks (note: **experimental** spec — compatibility bet).
-- **G4 — File renderers** — `AGENTS.md`/`CLAUDE.md`/Cursor rules/Gemini context from the active memory set.
+- **G4 — File renderers** ✅ — `AGENTS.md`/`CLAUDE.md`/Cursor rules/Gemini context from the active memory set (`hooks/render.py`, `njhook render`). Managed-block splice: re-rendering replaces only the marked block, never human content; closed target vocabulary; `--stdout` previews without writing.
 
 **Acceptance bar**
 1. Hook, CLI, REST, and MCP paths all reuse `recall.py` and the same schema validation. **Negative test:** no path bypasses validation.
