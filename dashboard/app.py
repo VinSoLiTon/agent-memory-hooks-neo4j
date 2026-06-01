@@ -275,7 +275,7 @@ def memory_history_view(path: str):
     body += f'<p class="muted small">{len(vs)} version(s); status <code>{escape(hist["status"])}</code></p>'
 
     # Lineage — how this memory came to be (Phase F slice 2).
-    if hist.get("supersedes") or hist.get("superseded_by") or hist.get("source_events"):
+    if hist.get("supersedes") or hist.get("superseded_by") or hist.get("contradicts") or hist.get("source_events"):
         body += "<h2>lineage</h2>"
         for older in hist.get("supersedes", []):
             body += (f'<div class="row"><div>supersedes</div><div><a class="mono" '
@@ -283,6 +283,10 @@ def memory_history_view(path: str):
         for newer in hist.get("superseded_by", []):
             body += (f'<div class="row"><div>superseded by</div><div><a class="mono" '
                      f'href="{url_for("memory_view", path=newer)}">{escape(newer)}</a></div></div>')
+        for other in hist.get("contradicts", []):
+            body += (f'<div class="row"><div>contradicts</div><div><a class="mono" '
+                     f'href="{url_for("memory_view", path=other)}">{escape(other)}</a> '
+                     f'<a href="{url_for("review_view")}">(review)</a></div></div>')
         if hist.get("source_events"):
             body += "<h3>extracted from source events</h3><table><tr><th>when</th><th>event</th><th>excerpt</th></tr>"
             for e in hist["source_events"]:

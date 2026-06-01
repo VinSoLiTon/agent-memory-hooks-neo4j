@@ -24,7 +24,7 @@ Legend: ✅ done & merged · 🔵 in progress / open PR · ⏸ deferred (with re
 | **C** — Shared recall + ranking | ✅ merged & fully aligned | #5, #6, #9, #12 | shared `recall.py`; importance×recency + value-density budget; `event_fulltext` + `event_search`; vector-only fallback test (PR #12); 7+4+3+1 tests | ⏸ **C4** reranker formally deferred (decision recorded) — out-of-scope for alignment |
 | **D** — Typed memory + admission gate | 🔵 in progress (#13, #16) | #13, #16 | PR-1 `:EXTRACTED_FROM` (heuristic top-K, bounded); PR-2 A-MAC grounding gate (`quality.grounding_score`; low-grounding NEW memory → `pending_review`, doesn't gate existing-active); 3+3 tests | D1 typed `kind` vocab (design — see deviations); D3 eval suites; model-cited attribution upgrade |
 | **E** — Conflict & review | 🔵 in progress (#15, #20) | #15, #20 | PR-1 `review.py` engine + `njhook review` CLI + lifecycle (acceptance #2/#3/#4); PR-2 `detect_contradiction` engine (injected candidates+judge) + `auto_resolve_all` + `njhook review auto-resolve` + dashboard `/review` conflict view; 5+3 tests | PR-3: wire the LLM judge into the nightly (opt-in) so contradictions auto-flag (acceptance #1 auto-trigger) |
-| **F** — Evolution UI (north star) | 🔵 slice 1 ✅; slice 2 open (#14) | #10, #14 | slice 1: `memory_history` + `history --diff` + dashboard timeline/diffs. slice 2: `content_as_of` + `history --as-of`; `memory_lineage` (source events via `EXTRACTED_FROM` + supersession) in CLI + dashboard; 4 tests | inline citation footer (Q6); `CONTRADICTS` lineage (needs Phase E) |
+| **F** — Evolution UI (north star) | ✅ done & fully aligned | #10, #14, #21 | history + `--diff` + `--as-of`; `memory_lineage` (source events + supersession + `CONTRADICTS`) in CLI + dashboard; inline citation footer (Q6); 6+2 tests | — (all acceptance items met) |
 | **G** — Universal interfaces (REST/MCP) | 🔵 in progress (#17, #18) | #17, #18 | PR-1 shared `service.py` + `njhook recall`/`write-event` CLI + REST API (`/recall`,`/events`,`/health`); PR-2 MCP server (`api/mcp_server.py`, 4 tools over the same service, lazy `mcp` import); all reuse `recall.py`+`log_event`; parity test; 5+5 tests | PR-3: file renderers (AGENTS.md/CLAUDE.md/Cursor/Gemini) |
 | **H** — Governance & eval | 🔵 in progress (PR #19) | #19 | PR-1: sensitivity tagging (`privacy.sensitivity_for`, `HOOKS_SENSITIVE_PATHS`) + egress policy (`dream.egress_blocked` — sensitive sessions kept off remote providers; primary skipped, fallback suppressed) + health egress row; 3 tests | PR-2: H2 audit CLI/dashboard, H3 anti-poisoning/confidence annealing, H4 restore-rehearsal check |
 
@@ -79,11 +79,12 @@ Not numbered phases, but delivered and acceptance-evidenced in their PRs:
 | #17 | merged | Phase G (PR-1) — shared service + `recall`/`write-event` CLI + REST API |
 | #18 | merged | Phase G (PR-2) — MCP server (4 tools over the shared service) |
 | #19 | merged | Phase H (PR-1) — sensitivity + egress policy |
-| #20 | open | Phase E (PR-2) — contradiction-detection engine + auto-resolve + dashboard /review |
+| #20 | merged | Phase E (PR-2) — contradiction-detection engine + auto-resolve + dashboard /review |
+| #21 | open | Phase F (finish) — inline citation footer + CONTRADICTS in lineage |
 
 ## Metrics
 
-- Tests: **19 → 86** over the program (live Neo4j + pure).
+- Tests: **19 → 88** over the program (live Neo4j + pure).
 - `njhook health`: **21 ok / 0 warn / 0 fail**.
 - Graph: ~20 memories, ~34 sessions, ~9.5k events; nightly task registered at 3 PM.
 

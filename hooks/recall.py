@@ -482,6 +482,8 @@ def memory_lineage(session, path: str):
         "MATCH (:Memory {path: $p})-[:SUPERSEDED_BY]->(n:Memory) RETURN n.path AS p", p=path)]
     hist["supersedes"] = [r["p"] for r in session.run(
         "MATCH (o:Memory)-[:SUPERSEDED_BY]->(:Memory {path: $p}) RETURN o.path AS p", p=path)]
+    hist["contradicts"] = [r["p"] for r in session.run(
+        "MATCH (:Memory {path: $p})-[:CONTRADICTS]-(c:Memory) RETURN DISTINCT c.path AS p", p=path)]
     return hist
 
 
@@ -494,4 +496,7 @@ def render_prompt(rows: list) -> tuple[str, list[str]]:
     for r in rows:
         parts.append(f"## {r['path']}\n{r['content']}\n")
         paths.append(r["path"])
+    # Q6 inline citation footer: name the sources so the agent (and a human reading
+    # the transcript) can see exactly which memories informed the context.
+    parts.append(f"_memory used: {', '.join(paths)}_")
     return "\n".join(parts), paths
