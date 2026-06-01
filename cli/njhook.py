@@ -176,6 +176,32 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_history(args: argparse.Namespace) -> int:
+    """Show a memory's revision timeline — how it evolved over dream runs."""
+    with driver() as d, d.session() as s:
+        hist = recall.memory_history(s, args.path)
+    if hist is None:
+        print(f"no memory at path: {args.path}", file=sys.stderr)
+        return 1
+    vs = hist["versions"]
+    print(f"{hist['path']}  [{hist['status']}]  ({len(vs)} version(s))")
+    for v in vs:
+        when = str(v["ts"])[:19].replace("T", " ") if v["ts"] else "?"
+        print(f"  {v['label']:<8} {when}  {v['operation'] or ''} by {v['actor'] or '?'}  ({len(v['content'])} chars)")
+    if args.diff and len(vs) > 1:
+        import difflib
+        for i in range(len(vs) - 1):
+            a, b = vs[i], vs[i + 1]
+            print(f"\n--- {a['label']} -> {b['label']} ---")
+            for line in difflib.unified_diff(
+                (a["content"]).splitlines(), (b["content"]).splitlines(), lineterm="", n=2
+            ):
+                print(line)
+    elif args.diff:
+        print("\n(only one version — nothing to diff yet)")
+    return 0
+
+
 def cmd_delete(args: argparse.Namespace) -> int:
     if not args.yes:
         ans = input(f"Delete memory '{args.path}'? [y/N] ").strip().lower()
@@ -1345,6 +1371,11 @@ def build_parser() -> argparse.ArgumentParser:
     psr.add_argument("--limit", type=int, default=10)
     psr.add_argument("--events", action="store_true", help="also search raw session events (not yet distilled)")
     psr.set_defaults(fn=cmd_search)
+
+    phi = sub.add_parser("history", help="show a memory's revision timeline (how it evolved)")
+    phi.add_argument("path")
+    phi.add_argument("--diff", action="store_true", help="show unified diffs between consecutive versions")
+    phi.set_defaults(fn=cmd_history)
 
     pe = sub.add_parser("edit", help="open a memory in $EDITOR (notepad on Windows)")
     pe.add_argument("path")

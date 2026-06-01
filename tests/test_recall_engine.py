@@ -174,6 +174,51 @@ def test_event_search_finds_raw_event(evt_driver):
     assert all("path" not in h for h in hits)  # events are not memories
 
 
+# --- Phase F: memory evolution history --------------------------------------
+
+@pytest.fixture()
+def hist_driver():
+    d = GraphDatabase.driver(_URI, auth=(_USER, _PWD),
+                             notifications_disabled_classifications=["UNRECOGNIZED"])
+
+    def _clean(s):
+        s.run("MATCH (r:MemoryRevision)-[:VERSION_OF]->(m:Memory) WHERE m.path STARTS WITH 'general/__hist' DETACH DELETE r")
+        s.run("MATCH (m:Memory) WHERE m.path STARTS WITH 'general/__hist' DETACH DELETE m")
+
+    with d.session() as s:
+        _clean(s)
+        s.run(
+            """
+            CREATE (m:Memory {path:$p, content:'C2 current', updated_at:'2026-06-03T00:00:00+00:00',
+                              status:'active', created_by:'dream_test'})
+            CREATE (:MemoryRevision {content_snapshot:'C0 oldest', operation:'dream_update',
+                                     actor:'dream_test', ts:'2026-06-01T00:00:00+00:00'})-[:VERSION_OF]->(m)
+            CREATE (:MemoryRevision {content_snapshot:'C1 middle', operation:'dream_update',
+                                     actor:'dream_test', ts:'2026-06-02T00:00:00+00:00'})-[:VERSION_OF]->(m)
+            """,
+            p="general/__hist.md",
+        )
+    try:
+        yield d
+    finally:
+        with d.session() as s:
+            _clean(s)
+        d.close()
+
+
+def test_memory_history_orders_versions_oldest_to_current(hist_driver):
+    with hist_driver.session() as s:
+        h = recall.memory_history(s, "general/__hist.md")
+    assert [v["label"] for v in h["versions"]] == ["v1", "v2", "current"]
+    assert [v["content"] for v in h["versions"]] == ["C0 oldest", "C1 middle", "C2 current"]
+    assert h["status"] == "active"
+
+
+def test_memory_history_missing_path_returns_none(hist_driver):
+    with hist_driver.session() as s:
+        assert recall.memory_history(s, "general/__hist_does_not_exist.md") is None
+
+
 def test_value_density_orders_session_start_truncation():
     now = datetime(2026, 6, 1, tzinfo=timezone.utc)
     buckets = {

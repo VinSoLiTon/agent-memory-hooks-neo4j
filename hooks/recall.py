@@ -415,6 +415,37 @@ def render_event_context(ev_rows: list) -> str:
     return "\n".join(lines)
 
 
+def memory_history(session, path: str):
+    """A memory's version timeline (oldest → newest) for tracing how it evolved.
+
+    Reconstructed from the Phase A :MemoryRevision chain: each revision is a
+    snapshot of the body that was REPLACED (ordered by its `ts`), so chronological
+    content = [revision snapshots oldest-first] + [the current node]. Returns None
+    if the path doesn't exist."""
+    rec = session.run(
+        """
+        MATCH (m:Memory {path: $path})
+        OPTIONAL MATCH (r:MemoryRevision)-[:VERSION_OF]->(m)
+        WITH m, r ORDER BY r.ts
+        RETURN m.content AS current, m.updated_at AS updated_at,
+               coalesce(m.status, 'active') AS status, m.created_by AS created_by,
+               collect(r {.ts, .operation, .actor, content: r.content_snapshot}) AS revs
+        """,
+        path=path,
+    ).single()
+    if rec is None:
+        return None
+    revs = [rv for rv in (rec["revs"] or []) if rv and rv.get("ts") is not None]
+    versions = []
+    for i, rv in enumerate(revs):
+        versions.append({"label": f"v{i + 1}", "ts": rv.get("ts"),
+                         "operation": rv.get("operation"), "actor": rv.get("actor"),
+                         "content": rv.get("content") or ""})
+    versions.append({"label": "current", "ts": rec["updated_at"], "operation": "current",
+                     "actor": rec["created_by"], "content": rec["current"] or ""})
+    return {"path": path, "status": rec["status"], "versions": versions}
+
+
 def render_prompt(rows: list) -> tuple[str, list[str]]:
     """Render hybrid hits to injection markdown. Returns (markdown, paths)."""
     if not rows:
