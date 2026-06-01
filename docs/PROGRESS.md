@@ -22,7 +22,7 @@ Legend: ✅ done & merged · 🔵 in progress / open PR · ⏸ deferred (with re
 | **A** — Non-destructive history | ✅ merged & fully aligned | #4, #12 | 7 tests; revision-chain; `consolidate` supersedes (no `DETACH DELETE`); recall filters `status='active'`; backup/restore round-trips new fields + revision/supersession lineage (PR #12) | — (all 6 acceptance items met) |
 | **B** — Durable capture (spool/inbox/DLQ) | 🔵 in progress (PR #11) | #11 | PR-1: append-only fsync spool + `njhook ingest` worker + idempotent replay (Event.event_id = inbox) + DLQ + health backlog row; 6 tests; `HOOKS_CAPTURE_MODE=spool` (default `direct`) | PR-2: canonical OTel `gen_ai.*` schema (Gap 1), DLQ-rate alerting, read-time upcasting, flip default→spool once ingest scheduled |
 | **C** — Shared recall + ranking | ✅ merged & fully aligned | #5, #6, #9, #12 | shared `recall.py`; importance×recency + value-density budget; `event_fulltext` + `event_search`; vector-only fallback test (PR #12); 7+4+3+1 tests | ⏸ **C4** reranker formally deferred (decision recorded) — out-of-scope for alignment |
-| **D** — Typed memory + admission gate | ⬜ not started | — | — | all (F3 A-MAC gate, 13-type vocab, Gap 9 eval suites); also delivers `:EXTRACTED_FROM` |
+| **D** — Typed memory + admission gate | 🔵 in progress (PR #13) | #13 | PR-1: `:EXTRACTED_FROM` claim-level provenance via heuristic top-K overlap attribution (`attribute_events`, bounded — no explosion); 3 tests | D1 typed `kind` vocab (design: 9 Memanto types don't map to identity memories — see deviations), D2 A-MAC admission gate (+ Phase E review surface), D3 eval suites |
 | **E** — Conflict & review | ⬜ not started | — | — | all (F6: contradiction detection, review queue) — needs A, D |
 | **F** — Evolution UI (north star) | 🔵 slice 1 merged (#10) | #10 | `memory_history` engine; CLI `history --diff`; dashboard `/memory/<path>/history` timeline + diffs; 2 tests | slice 2: `--as-of` recall (buildable now), lineage graph (needs D `EXTRACTED_FROM` + E `CONTRADICTS`), inline citation footer (Q6) |
 | **G** — Universal interfaces (REST/MCP) | ⬜ not started | — | — | all (F8: REST, MCP, `recall`/`write-event` CLI, file renderers) — needs C |
@@ -48,7 +48,9 @@ Not numbered phases, but delivered and acceptance-evidenced in their PRs:
 
 ## Deviations from the original plan (logged)
 
-- **`:EXTRACTED_FROM` moved from Phase A → Phase D** — linking every memory to every processed event would explode edges on large sessions; claim-level provenance needs the provider to cite source events (a D capability).
+- **`:EXTRACTED_FROM` moved from Phase A → Phase D** — linking every memory to every processed event would explode edges on large sessions. **Delivered in PR #13 via heuristic top-K overlap attribution** (bounded to K edges/memory), *not* model-citation — no provider/prompt change, no local-model risk; model-cited precision is a later upgrade.
+- **D1 typed-`kind` vocabulary needs design before the swap** — the 9 Memanto semantic types (preference/decision/procedure/…) don't map cleanly onto njhook's identity-style memories (e.g. `profile/role`). Deferring the `kind` swap until the vocabulary actually fits njhook's profile/tools/project/general world (likely a typed dimension *alongside* the existing kind, with a migration window).
+- **D2 admission gate is coupled to Phase E** — routing low-grounding memories to `pending_review` strands them unless there's a review surface; build the gate together with a minimal review path.
 - **Phase A same-path model = revision-chain, not duplicate-path nodes** — `Memory.path` is `UNIQUE`; documented in the plan's Phase A design note.
 - **C3 nucleus expansion deferred to Phase D** — it walks `(:Memory)-[:EXTRACTED_FROM]->(:Event)`, which doesn't exist until D.
 - **Phase F split into two slices** — slice 1 (history/diff, #10) shipped; slice 2 (`--as-of` + lineage + citation) pending.
@@ -69,11 +71,12 @@ Not numbered phases, but delivered and acceptance-evidenced in their PRs:
 | #9 | merged | Phase C3 — raw event retrieval |
 | #10 | merged | Phase F (1/2) — memory evolution history (timeline + diff) |
 | #11 | merged | Phase B (PR-1) — durable capture spool + ingest worker |
-| #12 | open | acceptance alignment — A#6 backup/restore lineage + C vector-only test + C4 deferral |
+| #12 | merged | acceptance alignment — A#6 backup/restore lineage + C vector-only test + C4 deferral |
+| #13 | open | Phase D (PR-1) — :EXTRACTED_FROM claim-level provenance (heuristic top-K) |
 
 ## Metrics
 
-- Tests: **19 → 57** over the program (live Neo4j + pure).
+- Tests: **19 → 60** over the program (live Neo4j + pure).
 - `njhook health`: **21 ok / 0 warn / 0 fail**.
 - Graph: ~20 memories, ~34 sessions, ~9.5k events; nightly task registered at 3 PM.
 

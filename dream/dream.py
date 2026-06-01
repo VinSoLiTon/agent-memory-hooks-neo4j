@@ -349,7 +349,38 @@ def _coerce_importance(v):
         return None
 
 
-def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None, provider: str = "unknown", model: str = "unknown") -> int:
+_ATTR_TOKEN_RE = re.compile(r"[a-z0-9_]{4,}")
+
+
+def _attr_tokens(text: str) -> set:
+    return set(_ATTR_TOKEN_RE.findall((text or "").lower()))
+
+
+def attribute_events(content: str, events: list[dict], k: int, min_overlap: int) -> list[str]:
+    """Phase D — heuristic claim-level provenance. Link a memory to the top-K source
+    events whose text most overlaps it (token-set intersection). Deterministic, no
+    model call, bounded to K edges per memory (so no edge explosion on large
+    sessions — the reason :EXTRACTED_FROM was deferred). Approximate; a later upgrade
+    is model-cited source events for precision."""
+    mem = _attr_tokens(content)
+    if not mem:
+        return []
+    scored = []
+    for e in events:
+        eid = e.get("event_id")
+        if not eid:
+            continue
+        et = _attr_tokens(" ".join(
+            str(e.get(f) or "") for f in ("prompt", "tool_input", "tool_response", "tool_name")
+        ))
+        ov = len(mem & et)
+        if ov >= min_overlap:
+            scored.append((ov, eid))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [eid for _, eid in scored[:k]]
+
+
+def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None, provider: str = "unknown", model: str = "unknown", events: list[dict] | None = None) -> int:
     """Upsert memories and advance the session's last_dreamed_at watermark.
 
     `watermark` is the timestamp of the latest event we just dreamed over —
@@ -485,6 +516,27 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
                 "provider": provider, "model": model,
             },
         )
+
+        # Phase D: claim-level provenance — link each memory to its top-K most
+        # textually-overlapping source events (heuristic; bounded, no explosion).
+        # This is what the Phase F lineage view and C3 nucleus expansion walk.
+        if events:
+            topk = int(os.environ.get("DREAM_EXTRACT_TOPK", "3"))
+            min_ov = int(os.environ.get("DREAM_EXTRACT_MIN_OVERLAP", "2"))
+            links = []
+            for m in valid:
+                for eid in attribute_events(m["content"], events, topk, min_ov):
+                    links.append({"path": m["path"], "eid": eid})
+            if links:
+                ses.run(
+                    """
+                    UNWIND $links AS lnk
+                    MATCH (m:Memory {path: lnk.path})
+                    MATCH (e:Event {event_id: lnk.eid})
+                    MERGE (m)-[:EXTRACTED_FROM]->(e)
+                    """,
+                    parameters={"links": links},
+                )
     return len(rows)
 
 
@@ -615,7 +667,7 @@ def main():
                 print(m.get("content", ""))
             if not args.dry_run:
                 watermark = events[-1].get("timestamp")
-                n = write_memories(driver, session_key, memories, watermark, project=project, provider=used_name, model=used_model)
+                n = write_memories(driver, session_key, memories, watermark, project=project, provider=used_name, model=used_model, events=events)
                 print(f"\n  wrote/updated {n} memories (via {used_name}); watermark -> {watermark}")
     finally:
         driver.close()
