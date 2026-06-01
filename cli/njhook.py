@@ -176,6 +176,49 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review(args: argparse.Namespace) -> int:
+    """Phase E review queue: list / approve / reject / supersede / flag conflicts."""
+    import review as rv
+    with driver() as d, d.session() as s:
+        if args.action == "list":
+            pend = rv.list_pending(s)
+            con = rv.list_contradictions(s)
+            if not pend and not con:
+                print("(nothing awaiting review)")
+                return 0
+            if pend:
+                print("pending review:")
+                for m in pend:
+                    print(f"  {m['path']}  (by {m['created_by'] or '?'}, {str(m['updated_at'] or '')[:19]})")
+            if con:
+                print("contradiction pairs:")
+                for c in con:
+                    print(f"  {c['a']}  <!>  {c['b']}")
+            return 0
+        if args.action in ("approve", "reject"):
+            if not args.paths:
+                print(f"usage: review {args.action} <path>", file=sys.stderr)
+                return 2
+            n = (rv.approve if args.action == "approve" else rv.reject)(s, args.paths[0])
+            print(f"{args.action}: {n} memory updated" if n else f"no memory at {args.paths[0]}")
+            return 0 if n else 1
+        if args.action == "supersede":
+            if len(args.paths) != 2:
+                print("usage: review supersede <winner-path> <loser-path>", file=sys.stderr)
+                return 2
+            rv.supersede(s, args.paths[0], args.paths[1])
+            print(f"superseded: {args.paths[1]} -> {args.paths[0]}")
+            return 0
+        if args.action == "flag":
+            if len(args.paths) != 2:
+                print("usage: review flag <pathA> <pathB>", file=sys.stderr)
+                return 2
+            rv.flag_contradiction(s, args.paths[0], args.paths[1])
+            print(f"flagged contradiction: {args.paths[0]} <!> {args.paths[1]} (both pending_review)")
+            return 0
+    return 0
+
+
 def cmd_ingest(args: argparse.Namespace) -> int:
     """Drain the durable event spool into Neo4j (Phase B). Idempotent — safe to
     re-run; events already in the graph are skipped, malformed records dead-lettered."""
@@ -1469,6 +1512,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pin = sub.add_parser("ingest", help="drain the durable event spool into Neo4j (Phase B; idempotent)")
     pin.set_defaults(fn=cmd_ingest)
+
+    prv = sub.add_parser("review", help="conflict/review queue (Phase E): list/approve/reject/supersede/flag")
+    prv.add_argument("action", choices=["list", "approve", "reject", "supersede", "flag"])
+    prv.add_argument("paths", nargs="*", help="memory path(s) — 1 for approve/reject, 2 for supersede/flag")
+    prv.set_defaults(fn=cmd_review)
 
     pe = sub.add_parser("edit", help="open a memory in $EDITOR (notepad on Windows)")
     pe.add_argument("path")
