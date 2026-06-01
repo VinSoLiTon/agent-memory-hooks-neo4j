@@ -186,14 +186,14 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase H — Governance & evaluation
 
-**Status:** 🔵 In progress (PR #19). **PR-1 (H1)**: sensitivity tagging — `privacy.sensitivity_for` classifies events by cwd (`HOOKS_SENSITIVE_PATHS` / `~/.njhook/sensitive.txt`), stamped at capture; egress policy — `dream.egress_blocked` keeps high-sensitivity sessions off remote providers (remote primary skipped; remote fallback suppressed) unless `DREAM_ALLOW_SENSITIVE_EGRESS=1`; `health` reports the policy. **Remaining**: H2 audit CLI/dashboard (the `:MemoryRevision`/`:DreamRun` log already records mutations), H3 anti-poisoning / confidence annealing, H4 backup/restore-rehearsal check in health.
+**Status:** 🔵 In progress (#19, #24). **PR-1 (H1)**: sensitivity tagging — `privacy.sensitivity_for` classifies events by cwd (`HOOKS_SENSITIVE_PATHS` / `~/.njhook/sensitive.txt`), stamped at capture; egress policy — `dream.egress_blocked` keeps high-sensitivity sessions off remote providers (remote primary skipped; remote fallback suppressed) unless `DREAM_ALLOW_SENSITIVE_EGRESS=1`; `health` reports the policy. **PR-2 (H3)**: anti-poisoning admission gate — `quality.poisoning_risk` quarantines a NEW memory to `pending_review` only when ALL THREE signals fire: directive content (`is_directive`, closed `DIRECTIVE_MARKERS` vocab — stands in for the deferred typed rule/procedure/constraint kinds), thin source session (`< POISON_MIN_EVENTS`), and high novelty (`novelty_score >= POISON_NOVELTY_MIN`, low overlap with existing trusted memory). Wired into `write_memories` alongside the grounding gate; updates to existing-active memories are exempt; skipped when no events were provided (can't assess provenance). 13 tests (closed-vocab + boundary + negative + DB thin/rich/non-directive/exempt). **Remaining**: H2 audit CLI/dashboard (the `:MemoryRevision`/`:DreamRun` log already records mutations — acceptance #2), H4 backup/restore-rehearsal check in health (acceptance #3), and full confidence-*annealing* (corroboration-over-time auto-promotion) deferred as a follow-on.
 
 **Goal:** trustworthy over months of multi-agent use. (Gap 7, 12.)
 
 **Work items**
 - **H1 — Sensitivity + egress policy** (`hooks/privacy.py`, `dream/dream.py`). `sensitivity` on events/memories; dream refuses to send `high`-sensitivity events to remote providers (route to Ollama), keyed on `app_id`.
 - **H2 — Audit log.** `:MemoryRevision` (Phase A) already records create/edit/supersede/archive/reject; expose `njhook audit <path>` and a dashboard view.
-- **H3 — Anti-poisoning / confidence annealing** (Gap 12). High-novelty + short-source-session + rule/procedure-type candidates route to review regardless of confidence.
+- **H3 — Anti-poisoning / confidence annealing** (Gap 12) — quarantine half ✅. High-novelty + short-source-session + directive candidates route to review regardless of grounding (`quality.poisoning_risk`, wired into `write_memories`). Directive content stands in for the typed rule/procedure kinds (D1 deferred). Full confidence-*annealing* (trust rising with repeated corroboration) is a deferred follow-on.
 - **H4 — Backup/restore rehearsal check** in `health`.
 
 **Acceptance bar**

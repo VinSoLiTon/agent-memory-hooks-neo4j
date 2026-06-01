@@ -25,7 +25,11 @@ _USER = os.environ.get("HOOKS_NEO4J_USER", "neo4j")
 _PWD = os.environ.get("HOOKS_NEO4J_PASSWORD", "password")
 
 _SRC = "we discussed rust unsafe blocks and the use-after-free incident at length"
-_GROUNDED = "---\ntitle: t\nkind: general\n---\n\nNever use unsafe blocks in rust; use-after-free incident."
+# Grounded content is intentionally NON-directive so this suite isolates the
+# grounding gate; the anti-poisoning gate (directive + thin + novel) is exercised
+# separately in test_anti_poisoning.py. (A "Never use ..." phrasing would also
+# trip H3 here and confuse which gate held the memory.)
+_GROUNDED = "---\ntitle: t\nkind: general\n---\n\nThe rust unsafe blocks discussion covered the use-after-free incident."
 _FABRICATED = "---\ntitle: t\nkind: general\n---\n\nQuarterly revenue projections for the marketing department roadmap."
 
 
