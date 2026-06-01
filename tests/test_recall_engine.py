@@ -52,6 +52,18 @@ def test_hybrid_merge_fuses_scores_and_orders():
     assert abs(out[0]["score"] - (1.0 / 62 + 1.0 / 61)) < 1e-9
 
 
+def test_hybrid_merge_vector_only_when_fulltext_empty():
+    """Vector-only fallback: fulltext yields nothing, vector hits still rank
+    (closes PROGRESS gap #2 — pins the vector-only path in the fused ranker)."""
+    vec = [
+        {"path": "v1", "content": "", "project": "", "score": 0.9},
+        {"path": "v2", "content": "", "project": "", "score": 0.8},
+    ]
+    out = recall.hybrid_merge([], vec, None, 10)
+    assert [r["path"] for r in out] == ["v1", "v2"]
+    assert abs(out[0]["score"] - 1.0 / 61) < 1e-9
+
+
 def test_project_boost_changes_order():
     # Without the boost, y (rank 0) would outrank x (rank 1). The in-project
     # boost on x must flip them.
