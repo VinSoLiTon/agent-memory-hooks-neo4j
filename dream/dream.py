@@ -263,7 +263,7 @@ def call_provider(provider_fn, transcript: str, existing: str, model: str,
     )
 
 
-def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None) -> int:
+def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None, provider: str = "unknown", model: str = "unknown") -> int:
     """Upsert memories and advance the session's last_dreamed_at watermark.
 
     `watermark` is the timestamp of the latest event we just dreamed over —
@@ -306,6 +306,7 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
             "path": m["path"],
             "content": m["content"],
             "updated_at": now,
+            "created_by": f"dream_{provider}",
             "project": None
             if m["path"].startswith(("profile/", "tools/")) or not project
             else project,
@@ -339,13 +340,40 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
                 }} }}
                 """
             )
+        # Phase A: non-destructive write. A :DreamRun records this run's provenance;
+        # WROTE edges link it to every memory it touched. On a content change at an
+        # existing path we snapshot the prior body into an immutable :MemoryRevision
+        # (path is UNIQUE — one node per path stays the "current" view) so a memory's
+        # evolution is fully traceable. An identical-content write produces no revision.
+        run_id = f"{session_key}@{now}"
         ses.run(
             """
             MATCH (s:Session {session_key: $session_key})
+            MERGE (dr:DreamRun {run_id: $run_id})
+              ON CREATE SET dr.ts = $now, dr.provider = $provider, dr.model = $model
+            WITH s, dr
             UNWIND $rows AS row
             MERGE (m:Memory {path: row.path})
+            WITH s, dr, row, m,
+                 m.content AS prior_content,
+                 coalesce(m.status, 'active') AS prior_status,
+                 (m.content IS NOT NULL AND m.content <> row.content) AS changed
+            FOREACH (_ IN CASE WHEN changed THEN [1] ELSE [] END |
+                CREATE (rev:MemoryRevision {
+                    content_snapshot: prior_content,
+                    status: prior_status,
+                    operation: 'dream_update',
+                    actor: row.created_by,
+                    ts: $now
+                })
+                MERGE (rev)-[:VERSION_OF]->(m)
+            )
             SET m.content = row.content,
                 m.updated_at = row.updated_at,
+                m.ingested_at = $now,
+                m.status = 'active',
+                m.created_by = row.created_by,
+                m.valid_from = coalesce(m.valid_from, $now),
                 // M3: cross-project paths (profile/, tools/) ALWAYS clear any
                 // stale project tag. Project-scoped paths get the new project
                 // when supplied, else preserve the existing tag.
@@ -361,8 +389,13 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
             )
             MERGE (s)-[:DREAMED]->(m)
             MERGE (m)-[:DERIVED_FROM]->(s)
+            MERGE (dr)-[:WROTE]->(m)
             """,
-            parameters={"session_key": session_key, "rows": rows},
+            parameters={
+                "session_key": session_key, "rows": rows,
+                "run_id": run_id, "now": now,
+                "provider": provider, "model": model,
+            },
         )
     return len(rows)
 
@@ -442,7 +475,7 @@ def main():
                 print(m.get("content", ""))
             if not args.dry_run:
                 watermark = events[-1].get("timestamp")
-                n = write_memories(driver, session_key, memories, watermark, project=project)
+                n = write_memories(driver, session_key, memories, watermark, project=project, provider=provider_name, model=model)
                 print(f"\n  wrote/updated {n} memories; watermark -> {watermark}")
     finally:
         driver.close()

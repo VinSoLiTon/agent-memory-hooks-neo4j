@@ -146,12 +146,16 @@ def consolidate(driver, provider_name: str | None, threshold: float, max_rounds:
         now = datetime.now(timezone.utc).isoformat()
         with driver.session() as ses:
             # Re-parent provenance: every Session that DREAMED p1 or p2 also
-            # DREAMED the merged memory. Then delete the originals.
+            # DREAMED the merged memory. Then supersede (not delete) the originals.
             ses.run(
                 """
                 MERGE (m:Memory {path: $new_path})
                 SET m.content = $new_content,
                     m.updated_at = $now,
+                    m.ingested_at = $now,
+                    m.status = 'active',
+                    m.created_by = coalesce(m.created_by, 'consolidate'),
+                    m.valid_from = coalesce(m.valid_from, $now),
                     m.consolidated_from = coalesce(m.consolidated_from, []) + [$p1, $p2]
                 FOREACH (_ IN CASE WHEN $emb IS NOT NULL THEN [1] ELSE [] END |
                     SET m.embedding = $emb
@@ -163,8 +167,14 @@ def consolidate(driver, provider_name: str | None, threshold: float, max_rounds:
                     MERGE (s)-[:DREAMED]->(m)
                     MERGE (m)-[:DERIVED_FROM]->(s)
                 )
-                WITH old
-                DETACH DELETE old
+                // Phase A: non-destructive consolidation. Instead of DETACH DELETE-ing
+                // the sources (which destroyed history), close them — mark superseded,
+                // stamp valid_until, and link SUPERSEDED_BY -> merged. Recall filters
+                // status='active', so superseded sources vanish from injection but stay
+                // queryable for evolution-tracing. The source nodes retain their content.
+                WITH DISTINCT m, old
+                SET old.status = 'superseded', old.valid_until = $now
+                MERGE (old)-[:SUPERSEDED_BY]->(m)
                 """,
                 parameters={
                     "new_path": new_path, "new_content": new_content, "now": now,
@@ -172,7 +182,7 @@ def consolidate(driver, provider_name: str | None, threshold: float, max_rounds:
                 },
             )
         merges += 1
-        print(f"    merged into '{new_path}'; originals removed")
+        print(f"    merged into '{new_path}'; originals superseded")
 
     print(f"\nconsolidate: {merges} merge(s) across {rounds} round(s)")
     return merges
