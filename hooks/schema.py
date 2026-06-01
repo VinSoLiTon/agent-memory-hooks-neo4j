@@ -46,6 +46,10 @@ def create_constraints_and_indexes(tx) -> None:
     # dashboard surface superseded/pending memories. Keeps those scans cheap as
     # :MemoryRevision history and superseded nodes accumulate.
     tx.run("CREATE INDEX memory_status IF NOT EXISTS FOR (m:Memory) ON (m.status)")
+    # Phase C3: make raw events retrievable (MemMachine — the episodic record is a
+    # first-class retrieval target, not just dream input). Fulltext over the
+    # signal-bearing event fields; null fields are simply not indexed.
+    tx.run("CREATE FULLTEXT INDEX event_fulltext IF NOT EXISTS FOR (e:Event) ON EACH [e.prompt, e.tool_response]")
 
 
 def backfill_session_keys(tx) -> int:

@@ -14,12 +14,18 @@ import sys
 
 import pytest
 from datetime import datetime, timezone
+from neo4j import GraphDatabase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "hooks"))
 
 import recall  # noqa: E402
+import schema  # noqa: E402
+
+_URI = os.environ.get("HOOKS_NEO4J_URI", "bolt://localhost:7687")
+_USER = os.environ.get("HOOKS_NEO4J_USER", "neo4j")
+_PWD = os.environ.get("HOOKS_NEO4J_PASSWORD", "password")
 
 
 def test_recall_modes_are_a_closed_vocabulary():
@@ -121,6 +127,51 @@ def test_importance_promotes_a_lower_ranked_hit():
     ]
     out = recall.hybrid_merge(ft, [], None, 10, now=datetime(2026, 6, 1, tzinfo=timezone.utc))
     assert out[0]["path"] == "b"
+
+
+# --- C3: raw-event retrieval ------------------------------------------------
+
+def test_render_event_context_labels_and_omits_when_empty():
+    out = recall.render_event_context(
+        [{"event_name": "PostToolUse", "tool": "Bash", "ts": "2026-06-01T00:00:00", "snippet": "ran ls -la"}]
+    )
+    assert "Relevant prior activity" in out
+    assert "ran ls -la" in out and "Bash" in out
+    assert recall.render_event_context([]) == ""
+
+
+def test_event_search_empty_query_short_circuits():
+    # Empty/blank query returns [] before touching the DB (session can be None).
+    assert recall.event_search(None, "   ") == []
+
+
+@pytest.fixture()
+def evt_driver():
+    d = GraphDatabase.driver(_URI, auth=(_USER, _PWD),
+                             notifications_disabled_classifications=["UNRECOGNIZED"])
+    with d.session() as s:
+        s.execute_write(schema.create_constraints_and_indexes)  # ensure event_fulltext exists
+    saved_min = recall.EVENT_MIN_SCORE
+    recall.EVENT_MIN_SCORE = 0.0  # don't let a low fulltext score drop the seeded event
+    with d.session() as s:
+        s.run("MATCH (e:Event) WHERE e.event_id STARTS WITH '__c3evt' DETACH DELETE e")
+        s.run("CREATE (e:Event {event_id:'__c3evt_1', event_name:'UserPromptSubmit', "
+              "prompt:$p, timestamp:'2026-06-01T00:00:00+00:00'})",
+              p="ZZQEVENTTOKEN distinctive payload about widgets")
+    try:
+        yield d
+    finally:
+        with d.session() as s:
+            s.run("MATCH (e:Event) WHERE e.event_id STARTS WITH '__c3evt' DETACH DELETE e")
+        recall.EVENT_MIN_SCORE = saved_min
+        d.close()
+
+
+def test_event_search_finds_raw_event(evt_driver):
+    with evt_driver.session() as s:
+        hits = recall.event_search(s, "ZZQEVENTTOKEN", limit=5)
+    assert any("ZZQEVENTTOKEN" in h["snippet"] for h in hits)
+    assert all("path" not in h for h in hits)  # events are not memories
 
 
 def test_value_density_orders_session_start_truncation():

@@ -60,12 +60,22 @@ def session_start_context(current_project: str | None = None) -> tuple[str, list
     return recall.render_session_start(buckets, current_project)
 
 
+# Phase C3: optionally surface relevant RAW events (not yet distilled) alongside
+# curated memories. Off by default — raw events are noisier than memories — so
+# behaviour is unchanged unless you set INJECT_EVENT_CONTEXT=1.
+EVENT_CONTEXT_ENABLED = os.environ.get("INJECT_EVENT_CONTEXT", "0") == "1"
+
+
 def prompt_context(prompt: str, current_project: str | None = None) -> tuple[str, list[str]]:
     if not prompt.strip():
         return "", []
     with get_driver() as driver, driver.session() as s:
         rows = recall.prompt_query(s, prompt, current_project)
-    return recall.render_prompt(rows)
+        ev_rows = recall.event_search(s, prompt) if EVENT_CONTEXT_ENABLED else []
+    mem_md, paths = recall.render_prompt(rows)
+    ev_md = recall.render_event_context(ev_rows)
+    combined = "\n\n".join(part for part in (mem_md, ev_md) if part)
+    return combined, paths
 
 
 def _bump_access(paths: list[str]) -> None:
