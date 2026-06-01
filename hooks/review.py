@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import audit
+
 
 # Auto-resolution authority (lower rank = higher authority). `created_by` encodes
 # the writer ('user', 'dream_anthropic', 'dream_ollama', 'consolidate', …); we map
@@ -58,8 +60,18 @@ def list_contradictions(session) -> list[dict]:
     )]
 
 
-def _set_status(session, path: str, status: str) -> int:
+def _set_status(session, path: str, status: str, *, operation: str, actor: str = "user") -> int:
+    """Transition a memory's status and append an audit entry recording the prior
+    status + actor (H2). Returns 0 if no such memory (nothing recorded/changed)."""
     now = datetime.now(timezone.utc).isoformat()
+    cur = session.run(
+        "MATCH (m:Memory {path: $p}) RETURN coalesce(m.status, 'active') AS s, m.content AS c",
+        p=path,
+    ).single()
+    if not cur:
+        return 0
+    audit.record(session, path, operation, actor=actor, status=cur["s"],
+                 content_snapshot=cur["c"], ts=now)
     return session.run(
         "MATCH (m:Memory {path: $p}) SET m.status = $s, m.reviewed_at = $now RETURN count(m) AS n",
         p=path, s=status, now=now,
@@ -68,18 +80,29 @@ def _set_status(session, path: str, status: str) -> int:
 
 def approve(session, path: str) -> int:
     """Activate a pending memory so recall injects it again."""
-    return _set_status(session, path, "active")
+    return _set_status(session, path, "active", operation="approve")
 
 
 def reject(session, path: str) -> int:
     """Reject a memory — hidden from recall, kept for the record."""
-    return _set_status(session, path, "rejected")
+    return _set_status(session, path, "rejected", operation="reject")
 
 
 def supersede(session, winner: str, loser: str) -> None:
     """Resolve a conflict: winner stays active; loser is superseded (hidden, kept
     for lineage) with a :SUPERSEDED_BY edge; any :CONTRADICTS between them clears."""
     now = datetime.now(timezone.utc).isoformat()
+    # H2 audit: record the loser's supersede and the winner's (re)activation if it
+    # wasn't already active, capturing prior status + actor before the mutation.
+    states = {r["p"]: r for r in session.run(
+        "MATCH (m:Memory) WHERE m.path IN [$w, $l] "
+        "RETURN m.path AS p, coalesce(m.status, 'active') AS s, m.content AS c", w=winner, l=loser)}
+    if loser in states:
+        audit.record(session, loser, "supersede", actor="user",
+                     status=states[loser]["s"], content_snapshot=states[loser]["c"], ts=now)
+    if winner in states and states[winner]["s"] != "active":
+        audit.record(session, winner, "approve", actor="user",
+                     status=states[winner]["s"], content_snapshot=states[winner]["c"], ts=now)
     session.run(
         "MATCH (w:Memory {path: $w}), (l:Memory {path: $l}) "
         "SET w.status = 'active', l.status = 'superseded', l.valid_until = $now "
@@ -92,6 +115,14 @@ def supersede(session, winner: str, loser: str) -> None:
 def flag_contradiction(session, p1: str, p2: str) -> None:
     """Mark two memories as contradicting and route both to review (advisory-only
     until a human/auto-resolution picks a winner)."""
+    # H2 audit: record both flags (actor 'system' — detection is automated).
+    states = {r["p"]: r for r in session.run(
+        "MATCH (m:Memory) WHERE m.path IN [$a, $b] "
+        "RETURN m.path AS p, coalesce(m.status, 'active') AS s, m.content AS c", a=p1, b=p2)}
+    for p in (p1, p2):
+        if p in states:
+            audit.record(session, p, "flag_contradiction", actor="system",
+                         status=states[p]["s"], content_snapshot=states[p]["c"])
     session.run(
         "MATCH (a:Memory {path: $a}), (b:Memory {path: $b}) "
         "MERGE (a)-[:CONTRADICTS]->(b) "

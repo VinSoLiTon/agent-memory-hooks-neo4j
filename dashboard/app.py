@@ -273,6 +273,9 @@ def memory_history_view(path: str):
     body = f'<h1 class="mono">{escape(path)} &mdash; history</h1>'
     body += f'<p><a href="{url_for("memory_view", path=path)}">&larr; back to memory</a></p>'
     body += f'<p class="muted small">{len(vs)} version(s); status <code>{escape(hist["status"])}</code></p>'
+    body += ('<p class="muted small">Full mutation / audit log (Phase H2): every dream write, '
+             'manual edit, and review transition (approve / reject / supersede / flag) is recorded '
+             'below with its actor.</p>')
 
     # Lineage — how this memory came to be (Phase F slice 2).
     if hist.get("supersedes") or hist.get("superseded_by") or hist.get("contradicts") or hist.get("source_events"):

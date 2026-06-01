@@ -402,7 +402,18 @@ def cmd_edit(args: argparse.Namespace) -> int:
         return 0
 
     now = datetime.now(timezone.utc).isoformat()
+    import audit
     with driver() as d, d.session() as s:
+        # H2 audit: if the memory already existed, snapshot the prior body+status
+        # as an `edit` entry before overwriting (a manual edit otherwise left no trace).
+        if r:
+            prior = s.run(
+                "MATCH (m:Memory {path:$p}) RETURN coalesce(m.status,'active') AS st, m.content AS c",
+                p=args.path,
+            ).single()
+            if prior:
+                audit.record(s, args.path, "edit", actor="user",
+                             status=prior["st"], content_snapshot=prior["c"], ts=now)
         s.run(
             """
             MERGE (m:Memory {path: $path})
@@ -411,6 +422,38 @@ def cmd_edit(args: argparse.Namespace) -> int:
             parameters={"path": args.path, "content": new_content, "now": now},
         )
     print(f"saved ({len(new_content)} chars)")
+    return 0
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    """Phase H2 — a memory's full mutation log (every dream write / edit / review
+    transition, time-ordered with actor + status), or `--recent` for a graph-wide
+    governance view. Reconstructed from the :MemoryRevision audit chain."""
+    import audit
+    with driver() as d, d.session() as s:
+        if args.recent is not None:
+            rows = audit.recent(s, args.recent)
+            if not rows:
+                print("(no audit entries)")
+                return 0
+            for r in rows:
+                print(f"{str(r['ts'])[:19]}  {r['operation']:<17} {(r['actor'] or '?'):<18} {r['path']}")
+            return 0
+        if not args.path:
+            print("usage: audit <path>   |   audit --recent [N]", file=sys.stderr)
+            return 2
+        t = audit.trail(s, args.path)
+    if not t:
+        print(f"no memory at path: {args.path}", file=sys.stderr)
+        return 1
+    print(f"{t['path']}  (created {str(t['created_at'] or '?')[:19]} by "
+          f"{t['created_by'] or '?'}; now {t['current_status']})")
+    for e in t["entries"]:
+        op = e["operation"]
+        res = f" → {e['result_status']}" if e.get("result_status") and op != "current" else ""
+        was = f" (was {e['prior_status']})" if e.get("prior_status") else ""
+        size = f"  [{e['snapshot_len']}c]" if e.get("snapshot_len") is not None else ""
+        print(f"  {str(e['ts'] or '?')[:19]}  {op}{res}{was}  by {e['actor'] or '?'}{size}")
     return 0
 
 
@@ -1595,6 +1638,12 @@ def build_parser() -> argparse.ArgumentParser:
     phi.add_argument("--diff", action="store_true", help="show unified diffs between consecutive versions")
     phi.add_argument("--as-of", dest="as_of", help="reconstruct the body that was current at this ISO timestamp")
     phi.set_defaults(fn=cmd_history)
+
+    pau = sub.add_parser("audit", help="show a memory's full mutation log (Phase H2); --recent for a graph-wide view")
+    pau.add_argument("path", nargs="?", help="memory path to audit (omit when using --recent)")
+    pau.add_argument("--recent", nargs="?", type=int, const=20, default=None,
+                     metavar="N", help="show the N most recent mutations across all memories (default 20)")
+    pau.set_defaults(fn=cmd_audit)
 
     pin = sub.add_parser("ingest", help="drain the durable event spool into Neo4j (Phase B; idempotent)")
     pin.set_defaults(fn=cmd_ingest)
