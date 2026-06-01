@@ -252,6 +252,10 @@ def cmd_review(args: argparse.Namespace) -> int:
             rv.flag_contradiction(s, args.paths[0], args.paths[1])
             print(f"flagged contradiction: {args.paths[0]} <!> {args.paths[1]} (both pending_review)")
             return 0
+        if args.action == "auto-resolve":
+            n = rv.auto_resolve_all(s)
+            print(f"auto-resolved {n} conflict pair(s) by source-authority × recency")
+            return 0
     return 0
 
 
@@ -1564,7 +1568,7 @@ def build_parser() -> argparse.ArgumentParser:
     pin.set_defaults(fn=cmd_ingest)
 
     prv = sub.add_parser("review", help="conflict/review queue (Phase E): list/approve/reject/supersede/flag")
-    prv.add_argument("action", choices=["list", "approve", "reject", "supersede", "flag"])
+    prv.add_argument("action", choices=["list", "approve", "reject", "supersede", "flag", "auto-resolve"])
     prv.add_argument("paths", nargs="*", help="memory path(s) — 1 for approve/reject, 2 for supersede/flag")
     prv.set_defaults(fn=cmd_review)
 

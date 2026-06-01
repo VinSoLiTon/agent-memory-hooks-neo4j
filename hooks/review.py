@@ -98,3 +98,64 @@ def flag_contradiction(session, p1: str, p2: str) -> None:
         "SET a.status = 'pending_review', b.status = 'pending_review'",
         a=p1, b=p2,
     )
+
+
+def auto_resolve_all(session) -> int:
+    """Resolve every open :CONTRADICTS pair by auto_resolve (authority×recency):
+    the winner stays active, the loser is superseded. Returns the count resolved."""
+    resolved = 0
+    for p in list_contradictions(session):
+        rows = {r["path"]: dict(r) for r in session.run(
+            "MATCH (m:Memory) WHERE m.path IN [$a, $b] "
+            "RETURN m.path AS path, m.created_by AS created_by, m.updated_at AS updated_at",
+            a=p["a"], b=p["b"])}
+        if p["a"] not in rows or p["b"] not in rows:
+            continue
+        winner = auto_resolve(rows[p["a"]], rows[p["b"]])
+        loser = p["b"] if winner["path"] == p["a"] else p["a"]
+        supersede(session, winner["path"], loser)
+        resolved += 1
+    return resolved
+
+
+def vector_candidates(embed_fn, k: int = 5, threshold: float = 0.85):
+    """Build a `find_candidates(session, path, content)` that returns the active
+    memories most semantically similar to the new content (via the vector index),
+    excluding the memory itself. Used by detect_contradiction in production."""
+    def _find(session, path, content):
+        try:
+            vec = embed_fn([content])
+            if not vec or not vec[0]:
+                return []
+        except Exception:
+            return []
+        try:
+            rows = session.run(
+                "CALL db.index.vector.queryNodes('memory_embeddings', $k, $vec) YIELD node, score "
+                "WHERE score > $th AND node.path <> $path AND coalesce(node.status, 'active') = 'active' "
+                "RETURN node.path AS path, node.content AS content",
+                k=k, vec=vec[0], th=threshold, path=path,
+            )
+            return [(r["path"], r["content"]) for r in rows]
+        except Exception:
+            return []
+    return _find
+
+
+def detect_contradiction(session, path: str, content: str, judge, find_candidates) -> list[str]:
+    """Pre-commit/contradiction detection: for each semantically-related active
+    memory `find_candidates` surfaces, ask `judge(existing, new) -> bool`; on a
+    contradiction, link :CONTRADICTS and route both to pending_review. Returns the
+    contradicting paths. `judge` is the LLM in production, a stub in tests; the
+    candidate-finder and judge are injected so the logic is testable without an LLM."""
+    flagged = []
+    for cand_path, cand_content in find_candidates(session, path, content):
+        if cand_path == path:
+            continue
+        try:
+            if judge(cand_content, content):
+                flag_contradiction(session, cand_path, path)
+                flagged.append(cand_path)
+        except Exception:
+            continue
+    return flagged

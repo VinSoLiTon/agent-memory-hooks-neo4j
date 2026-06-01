@@ -104,3 +104,50 @@ def test_supersede_marks_loser_links_and_clears_contradiction(driver):
         con = s.run("MATCH (:Memory {path:$w})-[:CONTRADICTS]-(:Memory {path:$l}) RETURN count(*) AS n",
                     w=A, l=B).single()["n"]
         assert con == 0   # contradiction resolved
+
+
+# --- Phase E PR-2: auto-resolve-all + detection engine ----------------------
+
+def test_auto_resolve_all_picks_higher_authority(driver):
+    # A is dream_ollama (older), B is dream_anthropic (newer) — B wins on authority.
+    with driver.session() as s:
+        rv.flag_contradiction(s, A, B)
+        resolved = rv.auto_resolve_all(s)
+        assert resolved == 1
+        assert _status(s, B) == "active"
+        assert _status(s, A) == "superseded"
+        edge = s.run("MATCH (:Memory {path:$l})-[:SUPERSEDED_BY]->(:Memory {path:$w}) RETURN count(*) AS n",
+                     l=A, w=B).single()["n"]
+        assert edge == 1
+
+
+def test_detect_contradiction_flags_only_when_judge_says_yes(driver):
+    candidates = lambda _s, _p, _c: [(B, "memory B body")]   # injected candidate finder
+    with driver.session() as s:
+        flagged = rv.detect_contradiction(s, A, "memory A body", judge=lambda a, b: True, find_candidates=candidates)
+        assert flagged == [B]
+        assert _status(s, A) == "pending_review" and _status(s, B) == "pending_review"
+        con = s.run("MATCH (:Memory {path:$a})-[:CONTRADICTS]-(:Memory {path:$b}) RETURN count(*) AS n",
+                    a=A, b=B).single()["n"]
+        assert con >= 1
+
+    with driver.session() as s:
+        # judge says no → nothing flagged
+        rv.approve(s, A)
+        rv.approve(s, B)
+        assert rv.detect_contradiction(s, A, "x", judge=lambda a, b: False, find_candidates=candidates) == []
+
+
+def test_dashboard_review_renders_and_gates(driver):
+    pytest.importorskip("flask")
+    sys.path.insert(0, os.path.join(ROOT, "dashboard"))
+    import app as dash  # noqa
+    with driver.session() as s:
+        rv.flag_contradiction(s, A, B)
+    client = dash.app.test_client()
+    resp = client.get("/review")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert A in html and B in html
+    # write actions are gated off by default (DASHBOARD_WRITE unset)
+    assert client.post("/review/approve", data={"path": A}).status_code == 403
