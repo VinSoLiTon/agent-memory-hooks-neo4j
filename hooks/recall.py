@@ -446,6 +446,45 @@ def memory_history(session, path: str):
     return {"path": path, "status": rec["status"], "versions": versions}
 
 
+def content_as_of(versions: list, ts: str):
+    """Reconstruct the body that was current at `ts` from the version timeline
+    (oldest → newest; each revision's `ts` is when it was *replaced*, the current
+    node's `ts` is when it became current). Returns the first version whose `ts`
+    is after `ts` (it was the live body just before that replacement), else the
+    current body. ISO timestamps compare lexicographically (all UTC)."""
+    for v in versions:
+        if v.get("ts") and str(v["ts"]) > str(ts):
+            return v["content"]
+    return versions[-1]["content"] if versions else None
+
+
+def memory_lineage(session, path: str):
+    """memory_history + provenance: the source events the memory was extracted
+    from (Phase D :EXTRACTED_FROM) and its supersession links (Phase A). The
+    human-facing 'how did this memory come to be?' view. None if path is absent."""
+    hist = memory_history(session, path)
+    if hist is None:
+        return None
+    events = []
+    for r in session.run(
+        "MATCH (m:Memory {path: $p})-[:EXTRACTED_FROM]->(e:Event) "
+        "RETURN e.event_id AS event_id, e.event_name AS event_name, "
+        "       coalesce(e.tool_name, '') AS tool, e.timestamp AS ts, "
+        "       coalesce(e.prompt, e.tool_response, '') AS text "
+        "ORDER BY e.timestamp LIMIT 25",
+        p=path,
+    ):
+        events.append({"event_id": r["event_id"], "event_name": r["event_name"],
+                       "tool": r["tool"], "ts": r["ts"],
+                       "snippet": " ".join((r["text"] or "").split())[:160]})
+    hist["source_events"] = events
+    hist["superseded_by"] = [r["p"] for r in session.run(
+        "MATCH (:Memory {path: $p})-[:SUPERSEDED_BY]->(n:Memory) RETURN n.path AS p", p=path)]
+    hist["supersedes"] = [r["p"] for r in session.run(
+        "MATCH (o:Memory)-[:SUPERSEDED_BY]->(:Memory {path: $p}) RETURN o.path AS p", p=path)]
+    return hist
+
+
 def render_prompt(rows: list) -> tuple[str, list[str]]:
     """Render hybrid hits to injection markdown. Returns (markdown, paths)."""
     if not rows:

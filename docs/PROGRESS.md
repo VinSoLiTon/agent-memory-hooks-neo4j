@@ -24,7 +24,7 @@ Legend: ✅ done & merged · 🔵 in progress / open PR · ⏸ deferred (with re
 | **C** — Shared recall + ranking | ✅ merged & fully aligned | #5, #6, #9, #12 | shared `recall.py`; importance×recency + value-density budget; `event_fulltext` + `event_search`; vector-only fallback test (PR #12); 7+4+3+1 tests | ⏸ **C4** reranker formally deferred (decision recorded) — out-of-scope for alignment |
 | **D** — Typed memory + admission gate | 🔵 in progress (PR #13) | #13 | PR-1: `:EXTRACTED_FROM` claim-level provenance via heuristic top-K overlap attribution (`attribute_events`, bounded — no explosion); 3 tests | D1 typed `kind` vocab (design: 9 Memanto types don't map to identity memories — see deviations), D2 A-MAC admission gate (+ Phase E review surface), D3 eval suites |
 | **E** — Conflict & review | ⬜ not started | — | — | all (F6: contradiction detection, review queue) — needs A, D |
-| **F** — Evolution UI (north star) | 🔵 slice 1 merged (#10) | #10 | `memory_history` engine; CLI `history --diff`; dashboard `/memory/<path>/history` timeline + diffs; 2 tests | slice 2: `--as-of` recall (buildable now), lineage graph (needs D `EXTRACTED_FROM` + E `CONTRADICTS`), inline citation footer (Q6) |
+| **F** — Evolution UI (north star) | 🔵 slice 1 ✅; slice 2 open (#14) | #10, #14 | slice 1: `memory_history` + `history --diff` + dashboard timeline/diffs. slice 2: `content_as_of` + `history --as-of`; `memory_lineage` (source events via `EXTRACTED_FROM` + supersession) in CLI + dashboard; 4 tests | inline citation footer (Q6); `CONTRADICTS` lineage (needs Phase E) |
 | **G** — Universal interfaces (REST/MCP) | ⬜ not started | — | — | all (F8: REST, MCP, `recall`/`write-event` CLI, file renderers) — needs C |
 | **H** — Governance & eval | ⬜ not started | — | — | all (Gap 7 egress, Gap 12 anti-poisoning, Gap 9 CI evals) — needs B, D |
 
@@ -72,11 +72,12 @@ Not numbered phases, but delivered and acceptance-evidenced in their PRs:
 | #10 | merged | Phase F (1/2) — memory evolution history (timeline + diff) |
 | #11 | merged | Phase B (PR-1) — durable capture spool + ingest worker |
 | #12 | merged | acceptance alignment — A#6 backup/restore lineage + C vector-only test + C4 deferral |
-| #13 | open | Phase D (PR-1) — :EXTRACTED_FROM claim-level provenance (heuristic top-K) |
+| #13 | merged | Phase D (PR-1) — :EXTRACTED_FROM claim-level provenance (heuristic top-K) |
+| #14 | open | Phase F (slice 2) — `--as-of` recall + memory lineage view |
 
 ## Metrics
 
-- Tests: **19 → 60** over the program (live Neo4j + pure).
+- Tests: **19 → 62** over the program (live Neo4j + pure).
 - `njhook health`: **21 ok / 0 warn / 0 fail**.
 - Graph: ~20 memories, ~34 sessions, ~9.5k events; nightly task registered at 3 PM.
 
