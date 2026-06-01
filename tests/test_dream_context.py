@@ -92,3 +92,44 @@ def test_fetch_existing_is_scoped_and_excludes_superseded(driver):
     assert f"project/{MARK}_a.md" in paths         # this session's project
     assert f"project/{MARK}_b.md" not in paths     # other project → excluded
     assert f"project/{MARK}_super.md" not in paths  # superseded → excluded
+
+
+# --- render_events transcript cap (pure) ------------------------------------
+
+def _events(n_tools: int, n_prompts: int = 1):
+    evs = []
+    for i in range(n_prompts):
+        evs.append({"timestamp": f"2026-06-01T00:00:{i:02d}+00:00",
+                    "event_name": "UserPromptSubmit", "prompt": f"PROMPTSIGNAL_{i} " + "p" * 50})
+    for i in range(n_tools):
+        evs.append({"timestamp": f"2026-06-01T01:00:{i % 60:02d}+00:00",
+                    "event_name": "PostToolUse", "tool_name": "Bash",
+                    "tool_input": '{"command": "echo tool ' + str(i) + '"}',
+                    "tool_response": "ok " * 30})
+    return evs
+
+
+def test_render_events_unbounded_includes_everything():
+    out = dream_mod.render_events(_events(5, 2), max_chars=None)
+    assert "PROMPTSIGNAL_0" in out and "PROMPTSIGNAL_1" in out
+    assert "omitted to fit" not in out
+
+
+def test_render_events_capped_keeps_prompts_and_notes_omission():
+    out = dream_mod.render_events(_events(400, 1), max_chars=2000)
+    assert len(out) <= 2000 + 200          # bounded (slack for the omission note)
+    assert "PROMPTSIGNAL_0" in out          # the high-signal prompt survives
+    assert "omitted to fit" in out          # truncation is disclosed, not silent
+
+
+# --- hybrid fallback gating (pure) ------------------------------------------
+
+def test_resolve_fallback_gating():
+    have = lambda n: True
+    none = lambda n: False
+    assert dream_mod.resolve_fallback("ollama", "anthropic", have) == "anthropic"
+    assert dream_mod.resolve_fallback("ollama", "anthropic", none) is None   # no API key → degrade local-only
+    assert dream_mod.resolve_fallback("ollama", "none", have) is None        # disabled
+    assert dream_mod.resolve_fallback("ollama", "", have) is None            # unset
+    assert dream_mod.resolve_fallback("anthropic", "anthropic", have) is None  # same as primary
+    assert dream_mod.resolve_fallback("ollama", "ollama", have) is None      # same as primary
