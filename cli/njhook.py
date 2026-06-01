@@ -176,6 +176,14 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eval_retrieval(args: argparse.Namespace) -> int:
+    """Phase D3 — seed a golden fixture and score recall (hit@k + MRR). Regression
+    guard for the ranking signals; seeds + cleans up its own fixture."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dream"))
+    import eval_retrieval
+    return eval_retrieval.main()
+
+
 def cmd_recall(args: argparse.Namespace) -> int:
     """Phase G — recall memories for a prompt over the shared core (same ranking
     the hook uses). For programmatic use by non-hook runtimes."""
@@ -1585,6 +1593,9 @@ def build_parser() -> argparse.ArgumentParser:
     pwe.add_argument("--client", required=True, choices=["claude_code", "codex", "cursor", "gemini"])
     pwe.add_argument("--json", help="path to a JSON file; '-' or omit reads stdin")
     pwe.set_defaults(fn=cmd_write_event)
+
+    pev = sub.add_parser("eval-retrieval", help="seed a golden set and score recall (hit@k + MRR) — ranking regression guard")
+    pev.set_defaults(fn=cmd_eval_retrieval)
 
     pe = sub.add_parser("edit", help="open a memory in $EDITOR (notepad on Windows)")
     pe.add_argument("path")
