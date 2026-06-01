@@ -108,7 +108,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase D — Typed memory + admission gate
 
-**Status:** 🔵 In progress (PR #13). **PR-1**: `:EXTRACTED_FROM` claim-level provenance via heuristic top-K overlap attribution (`dream.attribute_events`; bounded edges, no explosion; `DREAM_EXTRACT_TOPK`/`_MIN_OVERLAP`) — unblocks Phase F's lineage graph + C3 nucleus expansion. **Remaining**: D1 typed `kind` vocabulary (deferred — the 9 Memanto types don't map cleanly to identity memories; needs design, see PROGRESS deviations), D2 A-MAC admission gate (build with the Phase E review surface), D3 eval suites. Model-cited attribution precision is a later upgrade.
+**Status:** 🔵 In progress (#13, #16). **PR-1**: `:EXTRACTED_FROM` claim-level provenance via heuristic top-K overlap attribution (`dream.attribute_events`; bounded, no explosion). **PR-2**: A-MAC grounding admission gate — `quality.grounding_score` (memory body vs source transcript); a NEW memory below `DREAM_GROUNDING_MIN` (0.10) is routed to `pending_review` (recall hides it; `njhook review` adjudicates — Phase E loop), while updates to existing-active memories are never gated (no clobber). **Remaining**: D1 typed `kind` vocabulary (deferred — the 9 Memanto types don't map cleanly to identity memories; needs design), D3 eval suites; model-cited attribution precision upgrade. (Caveat: grounding catches off-topic fabrication, not subtle factual errors.)
 
 **Goal:** structured records; ungrounded dream output can't enter the graph. (Gap 3, 9.)
 

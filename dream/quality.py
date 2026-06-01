@@ -45,6 +45,31 @@ _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _TITLE_RE = re.compile(r"^title:\s*\S", re.MULTILINE)
 _KIND_RE = re.compile(r"^kind:\s*([A-Za-z]+)\s*$", re.MULTILINE)
 
+_GROUND_TOKEN_RE = re.compile(r"[a-z0-9_]{4,}")
+
+
+def grounding_score(content: str, source_text: str) -> float:
+    """Phase D2 (A-MAC) — fraction of the memory body's distinctive tokens that
+    appear in the source transcript. A cheap ROUGE-L-ish grounding signal: ~1.0
+    when the memory is supported by the session, near 0 when it's about something
+    not in the session (fabrication). Frontmatter is stripped first. Returns 1.0
+    when there's no source to check against (can't judge → don't gate).
+
+    Note: catches off-topic fabrication, NOT subtle factual errors (a wrong port
+    whose tokens still appear in the transcript scores high) — it's defence in
+    depth, not a correctness oracle."""
+    if not source_text:
+        return 1.0
+    body = content or ""
+    fm = _FRONTMATTER_RE.match(body)
+    if fm:
+        body = body[fm.end():]
+    mem = set(_GROUND_TOKEN_RE.findall(body.lower()))
+    if not mem:
+        return 1.0
+    src = set(_GROUND_TOKEN_RE.findall((source_text or "").lower()))
+    return len(mem & src) / len(mem)
+
 
 def validate_memory(memory: dict) -> list[str]:
     """Return a list of error messages. Empty list means the memory is valid."""

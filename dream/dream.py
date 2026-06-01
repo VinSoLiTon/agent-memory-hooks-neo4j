@@ -405,6 +405,36 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
         m for m in memories if m.get("path") and m.get("content")
     )
 
+    # Phase D2: A-MAC grounding admission gate. Score each memory's overlap with
+    # the source transcript; a NEW memory below threshold is routed to
+    # 'pending_review' (recall hides it; `njhook review` adjudicates) instead of
+    # going straight to 'active'. Updates to an EXISTING active memory are NOT
+    # gated — we never hide a previously-good memory behind a suspicious update.
+    source_text = " ".join(
+        str(e.get(f) or "") for e in (events or [])
+        for f in ("prompt", "tool_input", "tool_response")
+    )
+    ground_min = float(os.environ.get("DREAM_GROUNDING_MIN", "0.10"))
+    existing_active: set = set()
+    if valid and source_text:
+        with driver.session() as _ses:
+            existing_active = {r["p"] for r in _ses.run(
+                "MATCH (m:Memory) WHERE m.path IN $paths "
+                "AND coalesce(m.status, 'active') = 'active' RETURN m.path AS p",
+                paths=[m["path"] for m in valid])}
+    mem_status: dict = {}
+    held = 0
+    for m in valid:
+        g = quality_mod.grounding_score(m["content"], source_text) if source_text else 1.0
+        if g < ground_min and m["path"] not in existing_active:
+            mem_status[m["path"]] = "pending_review"
+            held += 1
+        else:
+            mem_status[m["path"]] = "active"
+    if held:
+        print(f"  grounding gate: {held} low-grounding memory(ies) → pending_review "
+              f"(adjudicate with `njhook review`)", file=sys.stderr)
+
     embeds: list[list[float]] = []
     embed_dim: int | None = None
     if valid and embeddings.is_enabled():
@@ -424,6 +454,7 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
             "content": m["content"],
             "updated_at": now,
             "created_by": f"dream_{provider}",
+            "status": mem_status[m["path"]],
             "importance": _coerce_importance(m.get("importance")),
             "project": None
             if m["path"].startswith(("profile/", "tools/")) or not project
@@ -489,7 +520,7 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
             SET m.content = row.content,
                 m.updated_at = row.updated_at,
                 m.ingested_at = $now,
-                m.status = 'active',
+                m.status = row.status,
                 m.created_by = row.created_by,
                 m.importance = coalesce(row.importance, m.importance),
                 m.valid_from = coalesce(m.valid_from, $now),
