@@ -191,10 +191,45 @@ def fetch_events(driver, session_id: str | None, since: datetime | None):
     return out
 
 
-def fetch_existing_memories(driver) -> list[dict]:
+def fetch_existing_memories(driver, project: str | None = None) -> list[dict]:
+    """Memories to show the model as merge/dedup context.
+
+    Scoped to what THIS session could legitimately update: cross-project
+    `profile/` + `tools/`, plus memories tagged with the session's own project.
+    Feeding every project's memories (the old behaviour) bloated the context to
+    tens of KB and swamped small local models — they regurgitated unrelated
+    existing memories or returned nothing, so the nightly distilled little.
+    Superseded/archived memories are excluded (Phase A). A hard char cap
+    (`DREAM_EXISTING_MAX_CHARS`, default 12000) is a final backstop, dropping the
+    largest memories first.
+    """
+    cap = int(os.environ.get("DREAM_EXISTING_MAX_CHARS", "12000"))
     with driver.session() as ses:
-        result = ses.run("MATCH (m:Memory) RETURN m.path AS path, m.content AS content ORDER BY path")
-        return [dict(r) for r in result]
+        if project:
+            result = ses.run(
+                "MATCH (m:Memory) WHERE coalesce(m.status, 'active') = 'active' "
+                "AND coalesce(m.archived, false) = false "
+                "AND (m.path STARTS WITH 'profile/' OR m.path STARTS WITH 'tools/' "
+                "     OR m.project = $project) "
+                "RETURN m.path AS path, m.content AS content ORDER BY m.path",
+                project=project,
+            )
+        else:
+            result = ses.run(
+                "MATCH (m:Memory) WHERE coalesce(m.status, 'active') = 'active' "
+                "AND coalesce(m.archived, false) = false "
+                "RETURN m.path AS path, m.content AS content ORDER BY m.path"
+            )
+        mems = [dict(r) for r in result]
+    if sum(len(m["content"] or "") for m in mems) > cap:
+        kept, used = [], 0
+        for m in sorted(mems, key=lambda x: len(x["content"] or "")):  # smallest first
+            if used + len(m["content"] or "") > cap:
+                continue
+            kept.append(m)
+            used += len(m["content"] or "")
+        mems = sorted(kept, key=lambda x: x["path"])
+    return mems
 
 
 def _summarize_tool_response(tr) -> str:
@@ -242,9 +277,18 @@ def render_events(events: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def render_existing(memories: list[dict]) -> str:
+def render_existing(memories: list[dict], paths_only: bool = False) -> str:
     if not memories:
         return "(no existing memories)"
+    if paths_only:
+        # Small local models can't reliably extract the new session through full
+        # existing-memory bodies — they regurgitate or stall. Give them just the
+        # existing paths so they reuse a path when updating one, without the bloat.
+        # Content-level merge for this path is handled later by Phase A
+        # supersession + `dream.py --consolidate`.
+        return "Existing memory paths (reuse a path to update it):\n" + "\n".join(
+            f"- {m['path']}" for m in memories
+        )
     parts = []
     for m in memories:
         parts.append(f"### {m['path']}\n```\n{m['content']}\n```")
@@ -477,10 +521,16 @@ def main():
         if not sessions:
             print("nothing to dream about.")
             return
-        existing = render_existing(fetch_existing_memories(driver))
         system_prompt = system_prompt_for(provider_name, model)
+        # Frontier models handle full existing-memory bodies for inline merge; small
+        # local models can't, so they get a paths-only context (proven: full bodies
+        # make qwen3.5/gemma4 stall or regurgitate). Existing is also scoped to this
+        # session's project + cross-project profile/tools so a growing graph never
+        # swamps the model.
+        paths_only = provider_name not in ("anthropic", "openai")
         for session_key, events in sessions:
             project = dominant_project([e.get("cwd") for e in events])
+            existing = render_existing(fetch_existing_memories(driver, project), paths_only=paths_only)
             label = f"{session_key}" + (f"  project={project}" if project else "")
             print(f"\n=== dreaming over {label} ({len(events)} new events) ===")
             memories = call_provider(provider_fn, render_events(events), existing, model, system_prompt)
