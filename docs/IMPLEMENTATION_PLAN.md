@@ -42,17 +42,19 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 **Goal:** memory writes stop destroying prior state; the additive schema for time + provenance + revisions exists. This is the foundation the evolution UI (Phase F) renders.
 
+**Design decisions (2026-06-01 review):** (i) Same-path evolution uses a **revision-chain**, not duplicate-path nodes — `Memory.path` is `UNIQUE`, so one node per path stays the "current" view and the prior body is snapshotted into a separate `:MemoryRevision` before each overwrite. `:SUPERSEDED_BY` is used only by `consolidate` (where source and merged paths genuinely differ). (ii) Claim-level `:EXTRACTED_FROM` is **deferred to Phase D** (it needs the dream provider to cite specific source events; linking every memory to every processed event would explode edges on large sessions). Phase A keeps session-granularity `:DERIVED_FROM`.
+
 **Work items**
-- **A1 — Additive schema** (`hooks/schema.py`, `cli/njhook.py migrate`). Add `:Memory` props `ingested_at, valid_from, valid_until, status, created_by` (all nullable; `status` defaults `'active'` on read via `coalesce`). New labels `:MemoryRevision`, `:DreamRun`. New rels `:SUPERSEDED_BY`, `:EXTRACTED_FROM`, `:WROTE`, `:VERSION_OF`. New index on `(:Memory) ON (m.status)`. No backfill required.
-- **A2 — Retire destructive consolidate** (`dream/consolidate.py`, `Q1`). Replace `DETACH DELETE old` with: `SET old.valid_until=$now, old.status='superseded'` + `MERGE (old)-[:SUPERSEDED_BY]->(merged)`. Keep provenance rewiring.
-- **A3 — Non-destructive dream write** (`dream/dream.py write_memories`, `Q2`+`Q5`+`F1` data model). On divergent content at an existing path: close the old node (`valid_until`, `status='superseded'`), create a new node, link `:SUPERSEDED_BY`; always append a `:MemoryRevision` snapshot of the prior body and a `(:DreamRun)-[:WROTE]->(:Memory)`; `UNWIND` processed `event_id`s into `MERGE (m)-[:EXTRACTED_FROM]->(e)`. Identical content → no-op (no spurious revision).
-- **A4 — Recall lifecycle filter** (`hooks/inject_memory.py`). All recall queries gain `coalesce(m.status,'active')='active' AND (m.valid_until IS NULL OR m.valid_until > $now)`.
+- **A1 — Additive schema** (`hooks/schema.py`, `cli/njhook.py migrate`). Add `:Memory` props `ingested_at, valid_from, valid_until, status, created_by` (all nullable; `status` defaults `'active'` on read via `coalesce`). New labels `:MemoryRevision`, `:DreamRun`. New rels `:SUPERSEDED_BY`, `:WROTE`, `:VERSION_OF`. New index on `(:Memory) ON (m.status)`. No backfill required.
+- **A2 — Retire destructive consolidate** (`dream/consolidate.py`, `Q1`). Replace `DETACH DELETE old` with: `SET old.valid_until=$now, old.status='superseded'` + `MERGE (old)-[:SUPERSEDED_BY]->(merged)`. Keep provenance rewiring. (Sources retain distinct paths, so `path UNIQUE` holds.)
+- **A3 — Non-destructive dream write** (`dream/dream.py write_memories`, `Q2`+`Q5`+`F1` data model). On divergent content at an existing path: snapshot the prior body into a `:MemoryRevision` (`:VERSION_OF` the node) and update the node **in place** (no duplicate-path node); set `status='active'`, `ingested_at`, `valid_from` (coalesce-preserve), `created_by`. Create one `(:DreamRun)-[:WROTE]->(:Memory)` per run. Identical content → no-op (no spurious revision).
+- **A4 — Recall lifecycle filter** (`hooks/inject_memory.py`). All recall queries gain `coalesce(m.status,'active')='active'` (the `valid_until` window arrives with `--as-of` in Phase F).
 
 **Acceptance bar**
 1. Migration is idempotent; re-run is a no-op; existing memories load and inject exactly as before (snapshot test on injection output unchanged for active memories).
 2. After a consolidate, both source memories still exist with `status='superseded'` and a `:SUPERSEDED_BY` edge to the merged node; the merged node is `active`. **Negative test:** `DETACH DELETE` string absent from `dream/consolidate.py`.
-3. Re-dreaming a path with changed content produces a second `:Memory`, a `:MemoryRevision` of the old body, and a `:SUPERSEDED_BY` edge; re-dreaming with identical content adds no revision.
-4. Each written memory has ≥1 `:EXTRACTED_FROM` edge to a real `:Event` whose `event_id` was in the processed batch.
+3. Re-dreaming a path with changed content snapshots the prior body into a `:MemoryRevision` (linked `:VERSION_OF`) and updates the node in place; re-dreaming identical content adds no revision. **Negative test:** no two `:Memory` ever share a path (path-UNIQUE preserved).
+4. Each dream run creates one `:DreamRun` with `(:DreamRun)-[:WROTE]->(:Memory)` to every memory it wrote; existing `:DERIVED_FROM` session provenance is preserved. (Claim-level `:EXTRACTED_FROM` is Phase D.)
 5. Superseded and `pending_review` memories never appear in `session_start_context` or `prompt_context` output. **Negative test** asserts this explicitly.
 6. `backup`/`restore` round-trip the new fields and the `:MemoryRevision`/`:SUPERSEDED_BY` lineage.
 
@@ -135,7 +137,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 **Goal:** the human-facing "trace how this memory evolved" experience. (F2, Q6.)
 
 **Work items**
-- **F1' — `--as-of` recall** (`recall.py`, `cli/njhook.py recall`). `valid_from <= $T AND (valid_until IS NULL OR valid_until > $T)`.
+- **F1' — `--as-of` recall** (`recall.py`, `cli/njhook.py recall`). Filter which memories were active at `$T` (`valid_from <= $T AND (valid_until IS NULL OR valid_until > $T)`); reconstruct each one's *content* at `$T` from its `:MemoryRevision` chain (latest snapshot with `ts <= $T`, else current) — since same-path history lives in revisions per the Phase A decision.
 - **F2' — Dashboard timeline** (`dashboard/app.py` `/memory/<path>/history`). Time-ordered `:MemoryRevision` + `:SUPERSEDED_BY` rows: operation, `:DreamRun` provider/model, timestamp, one-line summary.
 - **F3' — Diff panel.** `difflib.unified_diff` over adjacent revisions, colored.
 - **F4' — Lineage graph.** Node-link of `:EXTRACTED_FROM`/`:SUPERSEDED_BY`/`:CONTRADICTS`; click an `:Event` to jump to the raw session excerpt; as-of date picker.
