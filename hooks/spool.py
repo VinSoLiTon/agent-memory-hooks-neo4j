@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+from event_schema import SCHEMA_VERSION  # single source of truth (Phase B PR-2)
 
 
 def _dir() -> Path:
@@ -47,8 +48,10 @@ def append(record: dict, day: str) -> None:
 
 
 def to_dlq(raw: str, error: str) -> None:
-    """Dead-letter a record that can't be ingested, preserving the raw line + error."""
-    _append_line(_dlq_file(), json.dumps({"error": error, "raw": raw}))
+    """Dead-letter a record that can't be ingested, preserving the raw line + error.
+    Stamps `ts` (UTC ISO) so health can compute a DLQ *rate*, not just a total."""
+    _append_line(_dlq_file(), json.dumps(
+        {"ts": datetime.now(timezone.utc).isoformat(), "error": error, "raw": raw}))
 
 
 def event_files() -> list[Path]:
@@ -87,3 +90,26 @@ def dlq_count() -> int:
         return 0
     with open(f, encoding="utf-8") as fh:
         return sum(1 for ln in fh if ln.strip())
+
+
+def dlq_rate_per_hour(window_hours: float = 1.0) -> float:
+    """Dead-letters in the last `window_hours`, per hour. The signal health alerts
+    on — a static nonzero DLQ count is benign history; a *rising rate* means
+    something is actively breaking. Records without a `ts` (pre-PR-2) are ignored."""
+    f = _dlq_file()
+    if not f.exists() or window_hours <= 0:
+        return 0.0
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
+    n = 0
+    with open(f, encoding="utf-8") as fh:
+        for ln in fh:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                ts = json.loads(ln).get("ts")
+            except Exception:
+                continue
+            if ts and ts >= cutoff:
+                n += 1
+    return n / window_hours
