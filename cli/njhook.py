@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -1309,6 +1310,129 @@ def cmd_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- Phase H4: backup/restore rehearsal -------------------------------------
+
+def _rehearsal_backup_args(out: str) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        out=out, with_embeddings=False, with_sessions=False, since=None,
+        session_key=None, limit=0, all_sessions=False, no_tool_response=False, max_field_chars=0,
+    )
+
+
+def run_rehearsal() -> dict:
+    """Phase H4 — prove the backup→restore pipeline works end-to-end on a
+    DISPOSABLE marker subgraph, without touching real data: seed a marker memory
+    + revision, run the real `cmd_backup`, confirm the marker is in the backup,
+    filter the backup to an isolated payload, delete the marker, restore it FROM
+    THE BACKUP'S OWN FORMAT via the real `cmd_restore`, and verify content +
+    lineage came back. Records a `:RehearsalRun {ts, ok, detail}` either way and
+    always cleans up the marker. Returns {ts, ok, detail}.
+
+    'Untested backups aren't backups': this is the recurring restore drill, and
+    `njhook health` flags when it's gone stale or last failed."""
+    seed_ts = datetime.now(timezone.utc).isoformat()
+    marker = f"general/__rehearsal_{seed_ts.replace(':', '').replace('-', '').replace('.', '')}.md"
+    content = ("---\ntitle: restore rehearsal\nkind: general\n---\n\n"
+               "Disposable backup/restore rehearsal marker — safe to delete.")
+    ok, detail = False, ""
+    tmpdir = tempfile.mkdtemp(prefix="njhook-rehearsal-")
+    try:
+        with driver() as d, d.session() as s:
+            s.run(
+                "MERGE (m:Memory {path:$p}) "
+                "SET m.content=$c, m.status='active', m.created_by='rehearsal', "
+                "    m.updated_at=$now, m.valid_from=$now, m.ingested_at=$now "
+                "MERGE (rev:MemoryRevision {ts:$rt, content_snapshot:$cs}) "
+                "SET rev.operation='dream_update', rev.actor='rehearsal', rev.status='active' "
+                "MERGE (rev)-[:VERSION_OF]->(m)",
+                p=marker, c=content, now=seed_ts, rt=seed_ts, cs="prior rehearsal body",
+            )
+        full = os.path.join(tmpdir, "full.json")
+        if cmd_backup(_rehearsal_backup_args(full)) != 0:
+            raise RuntimeError("backup returned non-zero")
+        import json as _json
+        data = _json.loads(open(full, encoding="utf-8").read())
+        mems = [m for m in data.get("memories", []) if m.get("path") == marker]
+        revs = [r for r in data.get("memory_revisions", []) if r.get("path") == marker]
+        if not mems:
+            raise RuntimeError("marker absent from backup — backup did not capture live data")
+        mini = os.path.join(tmpdir, "mini.json")
+        with open(mini, "w", encoding="utf-8") as f:
+            _json.dump({"version": data.get("version", 2), "memories": mems,
+                        "memory_revisions": revs, "supersessions": [], "sessions": []}, f)
+        with driver() as d, d.session() as s:
+            s.run("MATCH (r:MemoryRevision)-[:VERSION_OF]->(m:Memory {path:$p}) DETACH DELETE r", p=marker)
+            s.run("MATCH (m:Memory {path:$p}) DETACH DELETE m", p=marker)
+        if cmd_restore(types.SimpleNamespace(
+                in_=mini, with_embeddings=False, dry_run=False, allow_malformed=False)) != 0:
+            raise RuntimeError("restore returned non-zero")
+        with driver() as d, d.session() as s:
+            chk = s.run(
+                "MATCH (m:Memory {path:$p}) "
+                "OPTIONAL MATCH (rev:MemoryRevision)-[:VERSION_OF]->(m) "
+                "RETURN m.content AS c, count(rev) AS nrev", p=marker).single()
+        if not chk or chk["c"] != content:
+            raise RuntimeError("restored marker content mismatch")
+        if chk["nrev"] < 1:
+            raise RuntimeError("revision lineage not restored")
+        ok = True
+        detail = f"backup→restore round-trip verified ({chk['nrev']} revision(s))"
+    except Exception as e:
+        detail = f"{type(e).__name__}: {str(e)[:120]}"
+    finally:
+        try:
+            with driver() as d, d.session() as s:
+                s.run("MATCH (r:MemoryRevision)-[:VERSION_OF]->(m:Memory {path:$p}) DETACH DELETE r", p=marker)
+                s.run("MATCH (m:Memory {path:$p}) DETACH DELETE m", p=marker)
+        except Exception:
+            pass
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    rec_ts = datetime.now(timezone.utc).isoformat()
+    try:
+        with driver() as d, d.session() as s:
+            s.run("CREATE (:RehearsalRun {ts:$ts, ok:$ok, detail:$detail})",
+                  ts=rec_ts, ok=ok, detail=detail)
+    except Exception:
+        pass
+    return {"ts": rec_ts, "ok": ok, "detail": detail}
+
+
+def cmd_rehearse_restore(args: argparse.Namespace) -> int:
+    """Phase H4 — run a backup/restore rehearsal and record the result."""
+    res = run_rehearsal()
+    if res["ok"]:
+        print(f"restore rehearsal OK ({res['ts'][:19]}): {res['detail']}")
+        return 0
+    print(f"restore rehearsal FAILED: {res['detail']}", file=sys.stderr)
+    return 1
+
+
+def _rehearsal_health_row(latest: dict | None, rehearsal_days: int, now=None):
+    """Compute the `health` row for the restore rehearsal from the latest
+    :RehearsalRun ({ts, ok, detail} or None). Pure so it's unit-testable."""
+    if not latest:
+        return ("warn", "restore rehearsal",
+                "never run — `njhook rehearse-restore` to verify backups are restorable")
+    now = now or datetime.now(timezone.utc)
+    ts = latest.get("ts")
+    try:
+        dt = datetime.fromisoformat(str(ts))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age_days = (now - dt).days
+    except Exception:
+        age_days = None
+    if not latest.get("ok"):
+        return ("fail", "restore rehearsal",
+                f"last rehearsal FAILED ({str(ts)[:10]}): {latest.get('detail')}")
+    if age_days is not None and age_days > rehearsal_days:
+        return ("warn", "restore rehearsal",
+                f"last ok {str(ts)[:10]} (>{rehearsal_days}d ago) — re-run `njhook rehearse-restore`")
+    age_str = f"{age_days}d ago" if age_days is not None else str(ts)[:19]
+    return ("ok", "restore rehearsal", f"last ok {str(ts)[:10]} ({age_str})")
+
+
 def cmd_health(args: argparse.Namespace) -> int:
     """Run a series of stack-readiness checks. Exit 0 if all OK or only WARN;
     exit 1 if any FAIL.
@@ -1537,6 +1661,16 @@ def cmd_health(args: argparse.Namespace) -> int:
     except Exception as e:
         rows.append((WARN, "egress policy", f"check failed: {e}"))
 
+    # --- 13. Restore rehearsal (Phase H4) ---
+    try:
+        rehearsal_days = int(os.environ.get("NJHOOK_REHEARSAL_DAYS", "30"))
+        with driver() as d, d.session() as s:
+            rr = s.run("MATCH (rr:RehearsalRun) RETURN rr.ts AS ts, rr.ok AS ok, rr.detail AS detail "
+                       "ORDER BY rr.ts DESC LIMIT 1").single()
+        rows.append(_rehearsal_health_row(dict(rr) if rr else None, rehearsal_days))
+    except Exception as e:
+        rows.append((WARN, "restore rehearsal", f"check failed: {e}"))
+
     return _print_health(rows)
 
 
@@ -1647,6 +1781,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     pin = sub.add_parser("ingest", help="drain the durable event spool into Neo4j (Phase B; idempotent)")
     pin.set_defaults(fn=cmd_ingest)
+
+    prr = sub.add_parser("rehearse-restore", help="verify backups are restorable: backup→restore a disposable marker and record the result (Phase H4)")
+    prr.set_defaults(fn=cmd_rehearse_restore)
 
     prv = sub.add_parser("review", help="conflict/review queue (Phase E): list/approve/reject/supersede/flag")
     prv.add_argument("action", choices=["list", "approve", "reject", "supersede", "flag", "auto-resolve"])

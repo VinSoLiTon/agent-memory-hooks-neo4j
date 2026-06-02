@@ -26,9 +26,9 @@ Legend: ✅ done & merged · 🔵 in progress / open PR · ⏸ deferred (with re
 | **E** — Conflict & review | 🔵 in progress (#15, #20) | #15, #20 | PR-1 `review.py` engine + `njhook review` CLI + lifecycle (acceptance #2/#3/#4); PR-2 `detect_contradiction` engine (injected candidates+judge) + `auto_resolve_all` + `njhook review auto-resolve` + dashboard `/review` conflict view; 5+3 tests | PR-3: wire the LLM judge into the nightly (opt-in) so contradictions auto-flag (acceptance #1 auto-trigger) |
 | **F** — Evolution UI (north star) | ✅ done & fully aligned | #10, #14, #21 | history + `--diff` + `--as-of`; `memory_lineage` (source events + supersession + `CONTRADICTS`) in CLI + dashboard; inline citation footer (Q6); 6+2 tests | — (all acceptance items met) |
 | **G** — Universal interfaces (REST/MCP/renderers) | ✅ merged & fully aligned | #17, #18, #23 | PR-1 shared `service.py` + `njhook recall`/`write-event` CLI + REST API (`/recall`,`/events`,`/health`); PR-2 MCP server (`api/mcp_server.py`, 4 tools over the same service, lazy `mcp` import); PR-3 **file renderers** (`hooks/render.py` + `njhook render --target agents\|claude\|gemini\|cursor\|all`) — managed-block splice into each runtime's startup file, human content preserved, idempotent, same recall core as the hook; all reuse `recall.py`+`log_event`; parity + closed-vocab tests; 5+5+13 tests | — (all 4 work items shipped) |
-| **H** — Governance & eval | 🔵 in progress (#19, #24, #25) | #19, #24, #25 | PR-1: sensitivity tagging (`privacy.sensitivity_for`) + egress policy (`dream.egress_blocked`) + health egress row; PR-2 (H3): **anti-poisoning gate** (`quality.poisoning_risk` — directive×thin×novel → `pending_review`; closed `DIRECTIVE_MARKERS`; existing-active exempt); PR-3 (H2): **audit log** (`hooks/audit.py` — every mutation appends a `:MemoryRevision`; closed `OPERATIONS` vocab; review/edit now recorded with prior status + actor; `audit.trail`/`recent`; `njhook audit`/`--recent` + dashboard history page; round-trips via backup/restore) — **acc #2 met**; 3+13+11 tests | H4 restore-rehearsal check (acc #3); confidence-*annealing* deferred |
+| **H** — Governance & eval | ✅ merged & fully aligned | #19, #24, #25, #26 | PR-1 (H1): sensitivity tagging + egress policy + health egress row (acc #1); PR-2 (H3): **anti-poisoning gate** (`quality.poisoning_risk` — directive×thin×novel → `pending_review`; bonus beyond the bars); PR-3 (H2): **audit log** (`hooks/audit.py`; every mutation → `:MemoryRevision`; `njhook audit` + dashboard; round-trips via backup) (acc #2); PR-4 (H4): **restore rehearsal** (`njhook rehearse-restore` real backup→restore round-trip on a disposable marker → `:RehearsalRun`; health reports age, warn stale/never, fail on failure) (acc #3); 3+13+11+6 tests | confidence-*annealing* deferred (not an acceptance bar) |
 
-**Rollup:** **all 8 phases A–H now touched.** Complete & aligned: A, C, F (history/diff/as-of/lineage), **G (CLI+REST+MCP+renderers — all 4 work items shipped)**. In progress: B (durable capture PR-1), D (`EXTRACTED_FROM` + grounding gate + retrieval eval), E (review workflow), H (egress policy + anti-poisoning gate + audit log — only H4 restore-rehearsal left). Both north-star halves — *trustworthy evolution-tracing* and *universal layer* — are working end-to-end; remaining work is finishing B/D/E/H (no new territory).
+**Rollup:** **all 8 phases A–H now touched.** Complete & fully aligned: **A, C, F, G, H** (5 of 8). In progress: B (durable capture PR-1), D (`EXTRACTED_FROM` + grounding gate + retrieval eval), E (review workflow). Both north-star halves — *trustworthy evolution-tracing* and *universal layer* — are working end-to-end; remaining work is finishing B/D/E (no new territory).
 
 ## Acceptance gaps — all resolved (PR #12)
 
@@ -84,12 +84,13 @@ Not numbered phases, but delivered and acceptance-evidenced in their PRs:
 | #22 | merged | Phase D (PR-3) — D3 retrieval eval harness (`dream/eval_retrieval.py` + `njhook eval-retrieval` + CI gate) |
 | #23 | merged | Phase G (PR-3 / G4) — file renderers (`hooks/render.py` + `njhook render`); managed-block splice into AGENTS.md/CLAUDE.md/GEMINI.md/Cursor |
 | #24 | merged | Phase H (PR-2 / H3) — anti-poisoning admission gate (`quality.poisoning_risk`; directive×thin×novel → pending_review) |
-| #25 | open | Phase H (PR-3 / H2) — audit log (`hooks/audit.py`; record every mutation; `njhook audit` + dashboard); acceptance #2 met |
+| #25 | merged | Phase H (PR-3 / H2) — audit log (`hooks/audit.py`; record every mutation; `njhook audit` + dashboard); acceptance #2 met |
+| #26 | open | Phase H (PR-4 / H4) — restore rehearsal (`njhook rehearse-restore` + `:RehearsalRun` + health row); acceptance #3 met → **Phase H complete** |
 
 ## Metrics
 
-- Tests: **19 → 126** over the program (live Neo4j + pure).
-- `njhook health`: **21 ok / 0 warn / 0 fail**.
+- Tests: **19 → 132** over the program (live Neo4j + pure).
+- `njhook health`: **24 ok / 0 warn / 0 fail** (after a fresh `njhook rehearse-restore`; the rehearsal row warns if no run is recorded).
 - Graph: ~20 memories, ~34 sessions, ~9.5k events; nightly task registered at 3 PM.
 
 ## How to keep this aligned
