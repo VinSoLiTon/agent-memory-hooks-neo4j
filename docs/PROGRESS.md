@@ -91,7 +91,7 @@ Not numbered phases, but delivered and acceptance-evidenced in their PRs:
 | #29 | merged | Phase D (PR-4 / D1) — typed `kind` vocabulary (`memory_types.py`, 15 active, replaces bucket labels, migration window, schema enum + `m.kind` property); acceptance #1 + #4 met |
 | #30 | merged | Phase D (PR-5) — `njhook migrate-kinds` (audited, idempotent re-tag of legacy rows + `m.kind` backfill) |
 | #31 | merged | Phase D (PR-6 / D3) — distillation eval (`eval_distillation.py` deterministic scorer + `njhook eval-distillation`); acceptance #3 met → **Phase D complete → A–H program complete** |
-| #32 | open | docs: refresh user-facing references (README, cli/README, dream/README, index.html banner) to the full A–H feature set |
+| #32 | open | docs: refresh user-facing references (README, cli/README, dream/README, full `index.html` rebuild) to the full A–H feature set |
 
 ## Metrics
 
