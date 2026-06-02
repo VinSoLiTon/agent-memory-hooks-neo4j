@@ -36,7 +36,9 @@ except ImportError:
 
 
 PATH_RE = re.compile(r"^(profile|tools|project|general)/[A-Za-z0-9._/-]+\.md$")
-VALID_KINDS = {"profile", "tool", "project", "general"}
+# Phase D1: `kind` is the semantic type vocabulary (memory_types.MEMORY_KINDS),
+# with the legacy bucket labels still accepted during the migration window.
+from memory_types import VALID_KINDS  # noqa: E402  (single source of truth)
 
 MIN_BODY_CHARS = int(os.environ.get("DREAM_MEMORY_MIN_CHARS", "30"))
 MAX_BODY_CHARS = int(os.environ.get("DREAM_MEMORY_MAX_CHARS", "20000"))
