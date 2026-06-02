@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1408,6 +1409,57 @@ def cmd_rehearse_restore(args: argparse.Namespace) -> int:
     return 1
 
 
+_FM_KIND_RE = re.compile(r"(?m)^kind:[ \t]*[A-Za-z]+[ \t]*$")
+
+
+def _rewrite_frontmatter_kind(content: str, new_kind: str) -> str:
+    """Replace the first frontmatter `kind:` line with `kind: <new_kind>`. Pure;
+    returns the content unchanged if there's no `kind:` line."""
+    return _FM_KIND_RE.sub(f"kind: {new_kind}", content or "", count=1)
+
+
+def cmd_migrate_kinds(args: argparse.Namespace) -> int:
+    """Phase D1 — re-tag legacy `kind` (profile/tool/project/general) memories to
+    the semantic vocabulary and backfill the queryable `m.kind` property. A legacy
+    frontmatter label is rewritten to its semantic type (an audited `edit`); a
+    memory already-semantic in its body just gets its property backfilled (no
+    content change). Idempotent; `--dry-run` previews."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
+    import audit
+    import memory_types as mt
+    now = datetime.now(timezone.utc).isoformat()
+    rewritten = backfilled = unchanged = 0
+    with driver() as d, d.session() as s:
+        rows = list(s.run(
+            "MATCH (m:Memory) RETURN m.path AS path, m.content AS content, m.kind AS kind, "
+            "coalesce(m.status,'active') AS status"))
+        for r in rows:
+            path, content, prop_kind, status = r["path"], r["content"], r["kind"], r["status"]
+            fm_kind = mt.parse_kind(content)
+            target = mt.normalize_kind(fm_kind or prop_kind or mt.DEFAULT_KIND)
+            needs_rewrite = fm_kind in mt.LEGACY_KINDS          # legacy body label → rewrite
+            needs_prop = prop_kind != target                    # property missing/stale
+            if not needs_rewrite and not needs_prop:
+                unchanged += 1
+                continue
+            if args.dry_run:
+                rewritten += 1 if needs_rewrite else 0
+                backfilled += 1 if (needs_prop and not needs_rewrite) else 0
+                continue
+            if needs_rewrite:
+                audit.record(s, path, "edit", actor="migrate-kinds", status=status, content_snapshot=content)
+                s.run("MATCH (m:Memory {path:$p}) SET m.content=$c, m.kind=$k, m.updated_at=$now",
+                      p=path, c=_rewrite_frontmatter_kind(content, target), k=target, now=now)
+                rewritten += 1
+            else:
+                s.run("MATCH (m:Memory {path:$p}) SET m.kind=$k", p=path, k=target)
+                backfilled += 1
+    verb = "would " if args.dry_run else ""
+    print(f"migrate-kinds: {verb}rewrite {rewritten} legacy memory(ies), "
+          f"{verb}backfill {backfilled} kind property(ies); {unchanged} already current")
+    return 0
+
+
 def _spool_health_row(backlog: int, dlq: int, dlq_rate: float, fail_rate: float, dlq_path: str):
     """Compute the `health` row for the event spool. FAILs on a rising DLQ *rate*
     (active breakage), not on a static nonzero DLQ count (benign history). Pure so
@@ -1809,6 +1861,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     prr = sub.add_parser("rehearse-restore", help="verify backups are restorable: backup→restore a disposable marker and record the result (Phase H4)")
     prr.set_defaults(fn=cmd_rehearse_restore)
+
+    pmk = sub.add_parser("migrate-kinds", help="re-tag legacy kind labels to the semantic vocabulary + backfill the m.kind property (Phase D1; audited, idempotent)")
+    pmk.add_argument("--dry-run", action="store_true", help="report what would change without writing")
+    pmk.set_defaults(fn=cmd_migrate_kinds)
 
     prv = sub.add_parser("review", help="conflict/review queue (Phase E): list/approve/reject/supersede/flag")
     prv.add_argument("action", choices=["list", "approve", "reject", "supersede", "flag", "auto-resolve"])
