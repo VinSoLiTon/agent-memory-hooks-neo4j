@@ -31,7 +31,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 | **B — Durable capture** | ⬜ not started | No silent event loss when Neo4j is down | F4, Gap 1 canonical schema, Gap 8 metrics | — (parallel to A) |
 | **C — Shared recall + ranking** | ✅ merged (#5,#6,#9); ⏸ C4 | One ranking engine; use the signals already stamped | F5, Q3, F7, F9 | A |
 | **D — Typed memory + admission gate** | ⬜ not started | Structured records; block ungrounded dream output | F3, Gap 3 (13-type vocab), Gap 9 evals | A, C |
-| **E — Conflict & review** | ⬜ not started | Contradictions can't silently become truth | F6 | A, D |
+| **E — Conflict & review** | ✅ done (#15,#20,#27) | Contradictions can't silently become truth | F6 | A, D |
 | **F — Evolution UI (north-star payoff)** | ✅ done (#10, #14, #21) | `--as-of` recall + human timeline/diff/lineage | F2, Q6 | A, C |
 | **G — Universal interfaces** | ✅ done (#17,#18,#23) | Attach any LLM, not just hook-capable CLIs | F8, Gap 10 (REST/CLI/renderers) | C |
 | **H — Governance & eval** | ✅ done (#19,#24,#25,#26) | Trustworthy over months | Gap 7 egress, Gap 12 anti-poisoning, Gap 9 CI evals | B, D |
@@ -127,17 +127,17 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase E — Conflict & review workflow
 
-**Status:** 🔵 In progress (#15, #20). **PR-1**: `hooks/review.py` engine + `njhook review list/approve/reject/supersede/flag` + the `pending_review`/`rejected` lifecycle (acceptance #2/#3/#4). **PR-2**: `detect_contradiction` engine (injected candidate-finder + judge, so the logic is unit-tested without an LLM) + `vector_candidates` (similarity finder) + `auto_resolve_all` + `njhook review auto-resolve` + the dashboard `/review` conflict view (approve/reject/supersede, write-gated). **Remaining (PR-3)**: wire a real LLM judge into the nightly (opt-in) so contradictions auto-flag at write time (acceptance #1 auto-trigger — kept out of the hot path until opted in).
+**Status:** ✅ Done & fully aligned (#15, #20, #27) — all four acceptance bars met. **PR-1**: `hooks/review.py` engine + `njhook review list/approve/reject/supersede/flag` + the `pending_review`/`rejected` lifecycle (acceptance #2/#3). **PR-2**: `detect_contradiction` engine (injected candidate-finder + judge, so the logic is unit-tested without an LLM) + `vector_candidates` (similarity finder) + `auto_resolve_all` + `njhook review auto-resolve` (#4) + the dashboard `/review` conflict view. **PR-3 (E1 — nightly auto-flag)**: real LLM judge (`dream/judge.py` — strict yes/no, conservative: any error/ambiguity → False, never flag on doubt) wired into `write_memories`, opt-in via `DREAM_CONTRADICTION_CHECK=1` / `dream.py --check-contradictions` (kept out of the hot path; one LLM call per candidate pair, runs after the write so embeddings are indexed). On a hit, `review.flag_new_contradiction` links `new-[:CONTRADICTS]->existing` and quarantines ONLY the new memory — **the established active memory stays active** (acceptance #1); flagging is audited (H2). judge + candidate-finder are injectable so the wiring is tested without an LLM.
 
 **Goal:** contradictory memories are detected pre-commit and surfaced, not auto-activated. (Gap 4, F6.)
 
 **Work items**
-- **E1 — Pre-commit contradiction detection** (`dream/dream.py`/`recall.py`). Compare a new claim against semantically related active memories before writing; on contradiction, create `:CONTRADICTS` and route to `pending_review`.
+- **E1 — Pre-commit contradiction detection** (`dream/dream.py`/`recall.py`) ✅. Compare each new memory against semantically-related active memories (vector finder) and ask the LLM judge; on a contradiction, create `:CONTRADICTS` and route the NEW memory to `pending_review` (the active one stays active). Opt-in (`--check-contradictions`); conservative judge; injectable for tests.
 - **E2 — Auto-resolution heuristic** (`dream/consolidate.py` or new `resolve.py`). For un-reviewed conflicts: `Winner = max(source_authority × recency)`, source hierarchy `user > claude_code > codex > cursor > gemini > ollama`.
 - **E3 — Review surfaces** (`cli/njhook.py review list/approve/reject/supersede`; `dashboard` conflict view). Conflict view shows which events support each side via `:EXTRACTED_FROM`, with approve/reject/supersede actions.
 
 **Acceptance bar**
-1. A new memory contradicting an active one is flagged `:CONTRADICTS` + `pending_review`; the active one stays active until resolved.
+1. A new memory contradicting an active one is flagged `:CONTRADICTS` + `pending_review`; the active one stays active until resolved. ✅ — `write_memories` (opt-in) → `detect_contradiction` + `flag_new_contradiction`: new → pending_review + edge, existing → **stays active**; tested with an injected judge (`test_contradiction_nightly.py`).
 2. `njhook review approve <id>` activates one and supersedes the other; the change affects recall immediately.
 3. **Negative test:** `pending_review`/contradicted memories are not injected.
 4. Auto-resolution picks the higher-authority/recency memory when no human acts; tested.

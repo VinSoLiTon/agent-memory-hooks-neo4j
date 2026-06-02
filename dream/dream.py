@@ -41,6 +41,8 @@ from providers import get_provider, default_model  # noqa: E402
 import embeddings  # noqa: E402
 import consolidate as consolidate_mod  # noqa: E402
 import quality as quality_mod  # noqa: E402
+import review as review_mod  # noqa: E402  (Phase E — contradiction detection/flagging)
+import judge as judge_mod  # noqa: E402  (Phase E PR-3 — LLM contradiction judge)
 
 # Windows consoles default to cp1252; memories from Claude routinely include
 # em-dashes, arrows, smart quotes, etc. Force UTF-8 so the human-readable
@@ -380,7 +382,7 @@ def attribute_events(content: str, events: list[dict], k: int, min_overlap: int)
     return [eid for _, eid in scored[:k]]
 
 
-def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None, provider: str = "unknown", model: str = "unknown", events: list[dict] | None = None) -> int:
+def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None, provider: str = "unknown", model: str = "unknown", events: list[dict] | None = None, contradiction_judge=None, find_candidates=None) -> int:
     """Upsert memories and advance the session's last_dreamed_at watermark.
 
     `watermark` is the timestamp of the latest event we just dreamed over —
@@ -602,7 +604,39 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
                     """,
                     parameters={"links": links},
                 )
+
+    # Phase E (PR-3) — opt-in pre-commit contradiction detection. Kept OUT of the
+    # hot path unless DREAM_CONTRADICTION_CHECK=1 (it costs one LLM call per
+    # candidate pair). Runs after the write so the new memories + embeddings are
+    # in the index for the vector candidate-finder. On a hit, the NEW memory is
+    # linked :CONTRADICTS and routed to pending_review while the established active
+    # memory STAYS ACTIVE (acceptance #1) — neither silently overwrites the other.
+    # judge + find_candidates are injectable so the wiring is tested without an LLM.
+    if rows and (contradiction_judge is not None or os.environ.get("DREAM_CONTRADICTION_CHECK") == "1"):
+        judge = contradiction_judge or judge_mod.get_judge(provider, model)
+        finder = find_candidates or review_mod.vector_candidates(embeddings.embed)
+        new_active = [(r["path"], r["content"]) for r in rows if mem_status.get(r["path"]) == "active"]
+        flagged = check_contradictions(driver, new_active, judge, finder)
+        if flagged:
+            print(f"  contradiction check: {len(flagged)} new memory(ies) contradicted an "
+                  f"active one → pending_review (resolve with `njhook review`)", file=sys.stderr)
     return len(rows)
+
+
+def check_contradictions(driver, candidates: list, judge, find_candidates) -> list:
+    """Phase E PR-3 — for each just-written active `(path, content)`, run
+    `review.detect_contradiction` with the new-only flagger so a contradicting new
+    memory is quarantined while the established active one keeps serving recall.
+    Returns the list of (new_path, existing_path) pairs flagged."""
+    flagged: list = []
+    with driver.session() as s:
+        for path, content in candidates:
+            for existing in review_mod.detect_contradiction(
+                s, path, content, judge, find_candidates,
+                on_contradiction=review_mod.flag_new_contradiction,
+            ):
+                flagged.append((path, existing))
+    return flagged
 
 
 def egress_blocked(provider_name: str, session_sensitive: bool, allow_egress: bool) -> bool:
@@ -648,7 +682,14 @@ def main():
                     help="flag stale memories as archived (excluded from recall)")
     ap.add_argument("--stale-days", type=int, default=60,
                     help="memories untouched for this many days are archive-eligible")
+    ap.add_argument("--check-contradictions", action="store_true",
+                    help="Phase E: after writing, ask the LLM whether each new memory contradicts an "
+                         "active one; on a hit the new memory is flagged :CONTRADICTS + pending_review "
+                         "(the active one stays active). Opt-in — one extra LLM call per candidate pair.")
     args = ap.parse_args()
+    # The flag is a convenience over DREAM_CONTRADICTION_CHECK=1, which write_memories reads.
+    if args.check_contradictions:
+        os.environ["DREAM_CONTRADICTION_CHECK"] = "1"
 
     provider_name, provider_fn = get_provider(args.provider)
     model = args.model or default_model(provider_name)

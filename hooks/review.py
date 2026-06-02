@@ -131,6 +131,27 @@ def flag_contradiction(session, p1: str, p2: str) -> None:
     )
 
 
+def flag_new_contradiction(session, existing_path: str, new_path: str) -> None:
+    """Write-time routing for Phase E acceptance #1: link
+    `new-[:CONTRADICTS]->existing` and quarantine ONLY the NEW memory to
+    `pending_review`. The EXISTING active memory STAYS ACTIVE — recall keeps using
+    the established memory until a human resolves the conflict (vs the symmetric
+    `flag_contradiction`, which pends both). Audited (H2)."""
+    cur = session.run(
+        "MATCH (m:Memory {path: $p}) RETURN coalesce(m.status, 'active') AS s, m.content AS c",
+        p=new_path,
+    ).single()
+    if cur:
+        audit.record(session, new_path, "flag_contradiction", actor="dream",
+                     status=cur["s"], content_snapshot=cur["c"])
+    session.run(
+        "MATCH (n:Memory {path: $n}), (e:Memory {path: $e}) "
+        "MERGE (n)-[:CONTRADICTS]->(e) "
+        "SET n.status = 'pending_review'",
+        n=new_path, e=existing_path,
+    )
+
+
 def auto_resolve_all(session) -> int:
     """Resolve every open :CONTRADICTS pair by auto_resolve (authority×recency):
     the winner stays active, the loser is superseded. Returns the count resolved."""
@@ -173,19 +194,27 @@ def vector_candidates(embed_fn, k: int = 5, threshold: float = 0.85):
     return _find
 
 
-def detect_contradiction(session, path: str, content: str, judge, find_candidates) -> list[str]:
+def detect_contradiction(session, path: str, content: str, judge, find_candidates,
+                         on_contradiction=None) -> list[str]:
     """Pre-commit/contradiction detection: for each semantically-related active
     memory `find_candidates` surfaces, ask `judge(existing, new) -> bool`; on a
-    contradiction, link :CONTRADICTS and route both to pending_review. Returns the
-    contradicting paths. `judge` is the LLM in production, a stub in tests; the
-    candidate-finder and judge are injected so the logic is testable without an LLM."""
+    contradiction, invoke `on_contradiction(session, existing_path, new_path)`.
+    Returns the contradicting paths. `judge` is the LLM in production, a stub in
+    tests; the candidate-finder and judge are injected so the logic is testable
+    without an LLM.
+
+    `on_contradiction` defaults to `flag_contradiction` (symmetric — both pend, the
+    manual/dashboard flow). The nightly passes `flag_new_contradiction` so only the
+    NEW memory is quarantined and the established active one keeps serving recall
+    (acceptance #1)."""
+    on_contradiction = on_contradiction or flag_contradiction
     flagged = []
     for cand_path, cand_content in find_candidates(session, path, content):
         if cand_path == path:
             continue
         try:
             if judge(cand_content, content):
-                flag_contradiction(session, cand_path, path)
+                on_contradiction(session, cand_path, path)
                 flagged.append(cand_path)
         except Exception:
             continue
