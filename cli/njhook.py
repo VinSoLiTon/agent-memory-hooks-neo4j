@@ -186,6 +186,17 @@ def cmd_eval_retrieval(args: argparse.Namespace) -> int:
     return eval_retrieval.main()
 
 
+def cmd_eval_distillation(args: argparse.Namespace) -> int:
+    """Phase D3 — score dream output quality over golden sessions via a REAL
+    provider (opt-in; needs the provider SDK / Ollama). The deterministic scorer
+    is the same one the CI tests pin; this runs it against live model output."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dream"))
+    import eval_distillation
+    rep = eval_distillation.run(args.provider, args.model)
+    eval_distillation.print_report(rep)
+    return 0 if rep["pass"] else 1
+
+
 def cmd_render(args: argparse.Namespace) -> int:
     """Phase G (PR-3) — render project memory into an agent context file
     (AGENTS.md / CLAUDE.md / GEMINI.md / Cursor rules) as a managed block, so a
@@ -1885,6 +1896,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pev = sub.add_parser("eval-retrieval", help="seed a golden set and score recall (hit@k + MRR) — ranking regression guard")
     pev.set_defaults(fn=cmd_eval_retrieval)
+
+    ped = sub.add_parser("eval-distillation", help="score dream output quality over golden sessions via a real provider (Phase D3; opt-in)")
+    ped.add_argument("--provider", choices=["anthropic", "openai", "ollama"], help="LLM backend (default: $DREAM_PROVIDER or anthropic)")
+    ped.add_argument("--model", help="override the provider's default model")
+    ped.set_defaults(fn=cmd_eval_distillation)
 
     prn = sub.add_parser("render", help="render project memory into an agent context file (AGENTS.md/CLAUDE.md/GEMINI.md/Cursor) as a managed block")
     prn.add_argument("--target", default="agents", choices=["agents", "claude", "gemini", "cursor", "all"],
