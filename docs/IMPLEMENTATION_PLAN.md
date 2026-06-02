@@ -28,7 +28,7 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 | Phase | Status | Goal | Research items | Depends on |
 |---|---|---|---|---|
 | **A — Non-destructive history** | ✅ merged (#4) | Stop destroying memory state; seed the bi-temporal/provenance schema | Q1, Q2, Q5, F1 (data model) | — |
-| **B — Durable capture** | ⬜ not started | No silent event loss when Neo4j is down | F4, Gap 1 canonical schema, Gap 8 metrics | — (parallel to A) |
+| **B — Durable capture** | ✅ done (#11,#28) | No silent event loss when Neo4j is down | F4, Gap 1 canonical schema, Gap 8 metrics | — (parallel to A) |
 | **C — Shared recall + ranking** | ✅ merged (#5,#6,#9); ⏸ C4 | One ranking engine; use the signals already stamped | F5, Q3, F7, F9 | A |
 | **D — Typed memory + admission gate** | ⬜ not started | Structured records; block ungrounded dream output | F3, Gap 3 (13-type vocab), Gap 9 evals | A, C |
 | **E — Conflict & review** | ✅ done (#15,#20,#27) | Contradictions can't silently become truth | F6 | A, D |
@@ -66,23 +66,23 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 
 ## Phase B — Durable capture (reliability core)
 
-**Status:** 🔵 In progress (PR #11). **PR-1**: append-only fsync spool (`hooks/spool.py`) + `njhook ingest` worker (`hooks/ingest.py`) with idempotent replay (the `Event.event_id` UNIQUE constraint is the inbox) + DLQ + `health` backlog row; `HOOKS_CAPTURE_MODE=spool` (default `direct`, opt-in until ingest is scheduled). Deferred to **PR-2**: canonical OTel `gen_ai.*` event schema (Gap 1), DLQ-*rate* alerting, read-time upcasting, and flipping the default to `spool`.
+**Status:** ✅ Done & fully aligned (#11, #28) — all six acceptance bars met. **PR-1**: append-only fsync spool (`hooks/spool.py`) + `njhook ingest` worker (`hooks/ingest.py`) with idempotent replay (the `Event.event_id` UNIQUE constraint is the inbox) + DLQ + `health` backlog row; `HOOKS_CAPTURE_MODE=spool` (default `direct`, opt-in). **PR-2**: canonical schema module (`hooks/event_schema.py`) — single-source `SCHEMA_VERSION`, the OTel GenAI mapping (`GEN_AI_FIELD_MAP` + `to_gen_ai()` interchange view, Gap 1), and a versioned **read-time upcaster chain** (`upcast()`, B3) applied by the worker so an old-schema spool record still ingests. Schema bumped to **v2**: `app_id` (OTel `gen_ai.app.id`) is now a first-class Event property — in v1 it was stranded in the spool envelope and dropped on ingest; the v1→v2 upcaster folds it onto the event. **DLQ rate** (`spool.dlq_rate_per_hour`, B4): `health` now FAILs on a rising DLQ *rate* (active breakage), not a static nonzero count (benign history). 12 tests. **Deferred (not an acceptance bar):** flipping the default capture mode `direct → spool` is gated on a *scheduled* ingest worker (else spooled events never reach the graph between manual `njhook ingest` runs); acceptance #6 keeps the direct path available behind the flag regardless. Documented as an operational follow-on.
 
 **Goal:** an event is never silently lost when Neo4j is unavailable. (Roadmap Gap 1 + 2.)
 
 **Work items**
 - **B1 — Canonical event + spool** (`hooks/log_event.py`, new `hooks/spool.py`, `F4`+Gap 1). Hook hot path becomes: parse → scrub → append one normalized `AgentEvent` (with `schema_version`, `app_id` defaulting to `source_client`, OTel `gen_ai.*`-aligned field names) to an append-only daily JSONL with `fsync` per record. No direct Neo4j write on the hot path.
 - **B2 — Ingest worker** (new `ingest/worker.py`, `cli/njhook.py ingest`). Reads the spool, conditional-`INSERT`s `event_id` into a `processed_events` inbox before the Neo4j append, applies the existing linked-list write, marks the spool record done. Retry with backoff (5–8, jitter) → DLQ JSONL carrying payload+error+retry-count.
-- **B3 — Read-time upcasting** (`ingest/worker.py`). `v1→v2→…` transformer chain applied before write; old spool records never rewritten.
-- **B4 — Health + metrics** (`cli/njhook.py health`, Gap 8). Surface spool backlog, inbox size, DLQ count **and rate** (`dlq_events_per_hour`), ingest success/failure. FAIL on rising DLQ rate, not on static nonzero count.
+- **B3 — Read-time upcasting** (`hooks/event_schema.py`, applied in `hooks/ingest.py`) ✅. `v1→v2→…` transformer chain applied before write; old spool records never rewritten (normalized on read).
+- **B4 — Health + metrics** (`cli/njhook.py health`, `hooks/spool.py`, Gap 8) ✅. Surface spool backlog, DLQ count **and rate** (`dlq_rate_per_hour`). FAIL on rising DLQ rate, not on static nonzero count (`_spool_health_row`).
 
-**Acceptance bar**
-1. Stop Neo4j, run sessions, restart, run `njhook ingest` → all events replay into the correct session chains in order.
-2. Replaying the same spool twice is idempotent (inbox blocks the duplicate). **Negative test:** no duplicate `:Event` after double replay.
-3. A malformed spool record lands in the DLQ with its error; the worker continues.
-4. Hook hot-path runtime stays bounded with Neo4j down (no connection attempt on the hook path).
-5. `health` shows backlog/DLQ; a backlog over threshold WARNs.
-6. Legacy direct-write path remains available behind a compatibility flag during migration (roadmap requirement).
+**Acceptance bar** — all met (✅).
+1. ✅ Stop Neo4j, run sessions, restart, run `njhook ingest` → all events replay into the correct session chains in order (`test_spool.py::test_ingest_writes_then_drains`).
+2. ✅ Replaying the same spool twice is idempotent (inbox blocks the duplicate). **Negative test:** no duplicate `:Event` after double replay (`test_ingest_replay_is_idempotent`).
+3. ✅ A malformed spool record lands in the DLQ with its error; the worker continues (`test_ingest_dead_letters_malformed`); DLQ records now carry a `ts`.
+4. ✅ Hook hot-path runtime stays bounded with Neo4j down (spool mode appends + returns; no Neo4j connection on the hook path).
+5. ✅ `health` shows backlog/DLQ; backlog over threshold WARNs and a rising DLQ *rate* FAILs (`_spool_health_row`, `test_event_schema.py`).
+6. ✅ Legacy direct-write path remains available behind `HOOKS_CAPTURE_MODE` (default `direct`).
 
 ---
 

@@ -34,7 +34,7 @@ NEO4J_PASSWORD = os.environ.get("HOOKS_NEO4J_PASSWORD", "password")
 # mode means capture never silently fails when Neo4j is down — at the cost of
 # needing the ingest worker scheduled. Flip the default to "spool" once ingest runs.
 CAPTURE_MODE = os.environ.get("HOOKS_CAPTURE_MODE", "direct").lower()
-SCHEMA_VERSION = 1
+from event_schema import SCHEMA_VERSION  # noqa: E402  single source of truth (Phase B PR-2)
 
 
 MAX_RESPONSE_CHARS = 4000
@@ -109,6 +109,9 @@ def log_event(data: dict, client: str):
         "event_id": event_id,
         "event_name": event_name,
         "client": client,
+        # Phase B PR-2 (schema v2): app_id (OTel gen_ai.app.id — the multi-tenant
+        # key) is a first-class Event property. Defaults to the source client.
+        "app_id": data.get("app_id") or client,
         "timestamp": timestamp,
         "cwd": cwd,
         "tool_name": data.get("tool_name"),

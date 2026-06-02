@@ -1408,6 +1408,21 @@ def cmd_rehearse_restore(args: argparse.Namespace) -> int:
     return 1
 
 
+def _spool_health_row(backlog: int, dlq: int, dlq_rate: float, fail_rate: float, dlq_path: str):
+    """Compute the `health` row for the event spool. FAILs on a rising DLQ *rate*
+    (active breakage), not on a static nonzero DLQ count (benign history). Pure so
+    every branch is unit-testable (Phase B PR-2 / B4)."""
+    if dlq_rate > fail_rate:
+        return ("fail", "event spool",
+                f"DLQ rate {dlq_rate:.1f}/h exceeds {fail_rate:.0f}/h — ingest is actively failing; inspect {dlq_path}")
+    if dlq > 0:
+        return ("warn", "event spool",
+                f"{backlog} spooled; {dlq} dead-lettered ({dlq_rate:.1f}/h) — inspect {dlq_path}")
+    if backlog > 0:
+        return ("ok", "event spool", f"{backlog} event(s) spooled awaiting `njhook ingest`")
+    return ("ok", "event spool", "empty (no backlog, no dead-letters)")
+
+
 def _rehearsal_health_row(latest: dict | None, rehearsal_days: int, now=None):
     """Compute the `health` row for the restore rehearsal from the latest
     :RehearsalRun ({ts, ok, detail} or None). Pure so it's unit-testable."""
@@ -1638,12 +1653,9 @@ def cmd_health(args: argparse.Namespace) -> int:
         import spool as _spool
         backlog = _spool.backlog_count()
         dlq = _spool.dlq_count()
-        if dlq > 0:
-            rows.append((WARN, "event spool", f"{backlog} spooled; {dlq} dead-lettered — inspect {_spool._dlq_file()}"))
-        elif backlog > 0:
-            rows.append((OK, "event spool", f"{backlog} event(s) spooled awaiting `njhook ingest`"))
-        else:
-            rows.append((OK, "event spool", "empty (no backlog, no dead-letters)"))
+        rate = _spool.dlq_rate_per_hour()
+        fail_rate = float(os.environ.get("HOOKS_DLQ_FAIL_RATE", "5"))
+        rows.append(_spool_health_row(backlog, dlq, rate, fail_rate, str(_spool._dlq_file())))
     except Exception as e:
         rows.append((WARN, "event spool", f"check failed: {e}"))
 
