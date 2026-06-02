@@ -9,6 +9,8 @@ Selection happens at call time via system_prompt_for(provider, model).
 """
 from __future__ import annotations
 
+from memory_types import MEMORY_KINDS  # Phase D1 — the kind enum (single source)
+
 
 # Shared "core" rules — what counts as a memory, path conventions, etc.
 _CORE_RULES = """\
@@ -29,19 +31,42 @@ YAML frontmatter. Organize paths semantically by topic, e.g.:
   project/<short-slug>.md
   general/<short-slug>.md
 
+The PATH prefix says WHERE the memory is stored (profile/ tools/ project/ \
+general/). The `kind` says WHAT KIND of knowledge it is — these are SEPARATE \
+axes. `kind` is one of these 15 semantic types:
+  preference   — a stated like/dislike or working-style choice
+  projectrule  — a rule that governs how this project is built
+  decision     — a choice that was made, with its rationale
+  procedure    — a repeatable how-to / sequence of steps
+  fact         — a stable piece of knowledge about the user/world
+  constraint   — a hard limit or must-not (security, policy, perf)
+  toolpattern  — a reusable way of using a tool/command
+  incident     — something that went wrong + the lesson
+  openquestion — an unresolved question to revisit
+  commitment   — a promise/TODO the user or agent made
+  goal         — an objective being worked toward
+  context      — background/situational detail
+  learning     — a newly-acquired insight
+  observation  — a noted state of the world
+  artifact     — a produced file/output worth remembering
+
 Output STRICT JSON only, no prose, matching this schema:
 
 {
   "memories": [
     {
       "path": "profile/role.md",
-      "content": "---\\ntitle: User role\\nkind: profile\\n---\\n\\n<markdown body>",
+      "kind": "preference",
+      "content": "---\\ntitle: User role\\nkind: preference\\n---\\n\\n<markdown body>",
       "importance": 8
     }
   ]
 }
 
-Frontmatter must include `title` and `kind` (one of: profile, tool, project, general).
+Set the top-level `kind` to one of the 15 types above, and mirror it in the \
+body's frontmatter (`title` + `kind`). Pick the type by what the memory IS, not \
+where it's stored: a preference in profile/ is `preference`, a build rule in \
+project/ is `projectrule` or `constraint`.
 Optionally include `importance`: an integer 1-10 for how broadly and durably useful \
 this memory is (10 = core identity / standing rule, 1 = trivial detail). Omit if unsure.
 The body should be tight markdown a future agent can read cold."""
@@ -86,12 +111,13 @@ Example input (events):
 
 Example output (JSON):
 {"memories":[
-  {"path":"profile/role.md","content":"---\\ntitle: User role\\nkind: profile\\n---\\n\\nRust systems engineer.","importance":9},
-  {"path":"project/rust-safety.md","content":"---\\ntitle: Rust safety rules\\nkind: project\\n---\\n\\n- No `unsafe` blocks without explicit user approval.\\n- Rationale: UAF incident last sprint.","importance":7}
+  {"path":"profile/role.md","kind":"fact","content":"---\\ntitle: User role\\nkind: fact\\n---\\n\\nRust systems engineer.","importance":9},
+  {"path":"project/rust-safety.md","kind":"constraint","content":"---\\ntitle: Rust safety rules\\nkind: constraint\\n---\\n\\n- No `unsafe` blocks without explicit user approval.\\n- Rationale: UAF incident last sprint.","importance":7}
 ]}
 
-Note: the role memory went to profile/ (cross-project). The safety rule went to project/ \
-(scoped to this codebase). Two distinct memories rather than one stuffed one."""
+Note: the role memory went to profile/ (cross-project) and is a `fact`. The safety rule \
+went to project/ (scoped to this codebase) and is a `constraint` — the PATH and the \
+`kind` are chosen independently. Two distinct memories rather than one stuffed one."""
 
 
 _OLLAMA_PROMPT = "\n\n".join([
@@ -116,6 +142,9 @@ DREAM_JSON_SCHEMA = {
                         "type": "string",
                         "pattern": r"^(profile|tools|project|general)/[A-Za-z0-9._/-]+\.md$",
                     },
+                    # Phase D1: first-class semantic type, constrained to the
+                    # closed vocabulary so the local model can't invent a kind.
+                    "kind": {"type": "string", "enum": sorted(MEMORY_KINDS)},
                     "content": {"type": "string", "minLength": 10},
                     "importance": {"type": "integer", "minimum": 1, "maximum": 10},
                 },

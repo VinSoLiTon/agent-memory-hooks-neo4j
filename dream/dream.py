@@ -43,6 +43,7 @@ import consolidate as consolidate_mod  # noqa: E402
 import quality as quality_mod  # noqa: E402
 import review as review_mod  # noqa: E402  (Phase E — contradiction detection/flagging)
 import judge as judge_mod  # noqa: E402  (Phase E PR-3 — LLM contradiction judge)
+import memory_types  # noqa: E402  (Phase D1 — semantic kind vocabulary)
 
 # Windows consoles default to cp1252; memories from Claude routinely include
 # em-dashes, arrows, smart quotes, etc. Force UTF-8 so the human-readable
@@ -491,6 +492,11 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
             "updated_at": now,
             "created_by": f"dream_{provider}",
             "status": mem_status[m["path"]],
+            # Phase D1: stamp the semantic `kind` as a queryable node property.
+            # Prefer the model's top-level field, fall back to the body
+            # frontmatter, normalize legacy bucket labels → semantic types.
+            "kind": memory_types.normalize_kind(
+                m.get("kind") or memory_types.parse_kind(m["content"]) or memory_types.DEFAULT_KIND),
             "importance": _coerce_importance(m.get("importance")),
             "project": None
             if m["path"].startswith(("profile/", "tools/")) or not project
@@ -558,6 +564,7 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
                 m.ingested_at = $now,
                 m.status = row.status,
                 m.created_by = row.created_by,
+                m.kind = row.kind,
                 m.importance = coalesce(row.importance, m.importance),
                 m.valid_from = coalesce(m.valid_from, $now),
                 // M3: cross-project paths (profile/, tools/) ALWAYS clear any

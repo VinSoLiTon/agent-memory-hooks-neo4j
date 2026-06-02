@@ -1731,10 +1731,19 @@ def cmd_stats(_: argparse.Namespace) -> int:
         m_with_emb = s.run(
             "MATCH (m:Memory) WHERE m.embedding IS NOT NULL RETURN count(m) AS n"
         ).single()["n"]
-        m_by_kind = list(s.run(
+        m_by_bucket = list(s.run(
             """
             MATCH (m:Memory)
-            WITH split(m.path, '/')[0] AS kind, count(*) AS n
+            WITH split(m.path, '/')[0] AS bucket, count(*) AS n
+            RETURN bucket, n ORDER BY n DESC
+            """
+        ))
+        # Phase D1: by semantic `kind` (queryable node property). Memories not yet
+        # re-tagged (no m.kind) show as 'untyped' until `njhook migrate-kinds`.
+        m_by_type = list(s.run(
+            """
+            MATCH (m:Memory)
+            WITH coalesce(m.kind, 'untyped') AS kind, count(*) AS n
             RETURN kind, n ORDER BY n DESC
             """
         ))
@@ -1745,8 +1754,12 @@ def cmd_stats(_: argparse.Namespace) -> int:
         e_total = s.run("MATCH (e:Event) RETURN count(e) AS n").single()["n"]
 
     print(f"Memories: {m_total}  ({m_archived} archived, {m_with_emb} embedded)")
-    for r in m_by_kind:
-        print(f"  {r['kind']:<10} {r['n']}")
+    print("  by bucket:")
+    for r in m_by_bucket:
+        print(f"    {r['bucket']:<12} {r['n']}")
+    print("  by kind:")
+    for r in m_by_type:
+        print(f"    {r['kind']:<12} {r['n']}")
     print(f"\nSessions: {s_total}")
     for r in s_by_client:
         print(f"  {r['client'] or '?':<12} {r['n']}")
