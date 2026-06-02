@@ -42,6 +42,18 @@ Defaults in parentheses.
 | `DASHBOARD_WRITE=1` | off | Enable dashboard edit/delete/archive |
 | `DASHBOARD_HOST` | `127.0.0.1` | |
 | `DASHBOARD_PORT` | 5000 | |
+| `HOOKS_CAPTURE_MODE` | `direct` | `spool` = durable append + later `ingest` (Phase B) |
+| `HOOKS_SPOOL_DIR` | `~/.njhook/spool` | Spool + DLQ location |
+| `HOOKS_DLQ_FAIL_RATE` | 5 | DLQ/hour above which `health` FAILs (Phase B) |
+| `HOOKS_SENSITIVE_PATHS` | — | Semicolon cwds whose events are `high`-sensitivity (Phase H) |
+| `DREAM_ALLOW_SENSITIVE_EGRESS=1` | off | Allow sensitive sessions to remote dream providers (Phase H) |
+| `DREAM_GROUNDING_MIN` | 0.10 | A-MAC grounding floor; below → `pending_review` (Phase D2) |
+| `DREAM_POISON_MIN_EVENTS` | 5 | Anti-poisoning: "thin session" threshold (Phase H3) |
+| `DREAM_POISON_NOVELTY_MIN` | 0.6 | Anti-poisoning: novelty threshold (Phase H3) |
+| `DREAM_CONTRADICTION_CHECK=1` | off | Nightly LLM contradiction auto-flag (Phase E) |
+| `NJHOOK_REHEARSAL_DAYS` | 30 | Restore-rehearsal staleness WARN (Phase H4) |
+| `NJHOOK_FRESHNESS_DAYS` | 7 | Dream-freshness staleness WARN |
+| `DREAM_EVAL_GROUNDING_MIN` / `DREAM_EVAL_COVERAGE_MIN` | 0.30 / 0.66 | Distillation-eval thresholds (Phase D3) |
 
 ---
 
@@ -64,14 +76,28 @@ after pulling schema-touching upgrades.
 
 ### `health`
 
-Stack-readiness check. Walks 9 categories: Neo4j reachability,
-constraints, indexes, hook wrappers, user-level configs, env vars, Ollama
-daemon + embedding model, scheduled task, last dream log. Prints
-`[OK] / [WARN] / [FAIL]` per row plus a summary. **Exit 1** on any FAIL.
+Stack-readiness check. Walks 13 categories: Neo4j reachability, constraints,
+indexes, hook wrappers, user-level configs, env vars, Ollama daemon + embedding
+model, scheduled task, last dream log, dream freshness, **event spool / DLQ rate
+(Phase B)**, **egress policy (Phase H)**, and **restore-rehearsal age (Phase H4)**.
+Prints `[OK] / [WARN] / [FAIL]` per row plus a summary. **Exit 1** on any FAIL.
+The spool row FAILs on a rising DLQ *rate*, not a static nonzero count.
 
 ```bash
 ./njhook.cmd health
 ```
+
+### `migrate-kinds`
+
+**Phase D1.** Re-tag memories whose body frontmatter still uses a legacy bucket
+label (`profile/tool/project/general`) to the semantic `kind` vocabulary, and
+backfill the queryable `m.kind` property. A legacy rewrite is an audited `edit`
+(prior body snapshotted as a `:MemoryRevision`); an already-semantic body just
+gets its property backfilled. Idempotent.
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Report what would change without writing |
 
 ---
 
@@ -126,7 +152,55 @@ Sets `m.archived = false` on a previously-archived memory.
 
 ### `stats`
 
-Counts by client / kind / archived / embedded; lists top-accessed memories.
+Memory counts **by bucket** (path prefix) AND **by semantic `kind`** (the
+`m.kind` property; `untyped` until `migrate-kinds`), plus sessions by client and
+total events.
+
+---
+
+## Review & conflicts (Phase E)
+
+### `review <action> [paths…]`
+
+Adjudicate the `pending_review` queue and `:CONTRADICTS` pairs. Recall only
+injects `status='active'` memories, so flagged/pending ones are advisory-only
+until resolved.
+
+| Action | Effect |
+|---|---|
+| `list` | Show pending memories + contradiction pairs |
+| `approve <path>` | → `active` (re-injected); audited |
+| `reject <path>` | → `rejected` (hidden, kept); audited |
+| `supersede <winner> <loser>` | winner active, loser `superseded` + `:SUPERSEDED_BY`; audited |
+| `flag <a> <b>` | Mark two as `:CONTRADICTS` → both `pending_review` |
+| `auto-resolve` | Resolve every open contradiction by authority×recency |
+
+The nightly can auto-flag contradictions at write time with
+`DREAM_CONTRADICTION_CHECK=1` (or `dream.py --check-contradictions`): a new memory
+contradicting an active one is flagged + `pending_review` while the established
+one stays active.
+
+### `audit <path> | --recent [N]` (Phase H2)
+
+A memory's full mutation log — every dream write, manual edit, and review
+transition, time-ordered with actor + status, reconstructed from the
+`:MemoryRevision` chain. `--recent [N]` gives a graph-wide view (default 20).
+
+---
+
+## Durable capture (Phase B)
+
+### `ingest`
+
+Drain the durable event spool into Neo4j. Idempotent replay — the
+`Event.event_id` UNIQUE constraint is the inbox, so a crash mid-ingest can't
+duplicate events; malformed records dead-letter (DLQ) and the worker continues;
+older-schema records are upcast on read. Only does work when
+`HOOKS_CAPTURE_MODE=spool` has been capturing.
+
+```bash
+./njhook.cmd ingest
+```
 
 ---
 
@@ -282,6 +356,56 @@ content) so you can reference it across runs.
 
 ---
 
+## Programmatic interfaces (Phase G)
+
+These expose the same recall + capture core the hooks use, for runtimes that
+aren't hook-capable. (REST API in `api/server.py`, MCP server in
+`api/mcp_server.py` — both thin shells over `hooks/service.py`.)
+
+### `recall <prompt>`
+
+Ranked memory hits for a prompt over the shared engine (same ranking the hook
+injects). `--cwd DIR` scopes to a project; `--limit N` (default 5); `--json` for
+machine output.
+
+### `write-event --client X [--json FILE]`
+
+Capture an event from JSON (stdin or `--json FILE`) through the same scrub +
+opt-out + spool/direct path the hooks use.
+
+### `render --target {agents,claude,gemini,cursor,all}` (Phase G PR-3)
+
+Render the project's memory into a runtime's startup context file
+(`AGENTS.md` / `CLAUDE.md` / `GEMINI.md` / `.cursor/rules/njhook-memory.mdc`) as a
+delimited **managed block** — human content outside the markers is never touched;
+idempotent. `--root DIR` (default cwd) is also the project scope; `--stdout`
+previews without writing.
+
+---
+
+## Governance & evaluation (Phases H, D3)
+
+### `rehearse-restore` (Phase H4)
+
+Prove the backup→restore pipeline works end-to-end on a disposable marker
+subgraph (real backup → confirm captured → restore from the backup's own format →
+verify → clean up), recording a `:RehearsalRun`. `health` reports its age and
+FAILs if the last one failed. "Untested backups aren't backups."
+
+### `eval-retrieval` (Phase D3)
+
+Seed a golden query→path set and score recall (`hit@k` + `MRR`) — the ranking
+regression guard. Deterministic (fulltext-only); seeds + cleans up its fixture.
+
+### `eval-distillation [--provider X] [--model M]` (Phase D3)
+
+Score dream **output quality** over golden sessions via a *real* provider
+(structural validity + path bucket + `kind` enum + grounding + fact coverage),
+printing a per-provider matrix. Opt-in (needs the provider SDK / Ollama); the same
+deterministic scorer is CI-gated in the test suite.
+
+---
+
 ## Common workflows
 
 ```bash
@@ -317,4 +441,25 @@ content) so you can reference it across runs.
 # Disaster recovery
 ./njhook.cmd restore --in backup.json --with-embeddings --dry-run
 ./njhook.cmd restore --in backup.json --with-embeddings
+./njhook.cmd rehearse-restore                 # prove restore works, on a schedule
+
+# Review the pending/conflict queue
+./njhook.cmd review list
+./njhook.cmd review approve profile/role.md
+./njhook.cmd audit profile/role.md            # full mutation log
+./njhook.cmd audit --recent 20                # graph-wide
+
+# Durable capture (set HOOKS_CAPTURE_MODE=spool first)
+./njhook.cmd ingest                           # drain the spool into Neo4j
+
+# Typed-kind migration (one-time, after upgrading)
+./njhook.cmd migrate-kinds --dry-run
+./njhook.cmd migrate-kinds
+
+# Render memory into another runtime's context file
+./njhook.cmd render --target all --root /path/to/repo
+
+# Evals
+./njhook.cmd eval-retrieval
+./njhook.cmd eval-distillation --provider anthropic
 ```

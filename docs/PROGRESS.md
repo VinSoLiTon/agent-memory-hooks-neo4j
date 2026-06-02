@@ -2,7 +2,7 @@
 Execution ledger for docs/IMPLEMENTATION_PLAN.md. Maps every phase/slice to its
 status, delivering PR, and acceptance evidence — and honestly logs the acceptance
 items still open. Update this whenever a phase/slice changes state. Last updated
-2026-06-01.
+2026-06-02 (program complete; user-facing docs refreshed).
 -->
 
 # njhook Universal Memory — Progress Ledger
@@ -90,7 +90,8 @@ Not numbered phases, but delivered and acceptance-evidenced in their PRs:
 | #28 | merged | Phase B (PR-2) — canonical `event_schema.py` (OTel `gen_ai.*` + read-time upcasting, v2 app_id) + DLQ-rate health; all 6 acceptance bars met → **Phase B complete** |
 | #29 | merged | Phase D (PR-4 / D1) — typed `kind` vocabulary (`memory_types.py`, 15 active, replaces bucket labels, migration window, schema enum + `m.kind` property); acceptance #1 + #4 met |
 | #30 | merged | Phase D (PR-5) — `njhook migrate-kinds` (audited, idempotent re-tag of legacy rows + `m.kind` backfill) |
-| #31 | open | Phase D (PR-6 / D3) — distillation eval (`eval_distillation.py` deterministic scorer + `njhook eval-distillation`); acceptance #3 met → **Phase D complete → A–H program complete** |
+| #31 | merged | Phase D (PR-6 / D3) — distillation eval (`eval_distillation.py` deterministic scorer + `njhook eval-distillation`); acceptance #3 met → **Phase D complete → A–H program complete** |
+| #32 | open | docs: refresh user-facing references (README, cli/README, dream/README, full `index.html` rebuild) to the full A–H feature set |
 
 ## Metrics
 

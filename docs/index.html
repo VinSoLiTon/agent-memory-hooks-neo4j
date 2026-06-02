@@ -101,6 +101,7 @@
   <a href="#overview">Overview</a>
   <a href="#diagram">System block diagram</a>
   <a href="#schema">Graph schema</a>
+  <a href="#platform">Phases A–H platform</a>
   <h2>Implementation</h2>
   <a class="lvl2" href="#capture">Stage 1 · Capture (hooks)</a>
   <a class="lvl2" href="#privacy">Privacy filters</a>
@@ -126,6 +127,14 @@
 </nav>
 
 <main>
+<div style="background:var(--panel2);border:1px solid var(--green);border-radius:8px;padding:12px 16px;margin:16px 0;color:var(--fg);">
+  <strong style="color:var(--green);">✓ Universal-memory program complete (Phases A–H).</strong>
+  Beyond the two-stage capture + dream + recall core, the system now carries
+  durable capture, non-destructive history + audit, a typed semantic <code>kind</code>
+  vocabulary, conflict/review, REST/MCP/file-renderer interfaces, and governance + evals —
+  see <a href="#platform">Phases A–H</a> below. The phased plan with acceptance bars lives in
+  <code>docs/IMPLEMENTATION_PLAN.md</code>; the per-PR execution ledger in <code>docs/PROGRESS.md</code>.
+</div>
 <header class="hero">
   <h1>Agent Memory Hooks</h1>
   <p class="sub">A two-stage memory layer for Claude Code, Codex, Cursor, and Gemini CLI — backed by Neo4j.</p>
@@ -169,6 +178,11 @@
     The split is the core idea: <b>hooks record everything cheaply; the dream phase curates slowly.</b>
     Recall combines fulltext and vector search and boosts in-project hits. Every node carries a
     <code>client</code> property so the four CLIs share one graph without colliding.
+  </p>
+  <p class="small">
+    Around that core, an eight-phase program (<a href="#platform">Phases A–H</a>) adds durability, typed
+    semantic memory, conflict/review, non-destructive history + audit, universal REST/MCP/file interfaces,
+    and governance + evals.
   </p>
 </section>
 
@@ -318,32 +332,124 @@
   -[:LATEST_EVENT]-> (:Event)            // tail (watermark anchor)
   -[:DREAMED]->      (:Memory)           // provenance: this session produced it
 
-(:Event {event_id, event_name, client, timestamp, tool_name, tool_input,
+(:Event {event_id, event_name, client, app_id, timestamp, tool_name, tool_input,
          tool_use_id, tool_response, prompt, model, source, turn_id,
          last_assistant_message, stop_hook_active, transcript_path,
-         transcript, cwd})
-  -[:NEXT]-> (:Event)                    // chronological successor
+         transcript, cwd, sensitivity})  // app_id = OTel gen_ai.app.id (Phase B);
+  -[:NEXT]-> (:Event)                    // sensitivity tags high-risk cwds (Phase H)
 
-(:Memory {path, content, updated_at, project, archived, archived_at,
-          access_count, last_accessed_at, embedding, embedding_model,
-          embedding_dim, consolidated_from, promoted_from_pattern})
-  -[:DERIVED_FROM]-> (:Session)
+(:Memory {path, content, kind, status, importance, updated_at, ingested_at,
+          valid_from, valid_until, created_by, reviewed_at, project, archived,
+          access_count, last_accessed_at, embedding, embedding_model, embedding_dim,
+          consolidated_from, promoted_from_pattern})
+  -[:DERIVED_FROM]->  (:Session)         // session-granularity provenance
+  -[:EXTRACTED_FROM]->(:Event)           // claim-level provenance (Phase D)
+  -[:SUPERSEDED_BY]-> (:Memory)          // consolidation / conflict resolution (Phase A/E)
+  -[:CONTRADICTS]-    (:Memory)          // detected conflict, both → review (Phase E)
+  // kind   = semantic type (15-vocab: preference/decision/constraint/…; Phase D1)
+  // status = active | pending_review | rejected | superseded | archived
+  //          (recall injects status='active' only)
+
+(:MemoryRevision {ts, operation, actor, status, content_snapshot})
+  -[:VERSION_OF]->(:Memory)              // immutable history + audit log (Phase A / H2)
+(:DreamRun {run_id, ts, provider, model})
+  -[:WROTE]->(:Memory)                   // which run produced/updated each memory
+(:RehearsalRun {ts, ok, detail})         // backup/restore drill record (Phase H4)
 
 constraints: Session.session_key UNIQUE, Event.event_id UNIQUE, Memory.path UNIQUE
 indexes:     memory_fulltext (Memory.content, Memory.path),
+             event_fulltext  (Event.prompt, Event.tool_response),   // Phase C3
              memory_embeddings (vector on Memory.embedding, cosine),
              memory_project (Memory.project), session_id_lookup (Session.session_id)</code></pre>
   <table>
     <tr><th>Key</th><th>Why it exists</th></tr>
     <tr><td><code>session_key = "&lt;client&gt;:&lt;session_id&gt;"</code></td>
         <td>Composite so two CLIs can reuse the same raw <code>session_id</code> without merging into one chain. The original <code>Session.session_id UNIQUE</code> constraint is dropped by the migration.</td></tr>
-    <tr><td><code>event_id = "&lt;client&gt;_&lt;session_id&gt;_&lt;ts&gt;_&lt;event&gt;"</code></td>
-        <td>Client-namespaced and timestamped so events never collide; <code>MERGE</code>-safe.</td></tr>
+    <tr><td><code>kind</code> + path on <code>:Memory</code></td>
+        <td><b>Two separate axes (Phase D1):</b> the PATH prefix (<code>profile/ tools/ project/ general/</code>) is WHERE it's stored — recall buckets by path; <code>kind</code> is WHAT kind of knowledge it is — a closed 15-type semantic vocabulary. Stamped as a queryable property; validated against a frozenset that doubles as the dream JSON-schema enum.</td></tr>
+    <tr><td><code>status</code> lifecycle</td>
+        <td>A memory is <code>active</code> (injected), <code>pending_review</code> (gated by grounding/anti-poisoning/contradiction — advisory-only), <code>rejected</code>, <code>superseded</code>, or <code>archived</code>. Recall filters <code>coalesce(status,'active')='active'</code>.</td></tr>
+    <tr><td><code>:MemoryRevision</code> chain</td>
+        <td>Non-destructive history (Phase A): every overwrite snapshots the prior body; every mutation (dream write / edit / review transition) appends a revision carrying <code>operation</code> + <code>actor</code> — so the chain is also the audit log (Phase H2). <code>path</code> stays UNIQUE; one node is always the "current" view.</td></tr>
     <tr><td><code>last_dreamed_at</code></td>
         <td>Watermark — the dream phase only re-reads events newer than this, and always advances it (even when 0 memories result) so low-signal sessions aren't re-dreamed forever.</td></tr>
-    <tr><td><code>project</code> on <code>:Memory</code></td>
-        <td>Set for <code>project/</code> &amp; <code>general/</code> memories; always <code>null</code> for cross-project <code>profile/</code> &amp; <code>tools/</code>. Drives the recall boost.</td></tr>
   </table>
+</section>
+
+<!-- ================= PLATFORM (A–H) ================= -->
+<section id="platform">
+  <h2 class="sec">Phases A–H platform</h2>
+  <p>
+    The capture + dream + recall core is wrapped by an eight-phase engineering program that makes the
+    system <b>trustworthy over months of multi-agent use</b> and lets <b>any LLM plug in</b>. Each phase
+    shipped as one or more focused PRs with per-item acceptance bars and tests
+    (<code>docs/IMPLEMENTATION_PLAN.md</code> + <code>docs/PROGRESS.md</code>).
+  </p>
+  <div class="grid2">
+    <div class="card">
+      <h4><span class="tag offline">A</span> &nbsp;Non-destructive history</h4>
+      <p>Writes never destroy prior state. Each overwrite snapshots the old body into an immutable
+      <code>:MemoryRevision</code> (path stays UNIQUE — one node is the "current" view);
+      <code>consolidate</code> supersedes instead of <code>DETACH DELETE</code>. The foundation the
+      evolution UI renders.</p>
+    </div>
+    <div class="card">
+      <h4><span class="tag online">B</span> &nbsp;Durable capture</h4>
+      <p>Optional <code>HOOKS_CAPTURE_MODE=spool</code> appends an fsync'd JSONL record on the hot path;
+      <code>njhook ingest</code> drains it with idempotent replay (the <code>Event.event_id</code> UNIQUE
+      constraint is the inbox) + a dead-letter queue. Versioned event schema with read-time upcasting and
+      OTel <code>gen_ai.*</code> alignment; <code>health</code> alerts on DLQ <i>rate</i>.</p>
+    </div>
+    <div class="card">
+      <h4><span class="tag offline">C</span> &nbsp;Shared recall engine</h4>
+      <p>One ranker — fulltext + vector + RRF (k=60) + in-project boost + recency-decay + LLM importance,
+      with a value-density char budget — reused by the hook, dashboard, CLI, REST, and MCP. No ranking math
+      lives anywhere else (negative-tested).</p>
+    </div>
+    <div class="card">
+      <h4><span class="tag offline">D</span> &nbsp;Typed memory + admission gate</h4>
+      <p>A closed 15-type semantic <code>kind</code> vocabulary (a first-class JSON-schema enum, stamped as a
+      queryable property). The A-MAC <b>grounding gate</b> routes ungrounded dream output to
+      <code>pending_review</code>. Deterministic retrieval + distillation evals
+      (<code>njhook eval-retrieval</code> / <code>eval-distillation</code>).</p>
+    </div>
+    <div class="card">
+      <h4><span class="tag offline">E</span> &nbsp;Conflict &amp; review</h4>
+      <p>An opt-in nightly LLM judge flags a new memory that contradicts an active one
+      (<code>:CONTRADICTS</code> + <code>pending_review</code>) while the established one stays active.
+      <code>njhook review list/approve/reject/supersede/flag/auto-resolve</code> adjudicates; auto-resolution
+      ranks by source authority × recency.</p>
+    </div>
+    <div class="card">
+      <h4><span class="tag online">F</span> &nbsp;Evolution UI <span class="small">(north star)</span></h4>
+      <p>Trace how a memory came to be: <code>njhook history --diff --as-of</code> reconstructs the body at any
+      instant; the dashboard renders the revision timeline, diffs, and lineage
+      (<code>:EXTRACTED_FROM</code> source events, supersession, contradictions). Recall annotates which
+      memories it used.</p>
+    </div>
+    <div class="card">
+      <h4><span class="tag online">G</span> &nbsp;Universal interfaces</h4>
+      <p>Attach any runtime, not just hook-capable CLIs: <code>njhook recall</code>/<code>write-event</code>, a
+      REST API (<code>api/server.py</code>), an MCP server (<code>api/mcp_server.py</code>, 4 tools), and file
+      renderers (<code>njhook render</code> → <code>AGENTS.md</code>/<code>CLAUDE.md</code>/<code>GEMINI.md</code>/
+      Cursor rules as a managed block). All over the same recall + capture core.</p>
+    </div>
+    <div class="card">
+      <h4><span class="tag offline">H</span> &nbsp;Governance &amp; eval</h4>
+      <p>Sensitivity tagging + an egress policy keep high-risk sessions off remote providers; an
+      <b>anti-poisoning</b> gate quarantines directive memories from thin, novel sessions; <code>njhook audit</code>
+      reconstructs every mutation; <code>njhook rehearse-restore</code> proves backups are restorable on a
+      schedule (<code>health</code> reports its age).</p>
+    </div>
+  </div>
+  <div class="note" style="margin-top:16px">
+    <span class="lbl">Memory lifecycle</span>
+    A memory is <code>active</code> (injected by recall) → may become <code>pending_review</code> (gated by
+    grounding / anti-poisoning / contradiction — advisory-only, hidden from recall) → <code>rejected</code>,
+    <code>superseded</code> (replaced, kept for lineage), or <code>archived</code> (stale). Recall injects
+    <code>coalesce(status,'active')='active'</code> only; <code>njhook review</code> moves memories between states,
+    and every transition is recorded in the audit log.
+  </div>
 </section>
 
 <hr>
@@ -703,12 +809,17 @@ Register-ScheduledTask -TaskName "njhook-dream-nightly" `
   <p class="small">Full reference with every flag lives in <code>cli/README.md</code>. Quick map below.</p>
   <table>
     <tr><th>Group</th><th>Subcommands</th></tr>
-    <tr><td>Setup / health</td><td><code>migrate</code>, <code>health</code></td></tr>
+    <tr><td>Setup / health</td><td><code>migrate</code>, <code>migrate-kinds</code>, <code>health</code></td></tr>
     <tr><td>Inspect / curate</td><td><code>list</code>, <code>show</code>, <code>search</code>, <code>edit</code>, <code>delete</code>, <code>unarchive</code>, <code>stats</code></td></tr>
+    <tr><td>Evolution / audit</td><td><code>history --diff --as-of</code>, <code>audit &lt;path&gt; | --recent</code> <span class="small">(Phase F / H2)</span></td></tr>
+    <tr><td>Review / conflicts</td><td><code>review &lt;list|approve|reject|supersede|flag|auto-resolve&gt;</code> <span class="small">(Phase E)</span></td></tr>
     <tr><td>Sessions / events</td><td><code>sessions</code>, <code>session &lt;id&gt; [-v]</code></td></tr>
+    <tr><td>Durable capture</td><td><code>ingest</code> <span class="small">(Phase B — drain the spool)</span></td></tr>
     <tr><td>Recall / embeddings</td><td><code>embed-backfill</code>, <code>reindex</code></td></tr>
+    <tr><td>Programmatic (Phase G)</td><td><code>recall &lt;prompt&gt;</code>, <code>write-event</code>, <code>render --target {agents|claude|gemini|cursor|all}</code></td></tr>
     <tr><td>Maintenance</td><td><code>consolidate</code>, <code>archive</code></td></tr>
-    <tr><td>Backup / restore</td><td><code>backup</code>, <code>restore --in FILE</code></td></tr>
+    <tr><td>Backup / restore</td><td><code>backup</code>, <code>restore --in FILE</code>, <code>rehearse-restore</code> <span class="small">(Phase H4)</span></td></tr>
+    <tr><td>Evaluation (Phase D3)</td><td><code>eval-retrieval</code>, <code>eval-distillation [--provider]</code></td></tr>
     <tr><td>Discovery</td><td><code>patterns [--promote &lt;id&gt;]</code></td></tr>
   </table>
   <div class="note">
@@ -801,12 +912,23 @@ python dream/eval.py --provider ollama --model qwen3.5:latest   # dream regressi
     <tr><td><code>HOOKS_TRANSCRIPT_MAX_CHARS</code></td><td>20000</td><td>Cap for captured transcripts</td></tr>
     <tr><td><code>DASHBOARD_WRITE</code></td><td>off</td><td><code>1</code> enables dashboard mutations</td></tr>
     <tr><td><code>DASHBOARD_HOST</code> / <code>_PORT</code></td><td><code>127.0.0.1</code> / 5000</td><td>Dashboard bind</td></tr>
+    <tr><td colspan="3" class="small" style="padding-top:10px;color:var(--muted);"><b>Phases A–H</b></td></tr>
+    <tr><td><code>HOOKS_CAPTURE_MODE</code></td><td><code>direct</code></td><td><code>spool</code> = durable append + later <code>njhook ingest</code> (Phase B)</td></tr>
+    <tr><td><code>HOOKS_SPOOL_DIR</code></td><td><code>~/.njhook/spool</code></td><td>Spool + DLQ location</td></tr>
+    <tr><td><code>HOOKS_DLQ_FAIL_RATE</code></td><td>5</td><td>DLQ/hour above which <code>health</code> FAILs (Phase B)</td></tr>
+    <tr><td><code>HOOKS_SENSITIVE_PATHS</code></td><td>—</td><td>Semicolon cwds whose events are <code>high</code>-sensitivity (Phase H)</td></tr>
+    <tr><td><code>DREAM_ALLOW_SENSITIVE_EGRESS</code></td><td>off</td><td><code>1</code> permits sensitive sessions to remote providers (Phase H)</td></tr>
+    <tr><td><code>DREAM_GROUNDING_MIN</code></td><td>0.10</td><td>A-MAC grounding floor; below → <code>pending_review</code> (Phase D2)</td></tr>
+    <tr><td><code>DREAM_POISON_MIN_EVENTS</code> / <code>_NOVELTY_MIN</code></td><td>5 / 0.6</td><td>Anti-poisoning thin-session + novelty thresholds (Phase H3)</td></tr>
+    <tr><td><code>DREAM_CONTRADICTION_CHECK</code></td><td>off</td><td><code>1</code> = nightly LLM contradiction auto-flag (Phase E)</td></tr>
+    <tr><td><code>NJHOOK_REHEARSAL_DAYS</code> / <code>NJHOOK_FRESHNESS_DAYS</code></td><td>30 / 7</td><td>Restore-rehearsal / dream-freshness staleness WARN</td></tr>
+    <tr><td><code>DREAM_EVAL_GROUNDING_MIN</code> / <code>_COVERAGE_MIN</code></td><td>0.30 / 0.66</td><td>Distillation-eval thresholds (Phase D3)</td></tr>
   </table>
 </section>
 
 <hr>
 <p class="small">Generated for the <code>njhook</code> repo · self-contained HTML, no external dependencies ·
-open <code>docs/index.html</code> in any browser.</p>
+open <code>docs/index.html</code> in any browser · covers Phases A–H (program complete 2026-06-02).</p>
 
 </main>
 </div>

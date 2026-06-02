@@ -10,6 +10,29 @@ remembering* — user profile, tool-usage patterns, project context — so
 future sessions can read it cold across any of the four supported CLIs
 (Claude Code, Codex, Cursor, Gemini).
 
+### Admission gates & quality (Phases D, E, H)
+
+Before a distilled memory becomes `active`, `write_memories` applies several
+gates (each tunable; see `cli/README.md` env table):
+
+- **Quality gate** (`quality.validate_memory`) — valid frontmatter, in-vocab path
+  bucket, and a semantic `kind` from the 15-type vocabulary (`memory_types.py`;
+  legacy bucket labels accepted during a migration window). `kind` is stamped as
+  a queryable `m.kind` node property.
+- **A-MAC grounding gate** (Phase D2) — a NEW memory whose body doesn't overlap
+  the source transcript (`< DREAM_GROUNDING_MIN`) is routed to `pending_review`,
+  not `active`.
+- **Anti-poisoning gate** (Phase H3) — a NEW directive memory from a thin, novel
+  session is quarantined to `pending_review` (`quality.poisoning_risk`).
+- **Contradiction check** (Phase E, opt-in `DREAM_CONTRADICTION_CHECK=1` /
+  `--check-contradictions`) — asks the LLM whether each new memory contradicts an
+  active one; on a hit, links `:CONTRADICTS` and quarantines the NEW memory while
+  the established one stays active.
+
+Pending/quarantined/contradicted memories are advisory-only (recall injects
+`active` only); adjudicate with `njhook review`. Evaluate output quality with
+`njhook eval-retrieval` (deterministic) and `njhook eval-distillation` (per-provider).
+
 ## Setup
 
 ```bash

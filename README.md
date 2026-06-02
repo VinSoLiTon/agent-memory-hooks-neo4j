@@ -178,7 +178,7 @@ Full reference with every flag and example workflows lives in
 | `delete <path> [-y]` | Remove a memory. |
 | `sessions [--client X] [--since 7d]` | Captured sessions with event counts. |
 | `session <id> [-v]` | Walk events of one session. |
-| `stats` | Counts by client / kind / archived / embedded; top-accessed. |
+| `stats` | Memory counts by bucket AND by semantic `kind`; sessions by client; events. |
 | `embed-backfill [--force]` | Compute embeddings for memories missing them. |
 | `reindex [--force] [--dry-run]` | Rebuild vector index when embedding model changes. |
 | `consolidate [--threshold 0.92] [--rounds 10]` | LLM-merge near-duplicates. |
@@ -186,10 +186,20 @@ Full reference with every flag and example workflows lives in
 | `unarchive <path>` | Restore an archived memory. |
 | `patterns [--show ...] [--since 7d]` | Surface repeated commands / hot files / prompt clusters. |
 | `patterns --promote <id> [-y]` | Convert a detected pattern into a draft memory. |
+| `review <list\|approve\|reject\|supersede\|flag\|auto-resolve>` | Adjudicate the `pending_review` / `:CONTRADICTS` queue (Phase E). |
+| `audit <path> \| --recent [N]` | A memory's full mutation log, or a graph-wide view (Phase H2). |
+| `ingest` | Drain the durable event spool into Neo4j; idempotent replay + DLQ (Phase B). |
+| `migrate-kinds [--dry-run]` | Re-tag legacy `kind` labels to the semantic vocabulary + backfill `m.kind` (Phase D1). |
+| `recall <prompt> [--cwd D] [--json]` | Ranked recall over the shared engine, for non-hook runtimes (Phase G). |
+| `write-event --client X [--json F]` | Capture an event via the shared scrub/spool path (Phase G). |
+| `render --target {agents,claude,gemini,cursor,all}` | Render memory into a runtime's context file as a managed block (Phase G). |
+| `rehearse-restore` | Prove backups are restorable on a disposable marker; records a `:RehearsalRun` (Phase H4). |
+| `eval-retrieval` | Golden-set recall eval (hit@k + MRR) — ranking regression guard (Phase D3). |
+| `eval-distillation [--provider X]` | Score dream output quality over golden sessions via a real provider (Phase D3). |
 | `backup [--out F] [--with-embeddings] [--with-sessions] [--since 7d] [--no-tool-response] [--max-field-chars N]` | JSON dump. Default = memories only (~10KB). `--with-sessions` is unbounded; the size flags are essential. |
-| `restore --in F [--with-embeddings] [--dry-run]` | Idempotent upsert from a backup. |
+| `restore --in F [--with-embeddings] [--dry-run] [--allow-malformed]` | Idempotent upsert from a backup (round-trips revision/supersession/audit lineage). |
 | `migrate` | Run full schema migration (idempotent). Run once after install or upgrade. |
-| `health` | Stack-readiness check: Neo4j, schema, hook wrappers, user configs, Ollama, scheduled task, last dream log. |
+| `health` | 13-category readiness check: Neo4j, schema, hooks, configs, Ollama, scheduled task, dream log + freshness, **event spool / DLQ rate, egress policy, restore-rehearsal age**. |
 
 ## Web dashboard
 
@@ -228,21 +238,60 @@ cwd's nearest `.git` ancestor) and recall boosts in-project hits.
   -[:LATEST_EVENT]-> (:Event)
   -[:DREAMED]->      (:Memory)
 
-(:Event {event_id, event_name, client, timestamp, tool_name, tool_input,
+(:Event {event_id, event_name, client, app_id, timestamp, tool_name, tool_input,
          tool_use_id, tool_response, prompt, model, source, turn_id,
          last_assistant_message, stop_hook_active, transcript_path,
-         transcript, cwd})
+         transcript, cwd, sensitivity})            # app_id = OTel gen_ai.app.id (Phase B)
   -[:NEXT]-> (:Event)
 
-(:Memory {path, content, updated_at, project, archived, archived_at,
-          access_count, last_accessed_at, embedding, embedding_model,
-          embedding_dim, consolidated_from, promoted_from_pattern})
-  -[:DERIVED_FROM]-> (:Session)
+(:Memory {path, content, kind, status, importance, updated_at, ingested_at,
+          valid_from, valid_until, created_by, reviewed_at, project, archived,
+          access_count, last_accessed_at, embedding, embedding_model, embedding_dim,
+          consolidated_from, promoted_from_pattern})
+  -[:DERIVED_FROM]->  (:Session)
+  -[:EXTRACTED_FROM]->(:Event)                      # claim-level provenance (Phase D)
+  -[:SUPERSEDED_BY]-> (:Memory)                     # consolidation/conflict (Phase A/E)
+  -[:CONTRADICTS]-    (:Memory)                     # detected conflict (Phase E)
+
+# kind  = semantic type (15-vocab: preference/decision/constraint/...; Phase D1)
+# status = active | pending_review | rejected | superseded | archived  (recall = active only)
+
+(:MemoryRevision {ts, operation, actor, status, content_snapshot})
+  -[:VERSION_OF]->(:Memory)                         # immutable history + audit log (Phase A/H2)
+(:DreamRun {run_id, ts, provider, model}) -[:WROTE]->(:Memory)
+(:RehearsalRun {ts, ok, detail})                    # backup/restore drill record (Phase H4)
 
 constraints: Session.session_key UNIQUE, Event.event_id UNIQUE, Memory.path UNIQUE
-indexes:     fulltext on (Memory.content, Memory.path), vector on Memory.embedding,
-             Memory.project, Session.session_id
+indexes:     fulltext on (Memory.content, Memory.path) + on Event prompt/response,
+             vector on Memory.embedding, Memory.project, Session.session_id
 ```
+
+## Reliability, governance & evolution (Phases A–H)
+
+Beyond capture + dream + recall, the system carries a full engineering program
+(see [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) for the phased
+plan with acceptance bars and [`docs/PROGRESS.md`](docs/PROGRESS.md) for the
+per-PR execution ledger):
+
+- **A — Non-destructive history**: every write snapshots prior state into an
+  immutable `:MemoryRevision`; nothing is destroyed (path-UNIQUE revision chain).
+- **B — Durable capture**: optional `spool` mode (`HOOKS_CAPTURE_MODE=spool`) +
+  `njhook ingest` with idempotent replay + DLQ, so events survive Neo4j downtime.
+  Versioned event schema with read-time upcasting + OTel `gen_ai.*` alignment.
+- **C — Shared recall engine**: one ranker (fulltext + vector + RRF + recency +
+  importance) reused by hook, dashboard, CLI, REST, MCP.
+- **D — Typed memory + admission gate**: semantic `kind` vocabulary; A-MAC
+  grounding gate routes ungrounded dream output to `pending_review`; retrieval +
+  distillation evals.
+- **E — Conflict & review**: contradiction detection (opt-in LLM judge in the
+  nightly) + `njhook review` queue + auto-resolution by authority×recency.
+- **F — Evolution UI**: `njhook history --diff --as-of` + dashboard timeline /
+  lineage; the north-star "trace how a memory came to be".
+- **G — Universal interfaces**: CLI `recall`/`write-event`, REST (`api/server.py`),
+  MCP (`api/mcp_server.py`), and file renderers (`njhook render`) — attach any LLM.
+- **H — Governance**: sensitivity tagging + egress policy, anti-poisoning
+  admission gate, audit log (`njhook audit`), and restore-rehearsal
+  (`njhook rehearse-restore`).
 
 ## Suggested workflow
 
