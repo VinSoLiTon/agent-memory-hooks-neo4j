@@ -19,6 +19,7 @@ from collections import defaultdict
 
 import spool          # hooks/spool.py
 import log_event      # hooks/log_event.py — reuse _append_event + ensure_minimal_constraints
+import event_schema   # hooks/event_schema.py — read-time upcasting (Phase B PR-2)
 
 
 def ingest(driver) -> dict:
@@ -39,6 +40,10 @@ def ingest(driver) -> dict:
                 spool.to_dlq(raw, "invalid JSON")
                 dlq += 1
                 continue
+            # Read-time upcasting: normalize an older-schema record to the current
+            # version before extracting fields. Old spool records are never
+            # rewritten — they're transformed on read (Phase B PR-2 / B3).
+            rec = event_schema.upcast(rec)
             ev = rec.get("event_props") or {}
             eid = ev.get("event_id")
             if not eid:
