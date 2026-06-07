@@ -145,8 +145,10 @@ def test_recent_is_graph_wide_newest_first(driver):
     with driver.session() as s:
         p1 = _mk(s, "_r1")
         p2 = _mk(s, "_r2")
-        audit.record(s, p1, "approve", actor="user", status="pending_review", ts="2026-06-01T00:00:01+00:00")
-        audit.record(s, p2, "reject", actor="user", status="active", ts="2026-06-01T00:00:09+00:00")
+        # far-future ts so these are deterministically the newest entries,
+        # independent of however many real audit revisions the graph already holds.
+        audit.record(s, p1, "approve", actor="user", status="pending_review", ts="2099-01-01T00:00:01+00:00")
+        audit.record(s, p2, "reject", actor="user", status="active", ts="2099-01-01T00:00:09+00:00")
         rows = audit.recent(s, 50)
     ours = [r for r in rows if r["path"].startswith(MARK)]
     assert ours[0]["path"] == p2          # newest ts first

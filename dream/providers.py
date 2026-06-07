@@ -179,22 +179,75 @@ def dream_ollama(transcript: str, existing: str, system: str, model: str, max_to
 
 # --- llama.cpp (local, OpenAI-compatible) -------------------------------
 
+_LLAMACPP_NCTX_CACHE: dict = {}
+_CHARS_PER_TOK = 3.5  # conservative: over-estimates tokens, so we under-fill (never 400)
+
+
+def _llamacpp_n_ctx(base: str) -> int:
+    """The server's context window (tokens). Cached per base URL. Resolution order:
+    `LLAMACPP_N_CTX` env override → the server's `/props` (lives at the root, not
+    `/v1`) → 8192 fallback. So the dream sizes its request to whatever the server
+    is actually configured for, no hard-coding."""
+    env = os.environ.get("LLAMACPP_N_CTX")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    if base in _LLAMACPP_NCTX_CACHE:
+        return _LLAMACPP_NCTX_CACHE[base]
+    import urllib.request
+    root = base[:-3] if base.endswith("/v1") else base   # /props is a root endpoint
+    n = 8192
+    try:
+        with urllib.request.urlopen(f"{root.rstrip('/')}/props", timeout=10) as resp:
+            props = json.loads(resp.read().decode("utf-8"))
+        n = int((props.get("default_generation_settings") or {}).get("n_ctx") or 8192)
+    except Exception:
+        n = 8192
+    _LLAMACPP_NCTX_CACHE[base] = n
+    return n
+
+
 def dream_llamacpp(transcript: str, existing: str, system: str, model: str, max_tokens: int = 4096) -> list[dict]:
     """Hit a local llama.cpp server's OpenAI-compatible API (e.g. the docker
     `infra-llama` container serving Gemma). LOCAL — data never leaves the machine.
 
-    Structured output uses `response_format={"type":"json_schema",...}` (llama.cpp
-    backs it with a GBNF grammar — the same structural guarantee the Ollama path
-    got from `format=<schema>`), falling back to `{"type":"json_object"}` on an
-    older build that rejects json_schema, then to tolerant JSON extraction.
+    Context-aware (PR-4): reads the server's `n_ctx`, trims the transcript so the
+    prompt fits with an output reserve, and clamps `max_tokens` — so it never 400s
+    on "exceeds context size" nor truncates the JSON mid-output, on ANY server.
+
+    Structured output uses `response_format={"type":"json_schema",...}` (GBNF —
+    same structural guarantee the Ollama path got from `format=<schema>`), falling
+    back to `{"type":"json_object"}` on an older build, then tolerant extraction.
     """
     import urllib.request
     import urllib.error
 
     from prompts import DREAM_JSON_SCHEMA  # type: ignore
 
-    user_msg = f"<existing_memories>\n{existing}\n</existing_memories>\n\n<events>\n{transcript}\n</events>"
     base = LLAMACPP_CHAT_URL.rstrip("/")
+    n_ctx = _llamacpp_n_ctx(base)
+    out_reserve = int(os.environ.get("LLAMACPP_OUTPUT_RESERVE", "3072"))  # tokens for the JSON
+    margin = 256
+
+    def _wrap(t: str) -> str:
+        return f"<existing_memories>\n{existing}\n</existing_memories>\n\n<events>\n{t}\n</events>"
+
+    # Fit the transcript so system + wrapper + existing + transcript stays under
+    # (n_ctx - out_reserve - margin) tokens (estimated via chars/_CHARS_PER_TOK).
+    prompt_tok_budget = max(512, n_ctx - out_reserve - margin)
+    prompt_char_budget = int(prompt_tok_budget * _CHARS_PER_TOK)
+    transcript_budget = max(800, prompt_char_budget - len(system) - len(_wrap("")))
+    t = transcript
+    if len(t) > transcript_budget:
+        head = int(transcript_budget * 0.6)
+        tail = max(0, transcript_budget - head - 40)
+        t = t[:head] + "\n...[transcript trimmed to fit context]...\n" + (t[-tail:] if tail else "")
+    user_msg = _wrap(t)
+
+    est_prompt_tok = int((len(system) + len(user_msg)) / _CHARS_PER_TOK)
+    eff_max_tokens = max(512, min(max_tokens, n_ctx - est_prompt_tok - margin))
 
     def _post(response_format: dict) -> str:
         payload = {
@@ -204,7 +257,7 @@ def dream_llamacpp(transcript: str, existing: str, system: str, model: str, max_
                 {"role": "user", "content": user_msg},
             ],
             "temperature": 0.1,
-            "max_tokens": max_tokens,
+            "max_tokens": eff_max_tokens,
             "response_format": response_format,
         }
         req = urllib.request.Request(
@@ -220,29 +273,36 @@ def dream_llamacpp(transcript: str, existing: str, system: str, model: str, max_
             raise RuntimeError(f"empty response from llama.cpp: {body}")
         return choices[0].get("message", {}).get("content", "") or ""
 
-    # Prefer schema-constrained output; fall back to json_object on an HTTP error
-    # (older llama.cpp build), surfacing a clear message if the server is down.
+    # Prefer schema-constrained output; fall back to json_object if THIS request's
+    # json_schema is rejected (older build). Distinguish a reachable-but-rejecting
+    # server (HTTPError) from an unreachable one (URLError) — both raise RuntimeError
+    # so the dream's hybrid fallback (PR-4) takes over instead of crashing.
     try:
         try:
             text = _post({"type": "json_schema",
                           "json_schema": {"name": "memories", "schema": DREAM_JSON_SCHEMA}})
         except urllib.error.HTTPError:
             text = _post({"type": "json_object"})
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8")[:200]
+        except Exception:
+            pass
+        raise RuntimeError(f"llama.cpp request rejected (HTTP {e.code}) at {base}: {detail or e.reason}") from e
     except urllib.error.URLError as e:
         raise RuntimeError(
             f"llama.cpp unreachable at {base}: {e}. Is the server running "
             "(e.g. the `infra-llama` docker container)?"
         ) from e
 
-    for candidate in (text,):
+    try:
+        return json.loads(text).get("memories", [])
+    except Exception:
         try:
-            return json.loads(candidate).get("memories", [])
+            return _extract_json_object(text).get("memories", [])
         except Exception:
-            try:
-                return _extract_json_object(candidate).get("memories", [])
-            except Exception:
-                pass
-    raise ValueError(f"llama.cpp returned malformed JSON: {text[:200]!r}")
+            raise ValueError(f"llama.cpp returned malformed JSON: {text[:200]!r}")
 
 
 PROVIDERS: dict[str, Callable[..., list[dict]]] = {
