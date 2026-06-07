@@ -340,6 +340,20 @@ def call_provider(provider_fn, transcript: str, existing: str, model: str,
     )
 
 
+def safe_distil(provider_fn, transcript: str, existing: str, model: str,
+                system_prompt: str, provider_name: str = "local") -> list[dict]:
+    """Call the primary provider but NEVER raise: on any error (unreachable,
+    HTTP 4xx, malformed JSON, timeout) return [] so the hybrid fallback takes over
+    instead of crashing the whole run (PR-4). 0-yield and hard-error converge to
+    the same []-then-fallback path."""
+    try:
+        return call_provider(provider_fn, transcript, existing, model, system_prompt)
+    except Exception as e:
+        print(f"  primary {provider_name} errored ({type(e).__name__}: {str(e)[:140]}); "
+              f"treating as 0-yield → fallback", file=sys.stderr)
+        return []
+
+
 def _coerce_importance(v):
     """Clamp a model-supplied importance to an int in [1,10]; None if absent/invalid.
     Phase C2: importance is optional — a missing/garbage value leaves the field
@@ -782,7 +796,10 @@ def main():
             print(f"\n=== dreaming over {label} ({len(events)} new events"
                   + ("; SENSITIVE" if session_sensitive else "") + ") ===")
             used_name, used_model = provider_name, model
-            memories = call_provider(provider_fn, render_events(events, max_chars=transcript_cap), existing, model, system_prompt)
+            # PR-4: safe_distil never raises — a hard provider error (e.g. llama.cpp
+            # down / 4xx / malformed) becomes [] so the fallback below fires instead
+            # of crashing the run.
+            memories = safe_distil(provider_fn, render_events(events, max_chars=transcript_cap), existing, model, system_prompt, provider_name)
             # Fall back only if it won't egress a sensitive session to a remote provider.
             if not memories and fallback and not egress_blocked(fallback[0], session_sensitive, allow_egress):
                 fb_name, fb_fn, fb_model, fb_system = fallback

@@ -10,7 +10,7 @@ off Ollama. One PR per slice, like the A–H program. Update this alongside each
 ## Verified infrastructure (2026-06-07)
 | Service | Container | URL | Model | Notes |
 |---|---|---|---|---|
-| Chat | `infra-llama-1` | `http://127.0.0.1:8080/v1` | `gemma-4-12B-it-Q4_K_M.gguf` | OpenAI-compatible; `n_ctx=8192`; `response_format: json_schema` honored (GBNF-backed), `json_object` fallback works |
+| Chat | `infra-llama-1` | `http://127.0.0.1:8080/v1` | `gemma-4-12B-it-Q4_K_M.gguf` | OpenAI-compatible; **`n_ctx=32768`** (raised from 8192 in `re/infra/docker-compose.yml`; KV cost ~+300 MB — Gemma 3 sliding-window attention is cheap); `response_format: json_schema` honored (GBNF-backed), `json_object` fallback works |
 | Embeddings | `infra-embeddings-1` | `http://127.0.0.1:8081/v1` | `nomic-embed-text-v1.5.f16.gguf` | OpenAI-compatible; **768 dim — matches the stored Ollama vectors** (same family) → no forced reindex |
 
 ## Design decision
@@ -20,6 +20,10 @@ Add a **dedicated `llamacpp` provider** (chat + embed), NOT a reuse of the `open
 - **PR-1 — chat provider (dream + judge)** ✅ *this PR*. `dream/providers.py::dream_llamacpp`, `dream/judge.py::_llamacpp_judge`, few-shot prompt for the local model, `--provider llamacpp` everywhere. Local-egress invariant pinned. 8 unit tests (mocked) + live smoke against the real Gemma server.
 - **PR-2 — embeddings** ✅. `hooks/embeddings.py::_embed_llamacpp` (`EMBED_PROVIDER=llamacpp`, OpenAI `/v1/embeddings` on `:8081`, dim 768; `LLAMACPP_EMBED_URL`, `EMBED_MODEL_LLAMACPP`). 4 unit tests (mocked). **A/B verified: cosine = 1.0000** between llama.cpp `nomic-embed-text-v1.5.f16` and ollama `nomic-embed-text` on the same texts → identical vector space → **no reindex needed**, stored vectors stay compatible.
 - **PR-3 — health, nightly cutover, docs** ✅. `njhook health` probes the llama.cpp chat (`:8080`) + embed (`:8081`) servers when either provider is `llamacpp` (FAIL if the selected server is down). `dream/run_dream.cmd` now defaults the nightly to `DREAM_PROVIDER=llamacpp` + `EMBED_PROVIDER=llamacpp` (Anthropic hybrid fallback kept). Docs (cli/README, dream/README) updated; Ollama adapters kept as legacy. **Eval gate PASSED** before cutover: `eval-distillation --provider llamacpp` → both golden sessions valid/path/kind/grounded=1.0, coverage 0.67 & 1.0, overall **PASS**.
+- **PR-4 — robustness** ✅. The first *real* dream run (a 959-event session) exposed two gaps the tiny-fixture eval missed: (1) a real prompt (transcript + few-shot system) **exceeded the 8192 context → HTTP 400**, and (2) a *hard* provider error **crashed the run** because the hybrid fallback only fired on 0-yield. Fixes:
+  - **Context-aware sizing** (`dream/providers.py`): `_llamacpp_n_ctx()` reads the server's `n_ctx` (`/props`, env override, 8192 fallback); `dream_llamacpp` trims the transcript to fit with an output reserve and clamps `max_tokens` — so it never 400s on "exceeds context" nor truncates the JSON, on ANY server config. A 400 is now reported as "request rejected" (distinct from "unreachable").
+  - **Fallback-on-error** (`dream/dream.py::safe_distil`): a primary error → `[]` → the existing Anthropic hybrid fallback takes over instead of crashing.
+  - Also raised the server to `n_ctx=32768` (infra, `re/infra/docker-compose.yml`) so full transcripts pass without trimming. 7 new unit tests (sizing/clamp/error-distinction/safe_distil) + live proof (forced 8k budget at the default cap → Gemma succeeds, no 400/truncation). Rider: made `test_audit.py::test_recent_is_graph_wide_newest_first` robust to a busy audit log (far-future ts).
 
 ## Validation gate (before flipping the scheduled nightly)
 Measure-before-wire — Gemma Q4 12B is weaker than Opus and the dream-stack notes flag gemma hallucination:

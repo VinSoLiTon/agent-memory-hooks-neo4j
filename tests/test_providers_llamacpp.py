@@ -123,3 +123,71 @@ def test_llamacpp_is_local_not_egress_blocked():
     assert dream_mod.egress_blocked("llamacpp", True, False) is False
     # ...while a remote provider still is (control).
     assert dream_mod.egress_blocked("anthropic", True, False) is True
+
+
+# --- PR-4: context-aware sizing + error handling ---------------------------
+
+def test_dream_llamacpp_trims_transcript_and_clamps_max_tokens(monkeypatch):
+    monkeypatch.setenv("LLAMACPP_N_CTX", "8192")   # avoid /props; deterministic budget
+    providers._LLAMACPP_NCTX_CACHE.clear()
+    captured = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen(captured))
+    huge = "event line number forty-two. " * 5000   # ~145k chars, way over 8k ctx
+    providers.dream_llamacpp(huge, "existing", "system", "gemma", max_tokens=16384)
+    body = captured[0]["body"]
+    user = body["messages"][1]["content"]
+    assert "[transcript trimmed to fit context]" in user        # transcript was trimmed
+    assert len(user) < len(huge)                                # ...and is much smaller
+    assert body["max_tokens"] < 8192                            # clamped to fit n_ctx
+
+
+def test_dream_llamacpp_no_trim_when_it_fits(monkeypatch):
+    monkeypatch.setenv("LLAMACPP_N_CTX", "32768")
+    providers._LLAMACPP_NCTX_CACHE.clear()
+    captured = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen(captured))
+    providers.dream_llamacpp("a short transcript", "ex", "sys", "gemma", max_tokens=2048)
+    user = captured[0]["body"]["messages"][1]["content"]
+    assert "[transcript trimmed" not in user                    # small prompt left intact
+
+
+def test_dream_llamacpp_n_ctx_env_override(monkeypatch):
+    monkeypatch.setenv("LLAMACPP_N_CTX", "4096")
+    providers._LLAMACPP_NCTX_CACHE.clear()
+    assert providers._llamacpp_n_ctx("http://x/v1") == 4096
+
+
+def test_dream_llamacpp_http_error_is_request_rejected(monkeypatch):
+    monkeypatch.setenv("LLAMACPP_N_CTX", "8192")
+    providers._LLAMACPP_NCTX_CACHE.clear()
+
+    def always_400(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 400, "bad request", {}, None)
+    monkeypatch.setattr(urllib.request, "urlopen", always_400)
+    with pytest.raises(RuntimeError, match="request rejected"):   # NOT "unreachable"
+        providers.dream_llamacpp("t", "e", "s", "gemma")
+
+
+def test_dream_llamacpp_urlerror_is_unreachable(monkeypatch):
+    monkeypatch.setenv("LLAMACPP_N_CTX", "8192")
+    providers._LLAMACPP_NCTX_CACHE.clear()
+
+    def boom(req, timeout=None):
+        raise urllib.error.URLError("connection refused")
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    with pytest.raises(RuntimeError, match="unreachable"):
+        providers.dream_llamacpp("t", "e", "s", "gemma")
+
+
+# --- PR-4: safe_distil — a hard provider error becomes 0-yield (→ fallback) --
+
+def test_safe_distil_swallows_error_returns_empty():
+    def raising(**kw):
+        raise RuntimeError("llama.cpp unreachable")
+    assert dream_mod.safe_distil(raising, "t", "e", "m", "s", "llamacpp") == []
+
+
+def test_safe_distil_passes_through_memories():
+    def good(**kw):
+        return [{"path": "profile/x.md", "content": "body"}]
+    assert dream_mod.safe_distil(good, "t", "e", "m", "s")[0]["path"] == "profile/x.md"
