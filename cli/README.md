@@ -22,7 +22,11 @@ Defaults in parentheses.
 | `HOOKS_NEO4J_URI` | `bolt://localhost:7687` | Neo4j Bolt endpoint |
 | `HOOKS_NEO4J_USER` | `neo4j` | |
 | `HOOKS_NEO4J_PASSWORD` | `password` | |
-| `EMBED_PROVIDER` | unset (semantic recall disabled) | `openai` or `ollama` |
+| `EMBED_PROVIDER` | unset (semantic recall disabled) | `llamacpp` (default local), `ollama`, or `openai` |
+| `LLAMACPP_CHAT_URL` | `http://127.0.0.1:8080/v1` | llama.cpp chat server (e.g. docker `infra-llama`, Gemma) — local dream provider |
+| `LLAMACPP_EMBED_URL` | `http://127.0.0.1:8081/v1` | llama.cpp embeddings server (e.g. docker `infra-embeddings`, nomic-embed) |
+| `DREAM_LLAMACPP_MODEL` | `gemma-4-12B-it-Q4_K_M.gguf` | dream model id sent to the llama.cpp chat server |
+| `EMBED_MODEL_LLAMACPP` | `nomic-embed-text-v1.5.f16.gguf` | embedding model id (768-dim, same space as the Ollama nomic model) |
 | `EMBED_MODEL_OPENAI` | `text-embedding-3-small` | |
 | `EMBED_MODEL_OLLAMA` | `nomic-embed-text:latest` | |
 | `EMBED_MODEL` | — | Override the active provider's default |
@@ -76,10 +80,12 @@ after pulling schema-touching upgrades.
 
 ### `health`
 
-Stack-readiness check. Walks 13 categories: Neo4j reachability, constraints,
-indexes, hook wrappers, user-level configs, env vars, Ollama daemon + embedding
-model, scheduled task, last dream log, dream freshness, **event spool / DLQ rate
-(Phase B)**, **egress policy (Phase H)**, and **restore-rehearsal age (Phase H4)**.
+Stack-readiness check. Walks the pipeline: Neo4j reachability, constraints,
+indexes, hook wrappers, user-level configs, env vars, the local model backend
+(**llama.cpp chat `:8080` + embed `:8081`** when `*_PROVIDER=llamacpp`, or the
+Ollama daemon + embed model when `=ollama`), scheduled task, last dream log,
+dream freshness, **event spool / DLQ rate (Phase B)**, **egress policy (Phase H)**,
+and **restore-rehearsal age (Phase H4)**.
 Prints `[OK] / [WARN] / [FAIL]` per row plus a summary. **Exit 1** on any FAIL.
 The spool row FAILs on a rising DLQ *rate*, not a static nonzero count.
 

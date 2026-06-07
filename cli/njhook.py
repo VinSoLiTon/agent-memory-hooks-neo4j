@@ -1649,6 +1649,25 @@ def cmd_health(args: argparse.Namespace) -> int:
         except Exception as e:
             rows.append((FAIL, "ollama daemon", f"unreachable at {host}: {e}"))
 
+    # --- 7b. llama.cpp servers (when EMBED_PROVIDER or DREAM_PROVIDER = llamacpp) ---
+    needs_llamacpp = os.environ.get("EMBED_PROVIDER") == "llamacpp" or os.environ.get("DREAM_PROVIDER") == "llamacpp"
+    if needs_llamacpp:
+        def _probe_llamacpp(url: str, label: str, required: bool) -> None:
+            try:
+                with _ureq.urlopen(f"{url.rstrip('/')}/models", timeout=3) as resp:
+                    data = _json.loads(resp.read().decode("utf-8"))
+                items = data.get("models") or data.get("data") or []
+                names = ", ".join(str(i.get("id") or i.get("name") or "?") for i in items)[:70]
+                rows.append((OK, label, f"reachable at {url} ({names})"))
+            except Exception as e:
+                rows.append((FAIL if required else WARN, label, f"unreachable at {url}: {e}"))
+
+        _probe_llamacpp(os.environ.get("LLAMACPP_CHAT_URL", "http://127.0.0.1:8080/v1"),
+                        "llama.cpp chat", os.environ.get("DREAM_PROVIDER") == "llamacpp")
+        if os.environ.get("EMBED_PROVIDER") == "llamacpp":
+            _probe_llamacpp(os.environ.get("LLAMACPP_EMBED_URL", "http://127.0.0.1:8081/v1"),
+                            "llama.cpp embed", True)
+
     # --- 8. Scheduled task ---
     try:
         p = _sp.run(["schtasks.exe", "/Query", "/TN", "njhook-dream-nightly", "/FO", "LIST"],
