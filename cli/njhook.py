@@ -1898,7 +1898,7 @@ def build_parser() -> argparse.ArgumentParser:
     pev.set_defaults(fn=cmd_eval_retrieval)
 
     ped = sub.add_parser("eval-distillation", help="score dream output quality over golden sessions via a real provider (Phase D3; opt-in)")
-    ped.add_argument("--provider", choices=["anthropic", "openai", "ollama"], help="LLM backend (default: $DREAM_PROVIDER or anthropic)")
+    ped.add_argument("--provider", choices=["anthropic", "openai", "ollama", "llamacpp"], help="LLM backend (default: $DREAM_PROVIDER or anthropic)")
     ped.add_argument("--model", help="override the provider's default model")
     ped.set_defaults(fn=cmd_eval_distillation)
 
@@ -1961,7 +1961,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pco.add_argument("--threshold", type=float, default=0.92, help="cosine similarity threshold (default 0.92)")
     pco.add_argument("--rounds", type=int, default=10, help="max merge rounds (default 10)")
-    pco.add_argument("--provider", choices=["anthropic", "openai", "ollama"])
+    pco.add_argument("--provider", choices=["anthropic", "openai", "ollama", "llamacpp"])
     pco.add_argument("--dry-run", action="store_true")
     pco.set_defaults(fn=cmd_consolidate)
 

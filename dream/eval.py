@@ -140,7 +140,7 @@ def evaluate(memories: list[dict]) -> tuple[bool, list[str]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--provider", choices=["anthropic", "openai", "ollama"], required=True)
+    ap.add_argument("--provider", choices=["anthropic", "openai", "ollama", "llamacpp"], required=True)
     ap.add_argument("--model", help="override default model")
     args = ap.parse_args()
 

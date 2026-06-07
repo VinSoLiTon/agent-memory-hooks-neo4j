@@ -163,7 +163,7 @@ def print_report(rep: dict) -> None:
 def main() -> int:
     import argparse
     ap = argparse.ArgumentParser(description="Phase D3 distillation eval (opt-in, calls a real provider).")
-    ap.add_argument("--provider", choices=["anthropic", "openai", "ollama"],
+    ap.add_argument("--provider", choices=["anthropic", "openai", "ollama", "llamacpp"],
                     help="LLM backend (default: $DREAM_PROVIDER or anthropic)")
     ap.add_argument("--model", help="override the provider's default model")
     args = ap.parse_args()
