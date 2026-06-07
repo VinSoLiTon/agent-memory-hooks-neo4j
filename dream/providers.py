@@ -19,9 +19,14 @@ DEFAULT_MODELS = {
     "anthropic": os.environ.get("DREAM_ANTHROPIC_MODEL", "claude-opus-4-7"),
     "openai":    os.environ.get("DREAM_OPENAI_MODEL",    "gpt-4o-mini"),
     "ollama":    os.environ.get("DREAM_OLLAMA_MODEL",    "qwen3.5:latest"),
+    "llamacpp":  os.environ.get("DREAM_LLAMACPP_MODEL",  "gemma-4-12B-it-Q4_K_M.gguf"),
 }
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+# llama.cpp server's OpenAI-compatible base URL (e.g. the `infra-llama` docker
+# container). A LOCAL provider — like ollama, its data never leaves the machine,
+# so it is NOT subject to the Phase H remote-egress block.
+LLAMACPP_CHAT_URL = os.environ.get("LLAMACPP_CHAT_URL", "http://127.0.0.1:8080/v1")
 
 
 def _extract_json_object(text: str) -> dict:
@@ -172,10 +177,79 @@ def dream_ollama(transcript: str, existing: str, system: str, model: str, max_to
     )
 
 
+# --- llama.cpp (local, OpenAI-compatible) -------------------------------
+
+def dream_llamacpp(transcript: str, existing: str, system: str, model: str, max_tokens: int = 4096) -> list[dict]:
+    """Hit a local llama.cpp server's OpenAI-compatible API (e.g. the docker
+    `infra-llama` container serving Gemma). LOCAL — data never leaves the machine.
+
+    Structured output uses `response_format={"type":"json_schema",...}` (llama.cpp
+    backs it with a GBNF grammar — the same structural guarantee the Ollama path
+    got from `format=<schema>`), falling back to `{"type":"json_object"}` on an
+    older build that rejects json_schema, then to tolerant JSON extraction.
+    """
+    import urllib.request
+    import urllib.error
+
+    from prompts import DREAM_JSON_SCHEMA  # type: ignore
+
+    user_msg = f"<existing_memories>\n{existing}\n</existing_memories>\n\n<events>\n{transcript}\n</events>"
+    base = LLAMACPP_CHAT_URL.rstrip("/")
+
+    def _post(response_format: dict) -> str:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+            "response_format": response_format,
+        }
+        req = urllib.request.Request(
+            f"{base}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer no-key"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        choices = body.get("choices") or []
+        if not choices:
+            raise RuntimeError(f"empty response from llama.cpp: {body}")
+        return choices[0].get("message", {}).get("content", "") or ""
+
+    # Prefer schema-constrained output; fall back to json_object on an HTTP error
+    # (older llama.cpp build), surfacing a clear message if the server is down.
+    try:
+        try:
+            text = _post({"type": "json_schema",
+                          "json_schema": {"name": "memories", "schema": DREAM_JSON_SCHEMA}})
+        except urllib.error.HTTPError:
+            text = _post({"type": "json_object"})
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            f"llama.cpp unreachable at {base}: {e}. Is the server running "
+            "(e.g. the `infra-llama` docker container)?"
+        ) from e
+
+    for candidate in (text,):
+        try:
+            return json.loads(candidate).get("memories", [])
+        except Exception:
+            try:
+                return _extract_json_object(candidate).get("memories", [])
+            except Exception:
+                pass
+    raise ValueError(f"llama.cpp returned malformed JSON: {text[:200]!r}")
+
+
 PROVIDERS: dict[str, Callable[..., list[dict]]] = {
     "anthropic": dream_anthropic,
     "openai":    dream_openai,
     "ollama":    dream_ollama,
+    "llamacpp":  dream_llamacpp,
 }
 
 

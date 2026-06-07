@@ -160,7 +160,9 @@ DREAM_JSON_SCHEMA = {
 
 def system_prompt_for(provider: str, model: str | None = None) -> str:
     """Return the right system prompt for the given provider. `model` is
-    accepted for future per-model variants but not used today."""
-    if provider == "ollama":
+    accepted for future per-model variants but not used today. Local
+    small/mid models (ollama, llama.cpp) get the few-shot prompt; hosted
+    frontier models get the lean one."""
+    if provider in ("ollama", "llamacpp"):
         return _OLLAMA_PROMPT
     return _FRONTIER_PROMPT

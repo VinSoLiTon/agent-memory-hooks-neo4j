@@ -649,7 +649,8 @@ def check_contradictions(driver, candidates: list, judge, find_candidates) -> li
 def egress_blocked(provider_name: str, session_sensitive: bool, allow_egress: bool) -> bool:
     """Phase H egress policy: a high-sensitivity session must not be sent to a
     remote dream provider (anthropic/openai) unless DREAM_ALLOW_SENSITIVE_EGRESS=1.
-    Local (ollama) is always allowed. Returns True when the call must be skipped."""
+    Local providers (ollama/llamacpp) are always allowed. Returns True when the
+    call must be skipped."""
     return provider_name in ("anthropic", "openai") and session_sensitive and not allow_egress
 
 
@@ -673,7 +674,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="print memories, don't write")
     ap.add_argument(
         "--provider",
-        choices=["anthropic", "openai", "ollama"],
+        choices=["anthropic", "openai", "ollama", "llamacpp"],
         help="LLM backend (default: $DREAM_PROVIDER or anthropic)",
     )
     ap.add_argument("--model", help="override the provider's default model")

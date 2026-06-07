@@ -17,6 +17,7 @@ import os
 from typing import Callable
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+LLAMACPP_CHAT_URL = os.environ.get("LLAMACPP_CHAT_URL", "http://127.0.0.1:8080/v1")
 
 JUDGE_SYSTEM = (
     "You compare two memory notes about a user or project. Decide whether they "
@@ -106,10 +107,39 @@ def _ollama_judge(model: str) -> Callable[[str, str], bool]:
     return judge
 
 
+def _llamacpp_judge(model: str) -> Callable[[str, str], bool]:
+    import urllib.request
+    import urllib.error
+
+    def judge(existing: str, new: str) -> bool:
+        payload = {
+            "model": model,
+            "messages": [{"role": "system", "content": JUDGE_SYSTEM},
+                         {"role": "user", "content": _pair(existing, new)}],
+            "max_tokens": 4,
+            "temperature": 0.0,
+        }
+        try:
+            req = urllib.request.Request(
+                f"{LLAMACPP_CHAT_URL.rstrip('/')}/chat/completions",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json", "Authorization": "Bearer no-key"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            return is_yes((body.get("choices") or [{}])[0].get("message", {}).get("content", ""))
+        except Exception:
+            return False
+
+    return judge
+
+
 JUDGES: dict[str, Callable[[str], Callable[[str, str], bool]]] = {
     "anthropic": _anthropic_judge,
     "openai": _openai_judge,
     "ollama": _ollama_judge,
+    "llamacpp": _llamacpp_judge,
 }
 
 
