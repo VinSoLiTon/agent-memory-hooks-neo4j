@@ -18,7 +18,7 @@ Add a **dedicated `llamacpp` provider** (chat + embed), NOT a reuse of the `open
 
 ## Plan (one PR per slice)
 - **PR-1 — chat provider (dream + judge)** ✅ *this PR*. `dream/providers.py::dream_llamacpp`, `dream/judge.py::_llamacpp_judge`, few-shot prompt for the local model, `--provider llamacpp` everywhere. Local-egress invariant pinned. 8 unit tests (mocked) + live smoke against the real Gemma server.
-- **PR-2 — embeddings.** `hooks/embeddings.py::_embed_llamacpp` (`EMBED_PROVIDER=llamacpp`, `:8081`, dim 768). Decide reindex via A/B cosine; `njhook reindex` if needed.
+- **PR-2 — embeddings** ✅. `hooks/embeddings.py::_embed_llamacpp` (`EMBED_PROVIDER=llamacpp`, OpenAI `/v1/embeddings` on `:8081`, dim 768; `LLAMACPP_EMBED_URL`, `EMBED_MODEL_LLAMACPP`). 4 unit tests (mocked). **A/B verified: cosine = 1.0000** between llama.cpp `nomic-embed-text-v1.5.f16` and ollama `nomic-embed-text` on the same texts → identical vector space → **no reindex needed**, stored vectors stay compatible.
 - **PR-3 — health, defaults, docs; retire Ollama.** `njhook health` probes `:8080`+`:8081`; flip `DREAM_PROVIDER`/`EMBED_PROVIDER` defaults to `llamacpp`; update README/cli-README/dream-README/index.html. Keep Ollama adapters as legacy unless asked to delete.
 
 ## Validation gate (before flipping the scheduled nightly)
@@ -38,7 +38,7 @@ Measure-before-wire — Gemma Q4 12B is weaker than Opus and the dream-stack not
 - **Quality:** validate via the eval gate; keep Anthropic fallback.
 
 ## Open decisions
-1. Reindex embeddings on the cutover, or A/B-test first? (lean: reindex once — cheap.)
+1. ~~Reindex embeddings on the cutover, or A/B-test first?~~ **RESOLVED (PR-2):** A/B cosine = 1.0000 (identical vector space) → **no reindex**; stored vectors stay valid.
 2. Delete the Ollama adapters, or keep as legacy fallback? (lean: keep until Gemma proven over ~a week of nightlies.)
 
 ## Notes
