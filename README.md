@@ -138,8 +138,10 @@ Default models: `claude-opus-4-7`, `gpt-4o-mini`, `qwen3.5:latest`.
 
 ### Scheduled (Windows Task Scheduler)
 
-The repo ships `dream/run_dream.cmd` (a wrapper that defaults to ollama +
-gemma4) and was registered via:
+The repo ships `dream/run_dream.cmd` (a wrapper that defaults to the local
+llama.cpp server — `DREAM_PROVIDER=llamacpp` + `EMBED_PROVIDER=llamacpp`, with
+Anthropic as the hybrid fallback; see `docs/LLAMACPP_MIGRATION.md`) and was
+registered via:
 
 ```powershell
 $action  = New-ScheduledTaskAction -Execute "C:\Projects\njhook\dream\run_dream.cmd"

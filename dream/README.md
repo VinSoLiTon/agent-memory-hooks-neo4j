@@ -1,9 +1,10 @@
 # Dream phase
 
 Offline memory consolidation for the agent-memory hooks. Reads recent
-session events from Neo4j, asks an LLM (Anthropic, OpenAI, or local Ollama)
-to distill them into durable markdown-style memories, and writes them back
-as `:Memory` nodes — with embeddings if `EMBED_PROVIDER` is set.
+session events from Neo4j, asks an LLM (a local **llama.cpp** server — the
+default, e.g. Gemma 12B — or Anthropic / OpenAI; Ollama is still supported as a
+legacy local backend) to distill them into durable markdown-style memories, and
+writes them back as `:Memory` nodes — with embeddings if `EMBED_PROVIDER` is set.
 
 Hooks capture *what happened*. The dream phase decides *what's worth
 remembering* — user profile, tool-usage patterns, project context — so
