@@ -3,14 +3,16 @@
 Two adapters with the same shape:
     embed(texts: list[str]) -> list[list[float]]
 
-Selection: EMBED_PROVIDER env var ('openai' | 'ollama' | unset).
+Selection: EMBED_PROVIDER env var ('openai' | 'ollama' | 'llamacpp' | unset).
 When unset, semantic recall is disabled and inject_memory falls back to
 fulltext-only — existing behavior is preserved.
 
 Models (override via EMBED_MODEL):
-  openai → text-embedding-3-small (1536 dim)
-  ollama → nomic-embed-text:latest (768 dim) — must be pulled first:
-              ollama pull nomic-embed-text
+  openai   → text-embedding-3-small (1536 dim)
+  ollama   → nomic-embed-text:latest (768 dim) — must be pulled first:
+                ollama pull nomic-embed-text
+  llamacpp → nomic-embed-text-v1.5.f16.gguf (768 dim) via a local llama.cpp
+                embeddings server (LLAMACPP_EMBED_URL, default :8081/v1)
 
 Anthropic doesn't expose an embeddings API as of writing — picking openai
 or ollama is the practical menu.
@@ -28,6 +30,7 @@ EMBED_PROVIDER = os.environ.get("EMBED_PROVIDER", "").lower()
 DEFAULT_MODELS = {
     "openai": os.environ.get("EMBED_MODEL_OPENAI", "text-embedding-3-small"),
     "ollama": os.environ.get("EMBED_MODEL_OLLAMA", "nomic-embed-text:latest"),
+    "llamacpp": os.environ.get("EMBED_MODEL_LLAMACPP", "nomic-embed-text-v1.5.f16.gguf"),
 }
 # Common dimensions; auto-detected on first call if not listed.
 KNOWN_DIMS = {
@@ -36,15 +39,19 @@ KNOWN_DIMS = {
     "text-embedding-ada-002": 1536,
     "nomic-embed-text": 768,
     "nomic-embed-text:latest": 768,
+    "nomic-embed-text-v1.5.f16.gguf": 768,   # llama.cpp; same 768-dim space as the Ollama model
     "mxbai-embed-large": 1024,
     "mxbai-embed-large:latest": 1024,
 }
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+# llama.cpp embeddings server's OpenAI-compatible base URL (e.g. the docker
+# `infra-embeddings` container). Local.
+LLAMACPP_EMBED_URL = os.environ.get("LLAMACPP_EMBED_URL", "http://127.0.0.1:8081/v1")
 
 
 def is_enabled() -> bool:
-    return EMBED_PROVIDER in ("openai", "ollama")
+    return EMBED_PROVIDER in ("openai", "ollama", "llamacpp")
 
 
 def model() -> str:
@@ -102,9 +109,39 @@ def _embed_ollama(texts: list[str]) -> list[list[float]]:
     return embs
 
 
+# --- llama.cpp (local, OpenAI-compatible) -------------------------------
+
+def _embed_llamacpp(texts: list[str]) -> list[list[float]]:
+    """Hit a local llama.cpp embeddings server's OpenAI-compatible /v1/embeddings
+    (e.g. the docker `infra-embeddings` container). Batches in one request."""
+    base = LLAMACPP_EMBED_URL.rstrip("/")
+    payload = {"model": model(), "input": texts}
+    req = urllib.request.Request(
+        f"{base}/embeddings",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer no-key"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            f"llama.cpp embeddings unreachable at {base}: {e}. "
+            "Is the embeddings server running (e.g. the `infra-embeddings` docker container)?"
+        ) from e
+    data = body.get("data")
+    if not data:
+        raise RuntimeError(f"unexpected llama.cpp embed response: {body}")
+    # OpenAI shape: data is a list of {embedding, index}; order by index to be safe.
+    rows = sorted(data, key=lambda d: d.get("index", 0))
+    return [r["embedding"] for r in rows]
+
+
 _PROVIDERS: dict[str, Callable[[list[str]], list[list[float]]]] = {
     "openai": _embed_openai,
     "ollama": _embed_ollama,
+    "llamacpp": _embed_llamacpp,
 }
 
 
