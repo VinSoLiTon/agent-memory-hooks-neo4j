@@ -35,7 +35,7 @@ import math
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import embeddings  # hooks/embeddings.py — on sys.path for every caller
 
@@ -411,6 +411,56 @@ def as_of_query(session, prompt: str, current_project: str | None = None,
             if body is not None:
                 hit["content"] = body   # rewind the body to what it said at as_of
     return rows
+
+
+# --- item #14: recall-effectiveness worklists (read-only; reuse the one ranker) ---
+NEVER_INJECTED_MIN_AGE_DAYS = int(os.environ.get("RECALL_NEVER_INJECTED_MIN_AGE_DAYS", "30"))
+DEAD_RECENCY_FLOOR = float(os.environ.get("RECALL_DEAD_RECENCY_FLOOR", "0.05"))
+
+
+def never_injected(session, min_age_days: int | None = None, limit: int = 200) -> list[dict]:
+    """Active, non-archived, non-profile memories with access_count=0 that are older
+    than `min_age_days` — fetched-but-never-surfaced dead weight (the input a pruning
+    decision needs). access_count is bumped only when a memory actually survives
+    render + char-budget into a session, so =0 means "never reached an agent". profile/
+    is exempt (never recall-injected by design; mirrors archive's exemption). Accurate
+    going forward."""
+    min_age_days = NEVER_INJECTED_MIN_AGE_DAYS if min_age_days is None else min_age_days
+    cutoff = (_now_utc() - timedelta(days=min_age_days)).isoformat()
+    rows = session.run(
+        f"MATCH (m:Memory) WHERE {_active('m')} "
+        "AND NOT m.path STARTS WITH 'profile/' "
+        "AND coalesce(m.access_count, 0) = 0 "
+        "AND coalesce(m.ingested_at, m.updated_at, '') < $cutoff "
+        "RETURN m.path AS path, m.ingested_at AS ingested_at, m.updated_at AS updated_at, "
+        "       m.project AS project "
+        "ORDER BY coalesce(m.ingested_at, m.updated_at, '') LIMIT $limit",
+        cutoff=cutoff, limit=limit,
+    )
+    return [dict(r) for r in rows]
+
+
+def effectively_dead(session, floor: float | None = None, limit: int = 200, now=None) -> list[dict]:
+    """Active, non-archived memories that HAVE been used (access_count>0) but whose
+    decayed recency has fallen below `floor` — "was useful, now stale but not
+    archived". The complement of never_injected. Decay is computed in Python via
+    recency_factor so the single half-life table is reused (no second decay impl)."""
+    floor = DEAD_RECENCY_FLOOR if floor is None else floor
+    rows = session.run(
+        f"MATCH (m:Memory) WHERE {_active('m')} AND coalesce(m.access_count, 0) > 0 "
+        "RETURN m.path AS path, m.last_accessed_at AS last_accessed_at, "
+        "       m.updated_at AS updated_at, m.ingested_at AS ingested_at, "
+        "       coalesce(m.access_count, 0) AS access_count"
+    )
+    out = []
+    for r in rows:
+        row = dict(r)
+        rf = recency_factor(row, now)
+        if rf < floor:
+            row["recency"] = rf
+            out.append(row)
+    out.sort(key=lambda x: x["recency"])
+    return out[:limit]
 
 
 def session_start_buckets(session, current_project: str | None = None,
