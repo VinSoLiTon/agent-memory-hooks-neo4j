@@ -45,6 +45,7 @@ import quality as quality_mod  # noqa: E402
 import review as review_mod  # noqa: E402  (Phase E — contradiction detection/flagging)
 import recall as recall_mod  # noqa: E402  (fulltext candidate channel for contradiction detection)
 import judge as judge_mod  # noqa: E402  (Phase E PR-3 — LLM contradiction judge)
+import critic as critic_mod  # noqa: E402  (item #18 — LLM faithfulness critique pass)
 import memory_types  # noqa: E402  (Phase D1 — semantic kind vocabulary)
 
 # Windows consoles default to cp1252; memories from Claude routinely include
@@ -474,7 +475,7 @@ def _local_merge_pass(driver, valid: list[dict], provider: str, model: str, prov
     return merged
 
 
-def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None, provider: str = "unknown", model: str = "unknown", events: list[dict] | None = None, contradiction_judge=None, find_candidates=None, usage: dict | None = None, cost: float | None = None, provider_fn=None) -> int:
+def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None, provider: str = "unknown", model: str = "unknown", events: list[dict] | None = None, contradiction_judge=None, find_candidates=None, usage: dict | None = None, cost: float | None = None, provider_fn=None, critic_fn=None) -> int:
     """Upsert memories and advance the session's last_dreamed_at watermark.
 
     `watermark` is the timestamp of the latest event we just dreamed over —
@@ -599,6 +600,41 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
                         "    rejected_content:$rc, reason:'anti-poisoning: suspicious update held'}) "
                         "MERGE (rev)-[:VERSION_OF]->(m)",
                         p=path, ts=now, rc=rejected)
+
+    # Item #18 — optional LLM critique / faithfulness pass. Opt-in
+    # (DREAM_CRITIQUE=1). Re-reads each NEW candidate against the bounded source
+    # transcript and routes any the critic judges UNFAITHFUL (a fabricated /
+    # unsupported / contradicted claim) to pending_review. This is the semantic
+    # complement to the grounding gate: grounding catches a memory that shares no
+    # vocabulary with the transcript; the critic catches a fluent hallucination
+    # that reuses the session's words but inverts a value. NEW-only — an UPDATE to
+    # an existing-active memory is never touched (same exemption as the grounding /
+    # anti-poisoning gates). Lenient by construction: the critic returns True
+    # (faithful) on any error/ambiguity, so a flaky model can only miss a
+    # hallucination, never quarantine a good memory. `critic_fn` is injectable for
+    # tests; else resolved via get_critic for the winning provider.
+    if (os.environ.get("DREAM_CRITIQUE") == "1" and valid and source_text
+            and any(mem_status.get(m["path"]) == "active" and m["path"] not in existing_active
+                    for m in valid)):
+        critic = critic_fn or critic_mod.get_critic(provider, model)
+        cap = int(os.environ.get("DREAM_CRITIQUE_MAX_CHARS", "12000"))
+        transcript = source_text[:cap]
+        critiqued = 0
+        for m in valid:
+            # skip anything already held (grounding/poison) or any update — NEW-only
+            if mem_status.get(m["path"]) != "active" or m["path"] in existing_active:
+                continue
+            try:
+                faithful = critic(m["content"], transcript)
+            except Exception:
+                faithful = True   # lenient — never quarantine on a critic crash
+            if not faithful:
+                mem_status[m["path"]] = "pending_review"
+                critiqued += 1
+        if critiqued:
+            print(f"  critique gate: {critiqued} candidate(s) failed faithfulness review "
+                  f"→ pending_review (DREAM_CRITIQUE; adjudicate with `njhook review`)",
+                  file=sys.stderr)
 
     embeds: list[list[float]] = []
     embed_dim: int | None = None
