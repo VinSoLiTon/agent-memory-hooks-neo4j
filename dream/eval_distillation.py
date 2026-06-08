@@ -22,8 +22,11 @@ needs the LLM, but the scoring of whatever's generated is fully deterministic.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
@@ -213,6 +216,88 @@ def print_report(rep: dict) -> None:
               f"kind={s['kind_ok_rate']:.2f} grounded={s['grounded_rate']:.2f} "
               f"coverage={s['coverage']:.2f} noise={s.get('noise', 0.0):.2f} neg={s.get('negative_hits', 0)}")
     print(f"overall: {'PASS' if rep['pass'] else 'FAIL'}")
+
+
+# --- item #22: provider A/B latency matrix (latency-only; cost is item #13) ---
+
+def run_timed(provider: str | None = None, model: str | None = None) -> dict:
+    """Like run(), but brackets each per-session call_provider with a wall-clock
+    timer — attaches `latency_s` to each session + a provider-level
+    `total_latency_s`. Latency is the decision-grade signal here (cost is #13)."""
+    import dream as dream_mod
+    from providers import get_provider, default_model
+    from prompts import system_prompt_for
+
+    name, fn = get_provider(provider)
+    model = model or default_model(name)
+    system = system_prompt_for(name, model)
+
+    sessions, total = [], 0.0
+    for fx in GOLDEN_SESSIONS:
+        transcript = dream_mod.render_events(fx["events"])
+        t0 = time.perf_counter()
+        try:
+            candidates = dream_mod.call_provider(fn, transcript, existing="", model=model, system_prompt=system)
+        except Exception as e:
+            dt = time.perf_counter() - t0
+            total += dt
+            sessions.append({"name": fx["name"], "error": f"{type(e).__name__}: {str(e)[:100]}",
+                             "pass": False, "latency_s": round(dt, 3)})
+            continue
+        dt = time.perf_counter() - t0
+        total += dt
+        r = score(candidates, transcript, fx)
+        r["name"] = fx["name"]
+        r["latency_s"] = round(dt, 3)
+        sessions.append(r)
+    return {"provider": name, "model": model, "sessions": sessions,
+            "pass": all(s.get("pass") for s in sessions), "total_latency_s": round(total, 3)}
+
+
+def run_matrix(providers: list[str], model_overrides: dict | None = None,
+               persist_path: str | None = None) -> dict:
+    """Run the timed eval across several providers, returning {runs, generated_at}.
+    Optionally append the report to a JSONL history (persist)."""
+    model_overrides = model_overrides or {}
+    runs = [run_timed(p, model_overrides.get(p)) for p in providers]
+    report = {"runs": runs, "generated_at": datetime.now(timezone.utc).isoformat()}
+    if persist_path is not None:
+        persist(report, persist_path)
+    return report
+
+
+def _default_report_path() -> str:
+    return (os.environ.get("DREAM_EVAL_REPORT_PATH")
+            or str(Path(__file__).resolve().parents[1] / ".eval" / "distillation_matrix.jsonl"))
+
+
+def persist(report: dict, path: str | None = None) -> str:
+    """Append ONE JSON line to a history file (never rewrite — a record accretes,
+    matching the non-destructive ethos). Creates the parent dir. Returns the path."""
+    path = path or _default_report_path()
+    report = {**report, "generated_at": report.get("generated_at") or datetime.now(timezone.utc).isoformat()}
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(report) + "\n")
+    return path
+
+
+def print_matrix(report: dict) -> None:
+    """Render the A/B matrix: one block per provider with a latency column, plus a
+    banner that the quality rates are NOT decision-grade at n=2 fixtures."""
+    for run in report["runs"]:
+        print(f"\nprovider={run['provider']} model={run['model']} "
+              f"total_lat={run.get('total_latency_s', 0.0):.2f}s")
+        for s in run["sessions"]:
+            if s.get("error"):
+                print(f"  [ERR ] {s['name']}: {s['error']}  lat={s.get('latency_s', 0.0):.2f}s")
+                continue
+            mark = "PASS" if s["pass"] else "FAIL"
+            print(f"  [{mark}] {s['name']:<20} valid={s['valid_rate']:.2f} grounded={s['grounded_rate']:.2f} "
+                  f"coverage={s['coverage']:.2f} noise={s.get('noise', 0.0):.2f} "
+                  f"lat={s.get('latency_s', 0.0):.2f}s")
+    print("\nNOTE: n=2 fixtures — latency is decision-grade; the quality rates are a regression "
+          "sanity check, NOT a provider-selection signal.")
 
 
 def main() -> int:

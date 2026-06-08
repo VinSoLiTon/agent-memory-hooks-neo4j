@@ -192,6 +192,15 @@ def cmd_eval_distillation(args: argparse.Namespace) -> int:
     is the same one the CI tests pin; this runs it against live model output."""
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dream"))
     import eval_distillation
+    if getattr(args, "providers", None):   # item #22 — A/B latency matrix
+        provs = [p.strip() for p in args.providers.split(",") if p.strip()]
+        persist_path = (getattr(args, "report_path", None) or eval_distillation._default_report_path()) \
+            if (args.persist or getattr(args, "report_path", None)) else None
+        rep = eval_distillation.run_matrix(provs, persist_path=persist_path)
+        eval_distillation.print_matrix(rep)
+        if persist_path:
+            print(f"\nappended report to {persist_path}")
+        return 0
     rep = eval_distillation.run(args.provider, args.model)
     eval_distillation.print_report(rep)
     return 0 if rep["pass"] else 1
@@ -2021,6 +2030,9 @@ def build_parser() -> argparse.ArgumentParser:
     ped = sub.add_parser("eval-distillation", help="score dream output quality over golden sessions via a real provider (Phase D3; opt-in)")
     ped.add_argument("--provider", choices=["anthropic", "openai", "ollama", "llamacpp"], help="LLM backend (default: $DREAM_PROVIDER or anthropic)")
     ped.add_argument("--model", help="override the provider's default model")
+    ped.add_argument("--providers", help="A/B latency matrix: comma list of providers (item #22), e.g. llamacpp,anthropic")
+    ped.add_argument("--persist", action="store_true", help="append the matrix report to the JSONL history")
+    ped.add_argument("--report-path", dest="report_path", help="JSONL history path (default $DREAM_EVAL_REPORT_PATH or .eval/distillation_matrix.jsonl)")
     ped.set_defaults(fn=cmd_eval_distillation)
 
     prn = sub.add_parser("render", help="render project memory into an agent context file (AGENTS.md/CLAUDE.md/GEMINI.md/Cursor) as a managed block")

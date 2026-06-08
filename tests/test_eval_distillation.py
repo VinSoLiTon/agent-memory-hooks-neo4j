@@ -128,6 +128,44 @@ def test_golden_fixtures_carry_negatives_and_widen_kinds():
         assert "negatives" in fx                                    # contract: every fixture declares it
 
 
+# --- item #22: A/B latency matrix + JSONL persistence -----------------------
+
+def test_persist_appends_jsonl(tmp_path):
+    import json
+    p = str(tmp_path / "matrix.jsonl")
+    ed.persist({"runs": [{"provider": "llamacpp"}]}, p)
+    ed.persist({"runs": [{"provider": "anthropic"}]}, p)
+    lines = open(p, encoding="utf-8").read().splitlines()
+    assert len(lines) == 2                                   # append-only history, not overwrite
+    for ln in lines:
+        rec = json.loads(ln)
+        assert "generated_at" in rec and "runs" in rec       # each line round-trips + stamped
+
+
+def test_run_matrix_shape_with_stub(monkeypatch):
+    def fake_run_timed(provider, model=None):
+        return {"provider": provider, "model": "m", "pass": True, "total_latency_s": 1.23,
+                "sessions": [{"name": "s1", "pass": True, "latency_s": 0.6,
+                              "valid_rate": 1.0, "grounded_rate": 1.0, "coverage": 1.0, "noise": 0.0}]}
+    monkeypatch.setattr(ed, "run_timed", fake_run_timed)
+    rep = ed.run_matrix(["ollama", "llamacpp"])
+    assert len(rep["runs"]) == 2 and "generated_at" in rep
+    for run in rep["runs"]:
+        assert isinstance(run["total_latency_s"], float) and run["total_latency_s"] >= 0
+        assert all("latency_s" in s for s in run["sessions"])
+
+
+def test_print_matrix_has_latency_and_caveat(capsys):
+    rep = {"generated_at": "2026-06-08T00:00:00+00:00", "runs": [
+        {"provider": "llamacpp", "model": "g", "pass": True, "total_latency_s": 2.0,
+         "sessions": [{"name": "s1", "pass": True, "latency_s": 1.0, "valid_rate": 1.0,
+                       "grounded_rate": 1.0, "coverage": 1.0, "noise": 0.0}]}]}
+    ed.print_matrix(rep)
+    out = capsys.readouterr().out
+    assert "lat=1.00s" in out and "total_lat=2.00s" in out
+    assert "NOT a provider-selection signal" in out          # the n=2 honesty banner
+
+
 def test_print_report_smoke(capsys):
     rep = {"provider": "ollama", "model": "m", "pass": True,
            "sessions": [{"name": "s1", "pass": True, "valid_rate": 1.0, "path_ok_rate": 1.0,
