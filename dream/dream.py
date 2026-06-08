@@ -122,7 +122,15 @@ def _walk_session_events(ses, session_key: str) -> list[dict]:
     return events
 
 
-def fetch_events(driver, session_id: str | None, since: datetime | None):
+def _order_targets(targets: list) -> list:
+    """Item #24: oldest-first session order so a --max-sessions cap drains the
+    backlog FIFO and the next run resumes where this stopped. never-dreamed (wm
+    NULL) sessions are the oldest backlog → first; then ascending watermark; then
+    session_key as a stable tiebreak. Each target is a Record/dict with wm + sk."""
+    return sorted(targets, key=lambda t: (t["wm"] is not None, t["wm"] or "", t["sk"]))
+
+
+def fetch_events(driver, session_id: str | None, since: datetime | None, max_sessions: int | None = None):
     """Return list of (session_key, [event_props, ...]) ordered chronologically.
 
     A session is included if it has at least one event newer than its
@@ -173,9 +181,15 @@ def fetch_events(driver, session_id: str | None, since: datetime | None):
                 "       s.last_dreamed_at AS wm, last.timestamp AS latest"
             ))
 
+        # Item #24: drain the backlog oldest-first so a --max-sessions cap is FIFO
+        # and the next run resumes where this one stopped (the watermark is the
+        # implicit cursor — no new state).
+        targets = _order_targets(targets)
+
         # 2. Walk only sessions that have something new; filter to the events
-        #    past the watermark (and >= --since) in Python.
+        #    past the watermark (and >= --since) in Python. Stop at max_sessions.
         out: list[tuple[str, list[dict]]] = []
+        capped = False
         for t in targets:
             sk, wm, latest = t["sk"], t["wm"], t["latest"]
             if latest is None:
@@ -193,6 +207,12 @@ def fetch_events(driver, session_id: str | None, since: datetime | None):
             if qualifying:
                 qualifying.sort(key=lambda e: e.get("timestamp") or "")
                 out.append((sk, qualifying))
+                if max_sessions is not None and len(out) >= max_sessions:
+                    capped = True
+                    break
+    if capped:
+        print(f"--max-sessions: processed {len(out)} session(s) this run; the rest of the "
+              f"backlog (oldest-first) will be picked up next run.", file=sys.stderr)
     return out
 
 
@@ -844,6 +864,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--session", help="dream over a single session_id")
     ap.add_argument("--since", help="only include events newer than e.g. 24h, 7d, 30m")
+    ap.add_argument("--max-sessions", type=int, dest="max_sessions",
+                    help="cap sessions processed this run (oldest-first; the rest resume next run) "
+                         "— a backlog guard so one run can't dream hundreds of sessions")
     ap.add_argument("--dry-run", action="store_true", help="print memories, don't write")
     ap.add_argument(
         "--provider",
@@ -906,7 +929,7 @@ def main():
             )
             return
 
-        sessions = fetch_events(driver, args.session, since)
+        sessions = fetch_events(driver, args.session, since, max_sessions=getattr(args, "max_sessions", None))
         if not sessions:
             print("nothing to dream about.")
             return
