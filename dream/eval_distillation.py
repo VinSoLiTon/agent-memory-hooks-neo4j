@@ -34,6 +34,11 @@ import memory_types as mt  # noqa: E402  (hooks/)
 
 GROUND_MIN = float(os.environ.get("DREAM_EVAL_GROUNDING_MIN", "0.30"))
 COVERAGE_MIN = float(os.environ.get("DREAM_EVAL_COVERAGE_MIN", "0.66"))
+# Item #11: max tolerated fraction of candidates that are "noise" — valid, grounded,
+# on-topic, but covering NONE of the expected facts (padding). The old scorer only
+# measured recall (coverage), so a provider could pass by emitting 10 vague memories
+# to cover 2 facts; this gates count-discipline ("prefer fewer, sharper memories").
+NOISE_MAX = float(os.environ.get("DREAM_EVAL_NOISE_MAX", "0.50"))
 
 _TOKEN_RE = quality._GROUND_TOKEN_RE
 
@@ -52,6 +57,9 @@ GOLDEN_SESSIONS = [
             {"event_name": "PostToolUse", "tool_name": "Bash", "tool_response": "42 passed in 1.2s"},
         ],
         "facts": [["rust", "engineer"], ["unsafe", "approval"], ["incident", "sprint"]],
+        # The cargo-test output is ephemera — a good distillation must NOT
+        # memorialize "42 passed in 1.2s" as a memory.
+        "negatives": [["cargo", "passed"], ["1.2s"]],
     },
     {
         "name": "deploy-pref",
@@ -61,25 +69,57 @@ GOLDEN_SESSIONS = [
                        "I prefer terse PR descriptions."},
         ],
         "facts": [["staging", "pipeline"], ["terse", "descriptions"]],
+        "negatives": [],
+    },
+    # +2 fixtures covering kinds beyond preference/constraint (#11 descope: a
+    # focused widening toward the rest of the 15-type vocabulary, with ephemera
+    # negatives, not the full 12-kind expansion).
+    {
+        "name": "incident-postmortem",
+        "events": [
+            {"event_name": "UserPromptSubmit",
+             "prompt": "Postmortem: the nightly cron silently failed for a week because the "
+                       "Docker container had no restart policy. Lesson: always set "
+                       "restart=unless-stopped on long-running services."},
+            {"event_name": "PostToolUse", "tool_name": "Bash", "tool_response": "container exited 137"},
+        ],
+        "facts": [["restart", "unless-stopped"], ["nightly", "failed"]],
+        "negatives": [["exited", "137"]],
+    },
+    {
+        "name": "build-procedure",
+        "events": [
+            {"event_name": "UserPromptSubmit",
+             "prompt": "To release: bump the version, run the full pytest suite, then tag and "
+                       "push. Never release on a red build."},
+        ],
+        "facts": [["release", "version"], ["pytest", "suite"]],
+        "negatives": [],
     },
 ]
 
 
+def _body_tokens(candidate) -> set:
+    return set(_TOKEN_RE.findall((candidate.get("content") or "").lower()))
+
+
+def _matches(candidate, token_set) -> bool:
+    """True if the candidate body contains every token of `token_set`."""
+    return {t.lower() for t in token_set} <= _body_tokens(candidate)
+
+
 def _covers(candidates: list, fact_tokens: list) -> bool:
     """True if some candidate body contains every token of `fact_tokens`."""
-    want = {t.lower() for t in fact_tokens}
-    for c in candidates:
-        body = set(_TOKEN_RE.findall((c.get("content") or "").lower()))
-        if want <= body:
-            return True
-    return False
+    return any(_matches(c, fact_tokens) for c in candidates)
 
 
 def score(candidates: list, transcript: str, expected: dict,
-          ground_min: float = GROUND_MIN, coverage_min: float = COVERAGE_MIN) -> dict:
+          ground_min: float = GROUND_MIN, coverage_min: float = COVERAGE_MIN,
+          noise_max: float = NOISE_MAX) -> dict:
     """Deterministically score a candidate memory set against a fixture. Returns
-    rates for the structural checks + grounding + fact coverage, and an overall
-    `pass`. Empty candidate set fails (coverage 0)."""
+    rates for the structural checks + grounding + fact coverage + count-discipline
+    (precision / noise / negative_hits), and an overall `pass`. Empty candidate set
+    fails (coverage 0)."""
     n = len(candidates)
     valid = path_ok = kind_ok = grounded = 0
     for c in candidates:
@@ -95,8 +135,17 @@ def score(candidates: list, transcript: str, expected: dict,
         if quality.grounding_score(content, transcript) >= ground_min:
             grounded += 1
     facts = expected.get("facts") or []
+    negatives = expected.get("negatives") or []
     covered = sum(1 for f in facts if _covers(candidates, f))
     coverage = covered / len(facts) if facts else 1.0
+
+    # Count-discipline (item #11): a candidate is "useful" if it covers >=1 expected
+    # fact. noise = fraction that cover NONE (padding). negative_hits = candidates
+    # memorializing declared ephemera. Only judge noise when the fixture declares
+    # facts (else there's nothing to be useful against → no penalty).
+    useful = sum(1 for c in candidates if any(_matches(c, f) for f in facts))
+    negative_hits = sum(1 for c in candidates if any(_matches(c, neg) for neg in negatives))
+    noise = (n - useful) / n if (n and facts) else 0.0
 
     def rate(x):
         return (x / n) if n else 0.0
@@ -108,6 +157,9 @@ def score(candidates: list, transcript: str, expected: dict,
         "kind_ok_rate": rate(kind_ok),
         "grounded_rate": rate(grounded),
         "coverage": coverage,
+        "precision": rate(useful),
+        "noise": noise,
+        "negative_hits": negative_hits,
     }
     rates["pass"] = bool(
         n > 0
@@ -116,6 +168,8 @@ def score(candidates: list, transcript: str, expected: dict,
         and rates["kind_ok_rate"] == 1.0
         and rates["grounded_rate"] == 1.0
         and coverage >= coverage_min
+        and noise <= noise_max
+        and negative_hits == 0
     )
     return rates
 
@@ -155,8 +209,9 @@ def print_report(rep: dict) -> None:
             print(f"  [ERR ] {s['name']}: {s['error']}")
             continue
         mark = "PASS" if s["pass"] else "FAIL"
-        print(f"  [{mark}] {s['name']:<14} valid={s['valid_rate']:.2f} path={s['path_ok_rate']:.2f} "
-              f"kind={s['kind_ok_rate']:.2f} grounded={s['grounded_rate']:.2f} coverage={s['coverage']:.2f}")
+        print(f"  [{mark}] {s['name']:<20} valid={s['valid_rate']:.2f} path={s['path_ok_rate']:.2f} "
+              f"kind={s['kind_ok_rate']:.2f} grounded={s['grounded_rate']:.2f} "
+              f"coverage={s['coverage']:.2f} noise={s.get('noise', 0.0):.2f} neg={s.get('negative_hits', 0)}")
     print(f"overall: {'PASS' if rep['pass'] else 'FAIL'}")
 
 
