@@ -1927,6 +1927,81 @@ def cmd_stats(_: argparse.Namespace) -> int:
     return 0
 
 
+# Neo4j stores embedding lists as 8-byte doubles; this is an ESTIMATE (ignores
+# node/property overhead and the ~1x duplication in the HNSW vector index).
+_EMBED_BYTES_PER_FLOAT = 8
+
+
+def _embedding_bytes(floats: int) -> int:
+    return int(floats or 0) * _EMBED_BYTES_PER_FLOAT
+
+
+def _human_bytes(n: int) -> str:
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def cmd_storage(args: argparse.Namespace) -> int:
+    """Item #15 — on-demand storage accounting: WHERE the bytes accumulate, so a
+    pruning decision isn't blind. Read-only estimates (kept OFF the health path).
+
+    Event bytes are aggregated GLOBALLY and per-client (events carry a `client`
+    property) rather than per-session — the `(s)-[:FIRST_EVENT|NEXT*0..]->(e)`
+    chain traversal OOMs Neo4j's transaction-memory pool on long sessions (the
+    same hard rule dream._walk_session_events documents), so it's avoided here."""
+    with driver() as d, d.session() as s:
+        buckets = [dict(r) for r in s.run(
+            "MATCH (m:Memory) WITH split(m.path,'/')[0] AS bucket, "
+            "sum(size(coalesce(m.content,''))) AS chars, count(*) AS n "
+            "RETURN bucket, chars, n ORDER BY chars DESC")]
+        emb = s.run("MATCH (m:Memory) WHERE m.embedding IS NOT NULL "
+                    "RETURN count(m) AS n, sum(size(m.embedding)) AS floats").single()
+        # chain-free: events carry their own heavy text fields + a client tag.
+        _ev_bytes = ("size(coalesce(e.tool_response,'')) + size(coalesce(e.tool_input,'')) "
+                     "+ size(coalesce(e.transcript,'')) + size(coalesce(e.last_assistant_message,'')) "
+                     "+ size(coalesce(e.prompt,''))")
+        ev = s.run(f"MATCH (e:Event) RETURN count(e) AS n, sum({_ev_bytes}) AS bytes").single()
+        ev_by_client = [dict(r) for r in s.run(
+            f"MATCH (e:Event) WITH coalesce(e.client,'?') AS client, "
+            f"sum({_ev_bytes}) AS bytes, count(e) AS evs "
+            f"RETURN client, bytes, evs ORDER BY bytes DESC")]
+    mem_chars = sum(b["chars"] or 0 for b in buckets)
+    emb_bytes = _embedding_bytes((emb or {}).get("floats"))
+    event_bytes = (ev or {}).get("bytes") or 0
+    total = mem_chars + emb_bytes + event_bytes
+
+    if getattr(args, "json", False):
+        import json as _json
+        print(_json.dumps({
+            "memory_bytes_by_bucket": buckets,
+            "embedding": {"count": (emb or {}).get("n", 0), "bytes_est": emb_bytes},
+            "event_bytes_total": event_bytes,
+            "event_bytes_by_client": ev_by_client,
+            "reclaimable_event_bytes": None,   # requires item #5's tiered tier
+            "totals_est": {"memory_chars": mem_chars, "embedding_bytes": emb_bytes,
+                           "event_bytes": event_bytes, "grand_total": total},
+        }, indent=2))
+        return 0
+
+    print("Storage accounting (all numbers are ESTIMATES)\n")
+    print("Memory text by bucket:")
+    for b in buckets:
+        print(f"  {b['bucket']:<12} {_human_bytes(b['chars']):>10}  ({b['n']} memories) (est.)")
+    print(f"\nEmbeddings: {(emb or {}).get('n', 0)} vectors  ~{_human_bytes(emb_bytes)} "
+          f"(+ ~1x in the HNSW vector index) (est.)")
+    print(f"\nEvent text: {(ev or {}).get('n', 0)} events  ~{_human_bytes(event_bytes)} (est.)")
+    print("  by client:")
+    for c in ev_by_client:
+        print(f"    {c['client']:<12} {_human_bytes(c['bytes']):>10}  ({c['evs']} events) (est.)")
+    print("\nreclaimable: n/a (requires `njhook prune-events`, item #5)")
+    print(f"\nGrand total (memory text + event text + embeddings): ~{_human_bytes(total)} (est.)")
+    return 0
+
+
 def cmd_dream_stats(args: argparse.Namespace) -> int:
     """Item #8: the recent per-nightly run ledger (:NightlyRun) — sessions seen,
     how many yielded, how many fell back to the remote provider, memories written,
@@ -2053,6 +2128,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pst = sub.add_parser("stats", help="counts by client / kind")
     pst.set_defaults(fn=cmd_stats)
+
+    pso = sub.add_parser("storage", help="on-demand byte accounting: where storage accumulates (estimates)")
+    pso.add_argument("--top", type=int, default=10, help="how many heaviest sessions to list (default 10)")
+    pso.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    pso.set_defaults(fn=cmd_storage)
 
     pds = sub.add_parser("dream-stats", help="recent nightly run ledger (:NightlyRun): yield, fallback, written")
     pds.add_argument("--limit", type=int, default=10, help="how many recent runs to show (default 10)")
