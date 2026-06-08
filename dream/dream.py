@@ -419,7 +419,62 @@ def attribute_events(content: str, events: list[dict], k: int, min_overlap: int)
     return [eid for _, eid in scored[:k]]
 
 
-def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None, provider: str = "unknown", model: str = "unknown", events: list[dict] | None = None, contradiction_judge=None, find_candidates=None, usage: dict | None = None, cost: float | None = None) -> int:
+def _local_merge_pass(driver, valid: list[dict], provider: str, model: str, provider_fn=None) -> int:
+    """Item #16 — for LOCAL providers (llamacpp/ollama) only, when a candidate
+    collides with an EXISTING active memory at the same path AND the body differs,
+    make ONE LLM merge call (prior body + new body) and replace the candidate's
+    content IN PLACE. Local models see existing memories as paths-only, so a
+    same-path UPDATE otherwise clobbers the accumulated body (recoverable via
+    MemoryRevision, but a fidelity regression). Default-OFF (DREAM_LOCAL_MERGE=1),
+    capped (DREAM_LOCAL_MERGE_MAX, default 10). Per-collision failure falls back to
+    the raw candidate (today's clobber) — never crashes. NO delete/add/noop, NO
+    path-rewrite. Returns the number merged. `provider_fn` is injectable for tests;
+    else resolved via get_provider."""
+    if os.environ.get("DREAM_LOCAL_MERGE") != "1" or provider not in ("llamacpp", "ollama"):
+        return 0
+    if provider_fn is None:
+        try:
+            provider_fn = get_provider(provider)[1]
+        except Exception:
+            return 0
+    cap = int(os.environ.get("DREAM_LOCAL_MERGE_MAX", "10"))
+    paths = [m["path"] for m in valid]
+    try:
+        with driver.session() as _ses:
+            stored = {r["p"]: r["c"] for r in _ses.run(
+                "MATCH (m:Memory) WHERE m.path IN $paths "
+                "AND coalesce(m.status, 'active') = 'active' "
+                "RETURN m.path AS p, m.content AS c", paths=paths)}
+    except Exception:
+        return 0
+    merged = 0
+    for m in valid:
+        if merged >= cap:
+            break
+        prior = stored.get(m["path"])
+        if not prior or prior == m["content"]:
+            continue
+        try:
+            out = consolidate_mod._merge_pair(provider_fn, model, m["path"], prior, m["path"], m["content"])
+            cand = {**m, "content": out.get("content") or ""}
+            # the merge runs after validate_batch, so re-validate the merged body —
+            # a malformed local-model merge must NOT bypass the quality gate; on any
+            # problem keep the raw new body (today's clobber).
+            if cand["content"] and quality_mod.validate_memory(cand) == []:
+                m["content"] = cand["content"]   # keep the path fixed; take merged body only
+                merged += 1
+            else:
+                print(f"  local-merge: {m['path']} merged body invalid; keeping new body", file=sys.stderr)
+        except Exception as e:
+            print(f"  local-merge: {m['path']} merge failed ({type(e).__name__}); keeping new body",
+                  file=sys.stderr)
+    if merged:
+        print(f"  local-merge: merged {merged} same-path collision(s) into the prior body "
+              f"(DREAM_LOCAL_MERGE)", file=sys.stderr)
+    return merged
+
+
+def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None, provider: str = "unknown", model: str = "unknown", events: list[dict] | None = None, contradiction_judge=None, find_candidates=None, usage: dict | None = None, cost: float | None = None, provider_fn=None) -> int:
     """Upsert memories and advance the session's last_dreamed_at watermark.
 
     `watermark` is the timestamp of the latest event we just dreamed over —
@@ -443,6 +498,13 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
     valid = quality_mod.validate_batch(
         m for m in memories if m.get("path") and m.get("content")
     )
+
+    # Item #16 — local same-path body merge (default-OFF, local providers only).
+    # Runs BEFORE the gates/embeds/write so the merged body flows through grounding,
+    # embeddings and the MemoryRevision snapshot. Replaces the candidate content in
+    # place; never deletes/renames.
+    if valid:
+        _local_merge_pass(driver, valid, provider, model, provider_fn)
 
     # Phase D2: A-MAC grounding admission gate. Score each memory's overlap with
     # the source transcript; a NEW memory below threshold is routed to
@@ -903,7 +965,10 @@ def main():
                 if not args.dry_run:
                     watermark = events[-1].get("timestamp")
                     est = estimate_cost(used_name, used_model, used_usage)
-                    n = write_memories(driver, session_key, memories, watermark, project=project, provider=used_name, model=used_model, events=events, usage=used_usage, cost=est)
+                    # item #16: pass the primary provider_fn for the local same-path
+                    # merge. It only fires when used_name is the local primary (the
+                    # gate skips remote providers), so the fn matches the provider.
+                    n = write_memories(driver, session_key, memories, watermark, project=project, provider=used_name, model=used_model, events=events, usage=used_usage, cost=est, provider_fn=(provider_fn if used_name == provider_name else None))
                     stats["written"] += n
                     cost_note = f", est ${est:.4f}" if est else ""
                     print(f"\n  wrote/updated {n} memories (via {used_name}{cost_note}); watermark -> {watermark}")
