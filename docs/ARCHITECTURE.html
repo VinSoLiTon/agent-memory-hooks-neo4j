@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>njhook — System Architecture &amp; Operations</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  window.addEventListener('DOMContentLoaded', function () {
+    if (window.mermaid) {
+      mermaid.initialize({ startOnLoad: true, theme: 'base', securityLevel: 'loose',
+        themeVariables: {
+          primaryColor: '#eef4ff', primaryBorderColor: '#3a6ea5', primaryTextColor: '#10243e',
+          lineColor: '#5a6b82', fontFamily: 'Inter, Segoe UI, system-ui, sans-serif', fontSize: '14px'
+        }});
+    }
+  });
+</script>
+<style>
+  :root{
+    --bg:#f7f8fb; --panel:#ffffff; --ink:#1b2433; --muted:#5c6b82; --line:#e1e6ef;
+    --accent:#2f6fb0; --accent2:#7a3aa5; --good:#1f8b4c; --warn:#b8860b; --bad:#c0392b;
+    --sidebar:#10243e; --sidebar-ink:#cdd9ea; --code-bg:#0f1b2d; --code-ink:#dbe6f5;
+    --chip:#eef4ff;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.62 Inter,Segoe UI,system-ui,-apple-system,sans-serif}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  /* layout */
+  .wrap{display:flex;min-height:100vh}
+  nav.side{width:280px;flex:0 0 280px;background:var(--sidebar);color:var(--sidebar-ink);
+    position:sticky;top:0;height:100vh;overflow-y:auto;padding:22px 18px}
+  nav.side h1{font-size:18px;color:#fff;margin:0 0 2px}
+  nav.side .tag{font-size:11.5px;color:#7f93b0;letter-spacing:.5px;text-transform:uppercase}
+  nav.side ol{list-style:none;margin:18px 0 0;padding:0;counter-reset:s}
+  nav.side ol>li{margin:1px 0}
+  nav.side ol>li>a{display:block;padding:6px 10px;border-radius:7px;color:var(--sidebar-ink);font-size:13.5px}
+  nav.side ol>li>a:hover{background:#1c355a;text-decoration:none}
+  nav.side ol ul{list-style:none;margin:0 0 6px 8px;padding:0;border-left:1px solid #29405f}
+  nav.side ol ul li a{display:block;padding:3px 10px;color:#9fb2cd;font-size:12.5px}
+  nav.side ol ul li a:hover{color:#fff;text-decoration:none}
+  main{flex:1;min-width:0;padding:38px 46px 120px;max-width:1180px}
+  /* hero */
+  .hero{background:linear-gradient(135deg,#10243e,#244b78);color:#fff;border-radius:16px;
+    padding:30px 34px;margin-bottom:30px;box-shadow:0 10px 30px rgba(16,36,62,.18)}
+  .hero h1{margin:0 0 8px;font-size:30px;letter-spacing:-.4px}
+  .hero p{margin:0;color:#cfe0f5;font-size:15.5px;max-width:760px}
+  .badges{margin-top:18px;display:flex;flex-wrap:wrap;gap:8px}
+  .badge{background:rgba(255,255,255,.13);border:1px solid rgba(255,255,255,.22);
+    padding:4px 11px;border-radius:999px;font-size:12.5px;color:#eaf2ff}
+  /* sections */
+  section{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:26px 30px;margin:0 0 26px;box-shadow:0 1px 2px rgba(20,30,50,.03)}
+  section>h2{margin:0 0 4px;font-size:23px;letter-spacing:-.3px;color:#10243e;
+    display:flex;align-items:center;gap:10px}
+  section>h2 .num{background:var(--accent);color:#fff;font-size:14px;width:30px;height:30px;
+    border-radius:8px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 30px}
+  h3{margin:26px 0 8px;font-size:17.5px;color:#1b3a5e;border-bottom:2px solid var(--chip);padding-bottom:5px}
+  h4{margin:18px 0 6px;font-size:14.5px;color:#2b3b52;text-transform:uppercase;letter-spacing:.4px}
+  p{margin:9px 0}
+  .lead{color:var(--muted);font-size:15px}
+  /* tables */
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.3px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:#eef3fa;color:#1b3a5e;font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:.3px}
+  tr:nth-child(even) td{background:#fafbfe}
+  td code,th code{font-size:12.3px}
+  /* code */
+  code{font-family:"JetBrains Mono",Consolas,Menlo,monospace;background:#eef1f6;
+    color:#21364f;padding:1px 5px;border-radius:5px;font-size:12.8px}
+  pre{background:var(--code-bg);color:var(--code-ink);padding:14px 16px;border-radius:10px;
+    overflow-x:auto;font-size:12.8px;line-height:1.55;margin:12px 0}
+  pre code{background:none;color:inherit;padding:0}
+  /* callouts */
+  .note,.warn,.good,.rule{border-radius:10px;padding:12px 16px;margin:14px 0;font-size:13.6px;border:1px solid}
+  .note{background:#eef4ff;border-color:#c5d9f3}
+  .warn{background:#fff7e6;border-color:#f0d79a}
+  .good{background:#eaf7ef;border-color:#bfe3cd}
+  .rule{background:#fdeeee;border-color:#f3c6c1}
+  .note b,.warn b,.good b,.rule b{display:block;margin-bottom:3px}
+  .rule b{color:var(--bad)} .warn b{color:#9a6b00} .good b{color:var(--good)} .note b{color:var(--accent)}
+  /* diagram frame */
+  .diagram{background:#fbfcfe;border:1px solid var(--line);border-radius:12px;padding:16px;margin:16px 0;text-align:center}
+  .diagram .cap{font-size:12px;color:var(--muted);margin-top:8px;text-align:center}
+  .mermaid{display:flex;justify-content:center}
+  /* chips */
+  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11.5px;font-weight:600;border:1px solid}
+  .pill.active{background:#eaf7ef;color:#1f8b4c;border-color:#bfe3cd}
+  .pill.pending{background:#fff7e6;color:#9a6b00;border-color:#f0d79a}
+  .pill.rejected{background:#fdeeee;color:#c0392b;border-color:#f3c6c1}
+  .pill.superseded{background:#eef1f6;color:#5c6b82;border-color:#d6deea}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:920px){.grid2{grid-template-columns:1fr}nav.side{display:none}main{padding:22px}}
+  .kv{font-size:13px;margin:3px 0}
+  .kv b{color:#1b3a5e}
+  hr.soft{border:none;border-top:1px dashed var(--line);margin:22px 0}
+  .toc-top{font-size:12px;color:var(--muted);margin-top:6px}
+  footer{color:var(--muted);font-size:12.5px;text-align:center;padding:30px}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);justify-content:center;margin-top:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav class="side">
+  <h1>njhook</h1>
+  <div class="tag">Agent Memory · Neo4j</div>
+  <ol>
+    <li><a href="#overview">1 · System Overview</a></li>
+    <li><a href="#datamodel">2 · Data Model (Graph)</a></li>
+    <li><a href="#capture">3 · Capture Path</a></li>
+    <li><a href="#dream">4 · Dream Phase</a>
+      <ul>
+        <li><a href="#dream-pipeline">Pipeline</a></li>
+        <li><a href="#dream-gates">Admission Gates</a></li>
+        <li><a href="#dream-providers">Providers &amp; Cost</a></li>
+        <li><a href="#dream-sched">Watermark &amp; Backlog</a></li>
+      </ul>
+    </li>
+    <li><a href="#recall">5 · Recall Engine</a></li>
+    <li><a href="#review">6 · Review &amp; Governance</a></li>
+    <li><a href="#interfaces">7 · Interfaces</a></li>
+    <li><a href="#config">8 · Configuration</a></li>
+    <li><a href="#ops">9 · Operations Runbook</a></li>
+    <li><a href="#appendix">A · Glossary &amp; Hard Rules</a></li>
+  </ol>
+</nav>
+<main>
+
+<div class="hero">
+  <h1>njhook — Architecture &amp; Operations</h1>
+  <p>A hybrid <b>agent-memory system</b> on top of Neo4j. Hooks capture session events from multiple
+  coding agents; a nightly <b>“dream”</b> phase distills them into durable markdown memories; a hybrid
+  <b>recall</b> engine injects the right memories back into future sessions — across Claude Code, Codex,
+  Cursor, and Gemini.</p>
+  <div class="badges">
+    <span class="badge">Neo4j property graph</span>
+    <span class="badge">Capture → Dream → Recall</span>
+    <span class="badge">Local-first (llama.cpp) + hosted fallback</span>
+    <span class="badge">Vector + Lucene hybrid recall</span>
+    <span class="badge">Lifecycle &amp; audit governance</span>
+    <span class="badge">CLI · REST · MCP · Dashboard</span>
+  </div>
+</div>
+
+<p class="lead">This document is a self-contained reference for engineers and agents new to the system.
+Diagrams render via Mermaid (CDN); every table and flow is grounded in the source modules named in each
+section. Read §1 for the mental model, then dive into the phase that concerns you.</p>
+
+<!-- ============================================================= 1 -->
+<section id="overview">
+  <h2><span class="num">1</span> System Overview</h2>
+  <p>njhook closes a <b>three-phase memory loop</b>. Every interaction an agent has is captured as an
+  immutable event; periodically those events are distilled into a small set of durable, typed memories;
+  and at the start of (and during) every later session the most relevant memories are recalled and
+  injected back into the agent’s context.</p>
+
+  <div class="diagram">
+    <div class="mermaid">
+flowchart LR
+  subgraph CL[Agents / Clients]
+    A1[Claude Code]:::c
+    A2[Codex]:::c
+    A3[Cursor]:::c
+    A4[Gemini]:::c
+  end
+  subgraph CAP[1 · CAPTURE]
+    LE[log_event.py<br/>hot path]:::p
+    SP[(spool<br/>NDJSON + DLQ)]:::store
+    IN[ingest.py<br/>replay worker]:::p
+  end
+  subgraph DB["Neo4j property graph"]
+    EV["(:Session) / (:Event) chain"]:::g
+    ME["(:Memory) + (:MemoryRevision)"]:::g
+  end
+  subgraph DR[2 · DREAM nightly]
+    DI[dream.py<br/>distill]:::p
+    GATES[admission gates<br/>ground · critique · poison · contradiction]:::p
+    PR[providers<br/>llama.cpp / Anthropic]:::p
+  end
+  subgraph RC[3 · RECALL]
+    RE[recall.py<br/>vector + lexical hybrid]:::p
+    INJ[inject_memory.py<br/>context block]:::p
+  end
+  subgraph UI[Interfaces]
+    CLI[njhook CLI]:::i
+    API[REST API]:::i
+    MCP[MCP server]:::i
+    DASH[Flask dashboard]:::i
+  end
+
+  A1 & A2 & A3 & A4 -->|hook events| LE
+  LE -->|direct| EV
+  LE -->|spool mode| SP --> IN --> EV
+  EV --> DI --> PR
+  DI --> GATES --> ME
+  ME --> RE --> INJ -->|SessionStart / prompt| A1 & A2 & A3 & A4
+  ME --- CLI & API & MCP & DASH
+  classDef c fill:#eaf2ff,stroke:#3a6ea5,color:#10243e;
+  classDef p fill:#eef4ff,stroke:#2f6fb0,color:#10243e;
+  classDef g fill:#f3ecfb,stroke:#7a3aa5,color:#2a1840;
+  classDef store fill:#fff7e6,stroke:#c79a2a,color:#5a4500;
+  classDef i fill:#eaf7ef,stroke:#1f8b4c,color:#0f3a22;
+    </div>
+    <div class="cap">Figure 1 — The capture → dream → recall loop and the four read/write interfaces.</div>
+  </div>
+
+  <h3>Component inventory</h3>
+  <table>
+    <thead><tr><th>Package</th><th>Module</th><th>Responsibility</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="9"><code>hooks/</code></td><td><code>log_event.py</code></td><td>Capture hot path — scrub, build the event node, append to the session chain (direct) or spool.</td></tr>
+      <tr><td><code>spool.py</code></td><td>Durable append-only NDJSON spool + dead-letter queue; backlog/DLQ-rate metrics.</td></tr>
+      <tr><td><code>ingest.py</code></td><td>Idempotent replay worker — drains the spool into Neo4j.</td></tr>
+      <tr><td><code>event_schema.py</code></td><td>Canonical event schema (v2), read-time upcasting, OTel GenAI field map.</td></tr>
+      <tr><td><code>recall.py</code></td><td>Hybrid retrieval (vector ∪ fulltext), RRF ranking, as-of time-travel, lineage, worklists.</td></tr>
+      <tr><td><code>inject_memory.py</code></td><td>Renders the recalled memory block for SessionStart / prompt injection; access tracking.</td></tr>
+      <tr><td><code>review.py</code></td><td>Lifecycle state machine: approve / reject / supersede / contradiction flagging / auto-resolve.</td></tr>
+      <tr><td><code>audit.py</code></td><td>Append-only mutation log (<code>:MemoryRevision</code>), content-vs-status-only ops.</td></tr>
+      <tr><td><code>privacy.py</code>, <code>render.py</code>, <code>memory_types.py</code>, <code>embeddings.py</code>, <code>schema.py</code></td><td>Secret scrubbing &amp; egress policy; agent-file renderers; typed <code>kind</code> vocabulary; embedding providers; constraints/indexes.</td></tr>
+      <tr><td rowspan="6"><code>dream/</code></td><td><code>dream.py</code></td><td>Nightly orchestrator: fetch → extract → gates → write, with watermark + backlog control.</td></tr>
+      <tr><td><code>quality.py</code></td><td>Structural validation, grounding score, anti-poisoning (novelty / directive / thin).</td></tr>
+      <tr><td><code>providers.py</code></td><td>Provider registry (llama.cpp / Anthropic / OpenAI / Ollama), cost &amp; n_ctx logic.</td></tr>
+      <tr><td><code>judge.py</code> / <code>critic.py</code></td><td>LLM contradiction judge (False-on-error) and faithfulness critic (True-on-error).</td></tr>
+      <tr><td><code>consolidate.py</code></td><td>Vector-similarity pairwise memory merge; embedding strip on supersede.</td></tr>
+      <tr><td><code>prune_events.py</code>, <code>eval_*.py</code>, <code>run_dream.cmd</code></td><td>Tier-1 event pruning; retrieval/distillation eval harness; nightly multi-stage driver.</td></tr>
+      <tr><td><code>cli/</code></td><td><code>njhook.py</code></td><td>~30-command operator CLI (inspection, lifecycle, data, eval, ops).</td></tr>
+      <tr><td><code>api/</code></td><td><code>server.py</code>, <code>mcp_server.py</code></td><td>Loopback REST API; MCP server exposing 4 tools.</td></tr>
+      <tr><td><code>dashboard/</code></td><td><code>app.py</code></td><td>Read-mostly Flask UI (memories, sessions, review, stats, nightly ledger).</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note"><b>Design stance</b>
+  Local-first and non-destructive. The default dream/embed provider is a local llama.cpp stack; hosted
+  models are an opt-in fallback. Nothing is hard-deleted on the write path — memories transition through
+  lifecycle states and every mutation is captured in an immutable revision chain.</div>
+</section>
+
+<!-- ============================================================= 2 -->
+<section id="datamodel">
+  <h2><span class="num">2</span> Data Model — the Neo4j property graph</h2>
+  <p>All state lives in one Neo4j graph. Sessions own an ordered <b>linked list</b> of events; memories are
+  distilled nodes keyed by a file-like <code>path</code>; provenance, revisions and conflicts are edges.</p>
+
+  <div class="diagram">
+    <div class="mermaid">
+flowchart TB
+  S["(:Session)<br/>session_key = client:session_id<br/>last_dreamed_at"]:::s
+  E1["(:Event)"]:::e
+  E2["(:Event)"]:::e
+  E3["(:Event)"]:::e
+  M["(:Memory)<br/>path · content · status<br/>kind · importance · embedding"]:::m
+  REV["(:MemoryRevision)<br/>ts · operation · actor<br/>status · content_snapshot"]:::r
+  DRN["(:DreamRun)<br/>provider · tokens · est_cost_usd"]:::d
+  M2["(:Memory) other"]:::m
+
+  S -->|FIRST_EVENT| E1
+  E1 -->|NEXT| E2 -->|NEXT| E3
+  S -->|LATEST_EVENT| E3
+  S -->|DREAMED| M
+  M -->|DERIVED_FROM| S
+  M -->|EXTRACTED_FROM| E2
+  DRN -->|WROTE| M
+  REV -->|VERSION_OF| M
+  M -->|SUPERSEDED_BY| M2
+  M -.->|CONTRADICTS| M2
+  classDef s fill:#eaf2ff,stroke:#3a6ea5,color:#10243e;
+  classDef e fill:#eef4ff,stroke:#2f6fb0,color:#10243e;
+  classDef m fill:#f3ecfb,stroke:#7a3aa5,color:#2a1840;
+  classDef r fill:#fff7e6,stroke:#c79a2a,color:#5a4500;
+  classDef d fill:#eaf7ef,stroke:#1f8b4c,color:#0f3a22;
+    </div>
+    <div class="cap">Figure 2 — Core nodes &amp; relationships. Event chains are a singly-linked list (see the hard rule below).</div>
+  </div>
+
+  <h3>Node labels</h3>
+  <table>
+    <thead><tr><th>Label</th><th>Unique key</th><th>Key properties</th></tr></thead>
+    <tbody>
+      <tr><td><code>:Session</code></td><td><code>session_key</code> (= <code>client:session_id</code>)</td><td><code>session_id, client, created_at, last_dreamed_at</code></td></tr>
+      <tr><td><code>:Event</code></td><td><code>event_id</code></td><td><code>event_name, client, app_id, timestamp, cwd, tool_name, tool_input, tool_response, prompt, model, source, turn_id, transcript_path, sensitivity</code></td></tr>
+      <tr><td><code>:Memory</code></td><td><code>path</code> (e.g. <code>profile/role.md</code>)</td><td><code>content, status, kind, importance(1–10), created_by, updated_at, ingested_at, project, archived, valid_from, valid_until, embedding, embedding_model, embedding_dim, access_count, last_accessed_at, reviewed_at</code></td></tr>
+      <tr><td><code>:MemoryRevision</code></td><td><code>ts</code> (per memory)</td><td><code>operation, actor, status (prior), content_snapshot, rejected_content, reason</code></td></tr>
+      <tr><td><code>:DreamRun</code></td><td><code>run_id</code> (= <code>session_key@ts</code>)</td><td><code>ts, provider, model, input_tokens, output_tokens, est_cost_usd</code></td></tr>
+      <tr><td><code>:NightlyRun</code></td><td><code>ts</code></td><td><code>provider, model, sessions_seen, with_yield, fallback_fired, written, skipped_sensitive, duration_ms</code></td></tr>
+      <tr><td><code>:RehearsalRun</code></td><td><code>ts</code></td><td><code>ok, detail</code> — backup/restore round-trip drill (Phase H4)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Relationship types</h3>
+  <table>
+    <thead><tr><th>Type</th><th>Direction</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>FIRST_EVENT</code></td><td>Session → Event</td><td>Head of the session’s event chain.</td></tr>
+      <tr><td><code>NEXT</code></td><td>Event → Event</td><td>Chronological link between consecutive events.</td></tr>
+      <tr><td><code>LATEST_EVENT</code></td><td>Session → Event</td><td>Tail pointer (rewritten on every append).</td></tr>
+      <tr><td><code>DREAMED</code></td><td>Session → Memory</td><td>This session contributed to the memory.</td></tr>
+      <tr><td><code>DERIVED_FROM</code></td><td>Memory → Session</td><td>Inverse provenance link.</td></tr>
+      <tr><td><code>EXTRACTED_FROM</code></td><td>Memory → Event</td><td>Top-K source events (token-overlap attribution).</td></tr>
+      <tr><td><code>WROTE</code></td><td>DreamRun → Memory</td><td>Which run created/updated the memory (with cost).</td></tr>
+      <tr><td><code>VERSION_OF</code></td><td>MemoryRevision → Memory</td><td>An audit entry belongs to a memory.</td></tr>
+      <tr><td><code>SUPERSEDED_BY</code></td><td>Memory → Memory</td><td>Loser of a conflict points at the winner (kept for lineage).</td></tr>
+      <tr><td><code>CONTRADICTS</code></td><td>Memory ↔ Memory</td><td>Flagged conflict awaiting resolution.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Constraints &amp; indexes <span style="font-weight:400;font-size:13px;color:var(--muted)">(<code>hooks/schema.py</code>; vector index created by <code>dream.py</code>)</span></h3>
+  <table>
+    <thead><tr><th>Name</th><th>Type</th><th>On</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>— (implicit)</td><td>UNIQUE</td><td><code>Session.session_key</code></td><td>One node per client+session.</td></tr>
+      <tr><td>— (implicit)</td><td>UNIQUE</td><td><code>Event.event_id</code></td><td>Idempotent capture / replay.</td></tr>
+      <tr><td>— (implicit)</td><td>UNIQUE</td><td><code>Memory.path</code></td><td>One current node per memory path.</td></tr>
+      <tr><td><code>session_id_lookup</code></td><td>RANGE</td><td><code>Session.session_id</code></td><td>Lookup by raw id.</td></tr>
+      <tr><td><code>memory_fulltext</code></td><td>FULLTEXT</td><td><code>Memory(content, path)</code></td><td>Lucene lexical recall channel.</td></tr>
+      <tr><td><code>memory_project</code></td><td>RANGE</td><td><code>Memory.project</code></td><td>Project-scoped recall.</td></tr>
+      <tr><td><code>memory_status</code></td><td>RANGE</td><td><code>Memory.status</code></td><td>Lifecycle filtering.</td></tr>
+      <tr><td><code>memory_valid_until</code></td><td>RANGE</td><td><code>Memory.valid_until</code></td><td>Bi-temporal <code>--as-of</code> queries.</td></tr>
+      <tr><td><code>event_fulltext</code></td><td>FULLTEXT</td><td><code>Event(prompt, tool_response)</code></td><td>Optional raw-event retrieval.</td></tr>
+      <tr><td><code>memory_embeddings</code></td><td>VECTOR (HNSW, cosine)</td><td><code>Memory.embedding</code></td><td>ANN vector recall; dimension fixed at first write.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="rule"><b>HARD RULE — never traverse the event chain with a variable-length path</b>
+  <code>MATCH (s)-[:FIRST_EVENT|NEXT*0..]-&gt;(e)</code> materializes a path for <i>every</i> reachable event and
+  blows Neo4j’s transaction-memory pool (<code>MemoryPoolOutOfMemoryError</code>, ~2.7&nbsp;GiB) on any session past
+  ~150 events. Always walk the linked list one <code>NEXT</code> hop at a time (<code>_walk_session_events</code>), with a
+  <code>seen</code> set to guard against corrupted/branching chains. Also: Neo4j cannot <code>MERGE</code> on a <code>null</code>
+  property value — status-only audit ops therefore carry <code>content_snapshot = null</code> and key revisions on <code>ts</code>.</div>
+</section>
+
+<!-- ============================================================= 3 -->
+<section id="capture">
+  <h2><span class="num">3</span> Capture Path</h2>
+  <p>Each agent fires hooks on lifecycle events. A thin per-client shell wrapper pipes the hook JSON on
+  stdin to the shared <code>hooks/log_event.py --client &lt;name&gt;</code>. The hot path scrubs secrets, builds the
+  event node, and either writes it straight to Neo4j (<b>direct</b> mode) or appends it to a durable
+  <b>spool</b> for asynchronous ingest.</p>
+
+  <div class="diagram">
+    <div class="mermaid">
+sequenceDiagram
+  autonumber
+  participant AG as Agent (Claude/Codex/Cursor/Gemini)
+  participant SH as .{client}/hooks/*.sh
+  participant LE as log_event.py
+  participant PV as privacy.scrub()
+  participant SP as spool (NDJSON)
+  participant IN as ingest.py
+  participant N4 as Neo4j
+  AG->>SH: hook fires (SessionStart / UserPromptSubmit / Pre|PostToolUse / Stop)
+  SH->>LE: stdin JSON + --client
+  LE->>LE: is_optout(cwd)? → drop if opted out
+  LE->>PV: scrub prompt / tool_io / transcript
+  PV-->>LE: redacted fields (+ sensitivity flag)
+  alt HOOKS_CAPTURE_MODE = spool
+    LE->>SP: append {schema_version, client, session_id, app_id, event_props} (fsync)
+    Note over SP,IN: returns immediately — Neo4j may be down
+    IN->>SP: iter_records() (later / cron)
+    IN->>N4: upcast → idempotency check (event_id) → _append_event
+  else direct (default)
+    LE->>N4: _append_event() in one transaction
+  end
+  Note over N4: MERGE Session · CREATE Event · rewrite FIRST/NEXT/LATEST_EVENT
+    </div>
+    <div class="cap">Figure 3 — Capture sequence. Spool mode trades latency for durability; direct mode is one round-trip.</div>
+  </div>
+
+  <h3>Hook events captured</h3>
+  <table>
+    <thead><tr><th>Event</th><th>When</th><th>Also injects memory?</th></tr></thead>
+    <tbody>
+      <tr><td><code>SessionStart</code></td><td>Session begins</td><td>Yes — profile/tools/project buckets</td></tr>
+      <tr><td><code>UserPromptSubmit</code></td><td>User sends a prompt</td><td>Yes — hybrid query recall</td></tr>
+      <tr><td><code>PreToolUse</code></td><td>Before a tool call</td><td>No</td></tr>
+      <tr><td><code>PostToolUse</code></td><td>After a tool call</td><td>No</td></tr>
+      <tr><td><code>Stop</code></td><td>Session ends</td><td>No</td></tr>
+      <tr><td><code>PermissionRequest</code></td><td>Codex permission prompt (not registered by default)</td><td>No</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Chain construction (<code>_append_event</code>)</h3>
+  <pre><code>MERGE (s:Session {session_key: $client + ':' + $session_id})
+CREATE (e:Event $event_props)
+OPTIONAL MATCH (s)-[old:LATEST_EVENT]-&gt;(prev:Event)
+DELETE old
+FOREACH (_ IN CASE WHEN prev IS NULL THEN [1] ELSE [] END | CREATE (s)-[:FIRST_EVENT]-&gt;(e))
+FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END | CREATE (prev)-[:NEXT]-&gt;(e))
+CREATE (s)-[:LATEST_EVENT]-&gt;(e)</code></pre>
+
+  <div class="grid2">
+    <div>
+      <h4>Spool &amp; DLQ</h4>
+      <ul>
+        <li><b>Dir</b>: <code>$HOOKS_SPOOL_DIR</code> (default <code>~/.njhook/spool</code>).</li>
+        <li><b>Files</b>: <code>events-YYYY-MM-DD.jsonl</code> (one record/line, <code>fsync</code> on append) + <code>dlq.jsonl</code>.</li>
+        <li><b>DLQ record</b>: <code>{ts, error, raw}</code> — <code>ts</code> powers a per-hour failure-rate health metric.</li>
+        <li><b>Metrics</b>: <code>backlog_count()</code>, <code>dlq_rate_per_hour(window)</code>.</li>
+      </ul>
+    </div>
+    <div>
+      <h4>Ingest worker idempotency</h4>
+      <ul>
+        <li>Reads every spool file, <code>event_schema.upcast()</code> per record.</li>
+        <li>Malformed JSON / missing <code>event_id</code> → dead-letter, continue.</li>
+        <li><b>Inbox marker = the event’s existence</b>: if <code>event_id</code> already in the graph, skip — replay never duplicates.</li>
+        <li>A file is deleted only when <i>all</i> its records are ingested/skipped/dead-lettered; a write failure keeps the file for retry.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Event schema &amp; versioning</h3>
+  <p><code>SCHEMA_VERSION = 2</code>. Old spool records are never rewritten — they are <b>upcast on read</b> through a
+  transformer chain (v1→v2 promoted <code>app_id</code> into the event props). Fields map onto the OpenTelemetry
+  GenAI convention (<code>client→gen_ai.system</code>, <code>model→gen_ai.request.model</code>, <code>tool_name→gen_ai.tool.name</code>, …).</p>
+
+  <div class="note"><b>Privacy on the hot path</b>
+  Every user-content field (<code>prompt</code>, <code>tool_input</code>, <code>tool_response</code>, <code>last_assistant_message</code>, transcript)
+  is run through <code>privacy.scrub()</code> before storage. Directories listed in the opt-out file are never logged;
+  high-sensitivity directories tag events <code>sensitivity='high'</code>, which later blocks remote egress in the
+  dream phase unless <code>DREAM_ALLOW_SENSITIVE_EGRESS=1</code>.</div>
+</section>
+
+<!-- ============================================================= 4 -->
+<section id="dream">
+  <h2><span class="num">4</span> Dream Phase — nightly distillation</h2>
+  <p>The dream phase reads sessions with new events, asks an LLM to distill them into markdown memories,
+  runs every candidate through a stack of <b>admission gates</b>, then writes the survivors — recording
+  provenance, token cost, and an immutable revision for any changed body.</p>
+
+  <h3 id="dream-pipeline">End-to-end pipeline</h3>
+  <div class="diagram">
+    <div class="mermaid">
+flowchart TD
+  F[fetch_events<br/>sessions past last_dreamed_at]:::p --> R[render_events<br/>transcript cap for local models]:::p
+  R --> X[LLM extract<br/>provider distill → JSON memories]:::p
+  X --> V{validate_batch<br/>path · frontmatter · kind · size · secrets}:::g
+  V -->|invalid| DROP[(dropped + logged)]:::bad
+  V -->|valid| LM[local-merge<br/>same-path body merge · local only]:::p
+  LM --> G1{grounding<br/>overlap ≥ DREAM_GROUNDING_MIN?}:::g
+  G1 -->|NEW &amp; below| PR1[pending_review]:::pend
+  G1 -->|ok / update| G2{critique<br/>DREAM_CRITIQUE · faithful?}:::g
+  G2 -->|NEW &amp; unfaithful| PR1
+  G2 -->|faithful / off| G3{anti-poison<br/>directive + thin + novel?}:::g
+  G3 -->|NEW| PR1
+  G3 -->|UPDATE| HELD[held_updates<br/>prior body kept · revision logged]:::pend
+  G3 -->|clean| G4{contradiction<br/>DREAM_CONTRADICTION_CHECK · judge}:::g
+  G4 -->|contradicts| PR2[pending_review + :CONTRADICTS]:::pend
+  G4 -->|no| EMB[embeddings batch]:::p
+  EMB --> W[(write_memories<br/>:Memory + :DreamRun + :MemoryRevision)]:::store
+  PR1 --> W
+  PR2 --> W
+  classDef p fill:#eef4ff,stroke:#2f6fb0,color:#10243e;
+  classDef g fill:#fff7e6,stroke:#c79a2a,color:#5a4500;
+  classDef pend fill:#fdf3e0,stroke:#b8860b,color:#6b4e00;
+  classDef store fill:#eaf7ef,stroke:#1f8b4c,color:#0f3a22;
+  classDef bad fill:#fdeeee,stroke:#c0392b,color:#7a1d16;
+    </div>
+    <div class="cap">Figure 4 — Dream pipeline. Gates only ever <b>downgrade</b> a NEW memory to <span class="pill pending">pending_review</span>; updates to an existing active memory are never silently hidden.</div>
+  </div>
+
+  <table>
+    <thead><tr><th>#</th><th>Stage</th><th>What it does</th><th>Controlling env</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>fetch_events</code></td><td>Select sessions with an event newer than <code>last_dreamed_at</code>; order oldest-first.</td><td><code>--session</code>, <code>--since</code>, <code>--max-sessions</code></td></tr>
+      <tr><td>2</td><td><code>render_events</code></td><td>Signal-first transcript slice (prompts then tools), bounded for local models.</td><td><code>DREAM_TRANSCRIPT_MAX_CHARS</code> / <code>DREAM_TRANSCRIPT_CTX_FRACTION</code></td></tr>
+      <tr><td>3</td><td>LLM extract</td><td>Provider distills transcript + existing memories → list of <code>{path, kind, content, importance}</code>.</td><td><code>DREAM_PROVIDER</code> / <code>--provider</code></td></tr>
+      <tr><td>4</td><td><code>validate_batch</code></td><td>Structural gate: path regex, frontmatter, kind vocab, size, secret scrub. Invalid → dropped.</td><td><code>DREAM_MEMORY_MIN/MAX_CHARS</code></td></tr>
+      <tr><td>5</td><td>local-merge</td><td>Local providers only: merge a same-path body collision instead of clobbering.</td><td><code>DREAM_LOCAL_MERGE</code> (off), <code>_MAX=10</code></td></tr>
+      <tr><td>6</td><td>grounding gate</td><td>Token overlap with transcript; NEW below floor → pending_review.</td><td><code>DREAM_GROUNDING_MIN=0.10</code></td></tr>
+      <tr><td>7</td><td>critique gate</td><td>LLM faithfulness check (NEW only); unfaithful → pending_review.</td><td><code>DREAM_CRITIQUE</code> (off), <code>_MAX_CHARS=12000</code></td></tr>
+      <tr><td>8</td><td>anti-poison gate</td><td>Directive + thin session + novel → quarantine (NEW) / hold (UPDATE).</td><td><code>DREAM_POISON_*</code>, <code>DREAM_GATE_UPDATES=1</code></td></tr>
+      <tr><td>9</td><td>contradiction check</td><td>Judge new vs vector∪fulltext neighbours; flag <code>:CONTRADICTS</code>, pend the NEW one.</td><td><code>DREAM_CONTRADICTION_CHECK</code></td></tr>
+      <tr><td>10</td><td>embeddings</td><td>Batch-embed survivors if an embed provider is configured.</td><td><code>EMBED_PROVIDER</code></td></tr>
+      <tr><td>11</td><td><code>write_memories</code></td><td>Upsert; advance watermark; write <code>:DreamRun</code> (cost) + <code>:MemoryRevision</code> on change.</td><td><code>DREAM_USAGE_CAPTURE=1</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="dream-gates">Admission gates in detail</h3>
+  <table>
+    <thead><tr><th>Gate</th><th>Fires when</th><th>NEW memory →</th><th>UPDATE to active →</th><th>Failure mode</th></tr></thead>
+    <tbody>
+      <tr><td><b>Grounding</b> (A-MAC)</td><td><code>overlap(body, transcript) &lt; 0.10</code></td><td><span class="pill pending">pending_review</span></td><td>exempt (stays active)</td><td>empty transcript ⇒ score 1.0 (don’t gate)</td></tr>
+      <tr><td><b>Critique</b> (#18)</td><td>opt-in; LLM says body not faithful to transcript</td><td><span class="pill pending">pending_review</span></td><td>exempt</td><td><b>True-on-error</b> — lenient; only an explicit “no” quarantines</td></tr>
+      <tr><td><b>Anti-poison</b> (H3)</td><td>directive wording <b>AND</b> <code>events &lt; 5</code> <b>AND</b> <code>novelty ≥ 0.6</code></td><td><span class="pill pending">pending_review</span></td><td><b>held</b> — prior body kept, incoming saved as <code>update_held</code> revision</td><td>no events ⇒ skip (can’t assess provenance)</td></tr>
+      <tr><td><b>Contradiction</b> (E)</td><td>opt-in; judge says NEW contradicts an active memory</td><td><span class="pill pending">pending_review</span> + <code>:CONTRADICTS</code></td><td>existing stays active</td><td><b>False-on-error</b> — conservative; can only miss, never wrongly flag</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note"><b>Two opposite failure stances, on purpose</b>
+  The <b>contradiction judge</b> returns <code>False</code> on any error (never wrongly quarantine a good memory by
+  falsely claiming a conflict). The <b>faithfulness critic</b> returns <code>True</code> on any error (never quarantine a
+  good memory by a flaky verdict). Both stances protect a good memory from a misbehaving model — they just
+  sit on opposite sides of the same boolean.</div>
+
+  <h4>Anti-poisoning signals</h4>
+  <ul>
+    <li><b>Directive</b> — body contains an imperative marker (<code>always, never, must, do not, delete, drop, disable, sudo, rm -, the command is</code>, …).</li>
+    <li><b>Thin</b> — fewer than <code>DREAM_POISON_MIN_EVENTS</code> (5) events backing it.</li>
+    <li><b>Novel</b> — <code>novelty_score = 1 − overlap(body, same-prefix corpus) ≥ DREAM_POISON_NOVELTY_MIN</code> (0.6).</li>
+  </ul>
+  <p>The poisoning vector is “one short session injecting a durable, unverifiable rule.” Updates are <b>held</b>
+  (not <code>pending_review</code>) because routing an update to pending would still clobber the trusted body via the
+  unconditional <code>SET m.content</code> — instead the established body stays active and the rejected incoming body is
+  preserved as a revision for audit/recovery.</p>
+
+  <h3 id="dream-providers">Providers, cost &amp; context</h3>
+  <table>
+    <thead><tr><th>Provider</th><th>Default model</th><th>Local?</th><th>Key</th><th>Price (in / out per Mtok)</th></tr></thead>
+    <tbody>
+      <tr><td><code>llamacpp</code> <span class="pill active">default local</span></td><td><code>gemma-4-12B-it-Q4_K_M</code></td><td>Yes</td><td>none (local server)</td><td>$0 / $0</td></tr>
+      <tr><td><code>anthropic</code> <span class="pill superseded">registry default</span></td><td><code>claude-opus-4-7</code></td><td>No</td><td><code>ANTHROPIC_API_KEY</code></td><td>$15 / $75</td></tr>
+      <tr><td><code>openai</code></td><td><code>gpt-4o-mini</code></td><td>No</td><td><code>OPENAI_API_KEY</code></td><td>$0.15 / $0.60</td></tr>
+      <tr><td><code>ollama</code> <span style="color:var(--muted)">(legacy)</span></td><td><code>qwen3.5:latest</code></td><td>Yes</td><td>none</td><td>$0 / $0</td></tr>
+    </tbody>
+  </table>
+  <p class="kv"><b>Selection precedence:</b> <code>--provider</code> flag &gt; <code>$DREAM_PROVIDER</code> &gt; <code>anthropic</code>.
+  The nightly sets <code>DREAM_PROVIDER=llamacpp</code> with <code>DREAM_FALLBACK_PROVIDER=anthropic</code> — a 0-yield local run
+  retries on the hosted model. Token usage is captured per run and priced via <code>estimate_cost()</code> into
+  <code>:DreamRun.est_cost_usd</code>.</p>
+
+  <h4>Transcript cap derivation (local models, item #19)</h4>
+  <pre><code># precedence: explicit override → llamacpp-derived → fixed default
+cap = DREAM_TRANSCRIPT_MAX_CHARS            if set
+    = max(8000, int((n_ctx − LLAMACPP_OUTPUT_RESERVE − 256)
+                    × 3.5 chars/tok × DREAM_TRANSCRIPT_CTX_FRACTION))   # llamacpp
+    = 16000                                  otherwise
+# n_ctx probed from the llama.cpp /props endpoint (cached), fallback 8192.
+# Applied only in paths-only mode; frontier providers get the full transcript.</code></pre>
+
+  <h3 id="dream-sched">Watermark, ordering &amp; backlog</h3>
+  <div class="grid2">
+    <div>
+      <h4>Watermark</h4>
+      <p><code>:Session.last_dreamed_at</code> is advanced on <i>every</i> run — even a 0-memory session — so low-signal
+      sessions are never re-billed forever. <code>--since 24h|7d|30m</code> further narrows the window.</p>
+    </div>
+    <div>
+      <h4>Backlog guard (item #24)</h4>
+      <p><code>_order_targets</code> sorts <code>(never-dreamed, watermark asc, session_key)</code> — a stable oldest-first
+      order. <code>--max-sessions N</code> processes N qualifying sessions then stops, logging that the rest drain next
+      run. The watermark acts as the resume cursor.</p>
+    </div>
+  </div>
+
+  <h4>Importance prior &amp; the typed <code>kind</code> vocabulary</h4>
+  <p>When the model omits <code>importance</code>, a per-<code>kind</code> prior supplies a real ranking signal. The 15-type
+  vocabulary is the semantic axis (the <code>path</code> prefix remains the storage axis):</p>
+  <table>
+    <thead><tr><th>Importance 8</th><th>7</th><th>6</th><th>5</th><th>4</th><th>3</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>constraint</code></td>
+        <td><code>preference</code> · <code>projectrule</code> · <code>decision</code></td>
+        <td><code>goal</code> · <code>commitment</code> · <code>procedure</code> · <code>fact</code></td>
+        <td><code>toolpattern</code> · <code>incident</code> · <code>learning</code></td>
+        <td><code>context</code> · <code>openquestion</code></td>
+        <td><code>observation</code> · <code>artifact</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="kv">Legacy bucket labels still parse during the migration window: <code>profile→preference</code>,
+  <code>tool→toolpattern</code>, <code>project→projectrule</code>, <code>general→context</code> (default kind: <code>context</code>).</p>
+</section>
+
+<!-- ============================================================= 5 -->
+<section id="recall">
+  <h2><span class="num">5</span> Recall Engine</h2>
+  <p>Recall fuses two independent retrieval channels, ranks by a multiplicative score, filters to
+  <span class="pill active">active</span> memories only, and renders a budget-bounded markdown block for injection.</p>
+
+  <div class="diagram">
+    <div class="mermaid">
+flowchart LR
+  Q[prompt / session-start]:::p --> FT[fulltext_search<br/>memory_fulltext · min_score 0.5]:::p
+  Q --> VS[vector_search<br/>memory_embeddings · cosine]:::p
+  FT -->|over-fetch ×3| HM[hybrid_merge<br/>Reciprocal Rank Fusion · K=60]:::p
+  VS -->|over-fetch ×3| HM
+  HM --> SC[score = RRF × importance/5 × recency_decay<br/>+ in-project boost]:::p
+  SC --> FL{status = active<br/>&amp; not archived}:::g
+  FL --> BUD[render within CHAR_BUDGET=4000<br/>+ citation footer]:::p
+  BUD --> INJ[inject as additionalContext]:::store
+  classDef p fill:#eef4ff,stroke:#2f6fb0,color:#10243e;
+  classDef g fill:#fff7e6,stroke:#c79a2a,color:#5a4500;
+  classDef store fill:#eaf7ef,stroke:#1f8b4c,color:#0f3a22;
+    </div>
+    <div class="cap">Figure 5 — Hybrid recall. Lexical catches exact tokens &amp; antonyms; vector catches paraphrase. RRF fuses the two rank lists.</div>
+  </div>
+
+  <h3>Ranking signals</h3>
+  <table>
+    <thead><tr><th>Signal</th><th>Formula</th><th>Default / env</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>RRF fusion</td><td><code>Σ 1 / (RRF_K + rank + 1)</code></td><td><code>RRF_K = 60</code></td><td>Combine two rankers without score-scale calibration.</td></tr>
+      <tr><td>In-project boost</td><td><code>+ PROJECT_BOOST × 0.05</code></td><td><code>INJECT_PROJECT_BOOST = 0.5</code></td><td>Prefer memories tagged to the current repo.</td></tr>
+      <tr><td>Importance</td><td><code>importance / 5</code></td><td>neutral at 5 (1–10)</td><td>User/kind-rated salience.</td></tr>
+      <tr><td>Recency decay</td><td><code>exp(−λ · hours)</code></td><td><code>RECALL_RECENCY_ANCHOR = access</code></td><td>Stale memories fade; λ from path half-life.</td></tr>
+      <tr><td>Usage boost (content mode)</td><td><code>× (1 + 0.15 · usage_decay)</code></td><td><code>RECALL_USAGE_BOOST_MAX = 0.15</code></td><td>Frequently-used memories resist decay.</td></tr>
+      <tr><td>Value density (session-start)</td><td><code>(importance × recency) / len(content)</code></td><td>—</td><td>Token-efficient ordering inside a bucket.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Recency half-life by path prefix</h4>
+  <table>
+    <thead><tr><th><code>profile/</code></th><th><code>tools/</code></th><th><code>project/</code></th><th><code>general/</code></th><th>default</th></tr></thead>
+    <tbody><tr><td>180 days</td><td>180 days</td><td>30 days</td><td>60 days</td><td>60 days</td></tr></tbody>
+  </table>
+  <p class="kv">λ = <code>ln(2) / (half_life_days × 24)</code> per hour. Identity/tooling facts decay slowly; project notes fast.</p>
+
+  <h3>Lifecycle filter &amp; time travel</h3>
+  <ul>
+    <li><b>Active-only</b>: every retrieval path enforces <code>coalesce(status,'active')='active' AND NOT archived</code>. Pending / rejected / superseded never inject.</li>
+    <li><b>As-of</b> (<code>recall --as-of &lt;ISO&gt;</code>): swaps the live filter for a bi-temporal window
+      <code>valid_from ≤ T &lt; valid_until</code> and reconstructs each body from the <code>:MemoryRevision</code> chain — “what did memory look like on date T?”.</li>
+    <li><b>Worklists</b>: <code>never_injected</code> (active, <code>access_count=0</code>, older than 30d — dead weight) and
+      <code>effectively_dead</code> (used once but recency below <code>0.05</code> floor — decayed out). Surfaced by <code>njhook stale</code>.</li>
+  </ul>
+
+  <h3>Injection format &amp; budget</h3>
+  <p>SessionStart injects three buckets — <b>Profile</b>, <b>Tools</b>, <b>Project (name)</b> — each memory rendered as
+  <code>### path</code> + body, value-density-ordered, truncated at <code>CHAR_BUDGET = 4000</code> with an explicit cut notice
+  and a <code>_memory used: …_</code> citation footer. After injection, <code>access_count</code>/<code>last_accessed_at</code> are bumped for
+  every emitted path (which feeds the recency/usage signals next time).</p>
+</section>
+
+<!-- ============================================================= 6 -->
+<section id="review">
+  <h2><span class="num">6</span> Review, Lifecycle &amp; Governance</h2>
+  <p>Every memory is in exactly one lifecycle state. Recall serves only <span class="pill active">active</span>; the
+  other three are advisory or historical. Transitions come from humans (<code>njhook review</code> / dashboard), the
+  nightly’s detectors, or automatic conflict resolution.</p>
+
+  <div class="diagram">
+    <div class="mermaid">
+stateDiagram-v2
+  [*] --> active: dream write (grounded)
+  [*] --> pending_review: gate quarantine\n(grounding / critique / poison / contradiction)
+  pending_review --> active: approve (human)
+  pending_review --> rejected: reject (human)
+  active --> pending_review: flag_contradiction
+  active --> superseded: supersede (loser)
+  pending_review --> superseded: supersede (loser)
+  superseded --> active: supersede (winner re-activates)
+  rejected --> [*]: hidden, kept for record
+  note right of superseded
+    SUPERSEDED_BY edge to winner
+    embedding stripped from HNSW
+    (MEMORY_STRIP_SUPERSEDED_EMBEDDING=1)
+  end note
+    </div>
+    <div class="cap">Figure 6 — Lifecycle state machine. Only <span class="pill active">active</span> is injected by recall.</div>
+  </div>
+
+  <h3>Statuses</h3>
+  <table>
+    <thead><tr><th>Status</th><th>Injected?</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><span class="pill active">active</span></td><td>Yes</td><td>Live; the default when <code>status</code> is unset (coalesced).</td></tr>
+      <tr><td><span class="pill pending">pending_review</span></td><td>No</td><td>Quarantined by a gate or flagged conflict; awaiting adjudication.</td></tr>
+      <tr><td><span class="pill rejected">rejected</span></td><td>No</td><td>Explicitly rejected by a human; hidden but retained.</td></tr>
+      <tr><td><span class="pill superseded">superseded</span></td><td>No</td><td>Lost a conflict / merged away; kept for lineage with a <code>SUPERSEDED_BY</code> edge.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Conflict resolution — authority × recency</h3>
+  <p>When two memories contradict, <code>auto_resolve</code> picks the winner by <b>source authority</b> first, then recency.
+  Detection draws candidates from the <b>vector</b> channel (cosine &gt; 0.85) ∪ the <b>fulltext</b> channel (catches
+  antonym-style conflicts that score low on cosine), and an LLM judge confirms. The nightly uses the asymmetric
+  <code>flag_new_contradiction</code> — only the NEW memory is quarantined; the established one keeps serving recall.</p>
+  <table>
+    <thead><tr><th>Rank</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th></tr></thead>
+    <tbody>
+      <tr><td><b>Source</b></td><td>human (<code>user</code>)</td><td>hosted dream (<code>anthropic</code>/<code>openai</code>)</td><td>local dream (<code>ollama</code>/llama.cpp)</td><td><code>consolidate</code></td><td>unknown</td></tr>
+    </tbody>
+  </table>
+  <p class="kv">Lower rank wins; ties break on newer <code>updated_at</code>.</p>
+
+  <h3>Audit log</h3>
+  <p>Every mutation appends an immutable <code>:MemoryRevision</code> via <code>VERSION_OF</code>. <b>Content ops</b>
+  (<code>dream_create</code>, <code>dream_update</code>, <code>edit</code>) snapshot the prior body; <b>status-only ops</b>
+  (<code>approve</code>, <code>reject</code>, <code>supersede</code>, <code>flag_contradiction</code>, <code>quarantine</code>) carry
+  <code>content_snapshot = null</code> — the prior <i>status</i> is the load-bearing datum, so the body isn’t re-copied
+  (item #23). <code>njhook audit &lt;path&gt;</code> reconstructs one memory’s timeline; <code>--recent</code> gives a graph-wide view.</p>
+
+  <h3>Privacy &amp; egress policy</h3>
+  <table>
+    <thead><tr><th>Control</th><th>Mechanism</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td>Opt-out</td><td><code>HOOKS_OPT_OUT_PATHS</code> / <code>~/.njhook/optout.txt</code></td><td>Sessions under these paths are never captured.</td></tr>
+      <tr><td>Sensitivity</td><td><code>HOOKS_SENSITIVE_PATHS</code> / <code>~/.njhook/sensitive.txt</code></td><td>Tags events <code>sensitivity='high'</code>.</td></tr>
+      <tr><td>Egress gate</td><td><code>DREAM_ALLOW_SENSITIVE_EGRESS</code> (default off)</td><td>High-sensitivity sessions are not sent to remote providers.</td></tr>
+      <tr><td>Secret scrub</td><td><code>privacy.scrub()</code> / <code>scrub_high_confidence()</code></td><td>Redacts API keys, tokens, AWS/GitHub/Slack/Stripe creds, JWTs, PEM keys. Hard-rejects regenerated secrets at the quality gate.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Backup, restore &amp; rehearsal</h3>
+  <p>A versioned JSON backup carries memories, revision chains, supersessions, and full session/event chains.
+  <code>restore</code> is an idempotent upsert (by <code>path</code> / <code>session_key</code>) with pre-flight shape validation.
+  <code>rehearse-restore</code> (Phase H4) seeds a disposable marker, runs a real backup→restore round-trip, verifies
+  content + lineage, and records a <code>:RehearsalRun</code> — the health check warns if the last rehearsal is stale or failed.</p>
+</section>
+
+<!-- ============================================================= 7 -->
+<section id="interfaces">
+  <h2><span class="num">7</span> Interfaces</h2>
+  <p>The same recall/capture core is exposed through four surfaces. The CLI is the operator’s tool; REST and
+  MCP let other agents read/write; the dashboard is a read-mostly inspector.</p>
+
+  <h3>CLI — <code>njhook &lt;command&gt;</code></h3>
+  <table>
+    <thead><tr><th>Group</th><th>Commands</th></tr></thead>
+    <tbody>
+      <tr><td>Inspection</td><td><code>list</code>, <code>show</code>, <code>search</code>, <code>history</code>, <code>audit</code>, <code>patterns</code>, <code>sessions</code>, <code>session</code>, <code>health</code></td></tr>
+      <tr><td>Accounting</td><td><code>stats</code>, <code>storage</code> (byte breakdown), <code>stale</code> (worklists), <code>dream-stats</code> (nightly ledger)</td></tr>
+      <tr><td>Lifecycle</td><td><code>review</code> (list/approve/reject/supersede/flag/auto-resolve), <code>edit</code>, <code>delete</code></td></tr>
+      <tr><td>Data</td><td><code>backup</code>, <code>restore</code>, <code>rehearse-restore</code>, <code>ingest</code>, <code>consolidate</code>, <code>archive</code>, <code>unarchive</code></td></tr>
+      <tr><td>Pruning</td><td><code>prune-events</code> (Tier-1 blank), <code>prune-embeddings</code> (strip superseded)</td></tr>
+      <tr><td>Migration / Vectors</td><td><code>migrate</code>, <code>migrate-kinds</code>, <code>embed-backfill</code>, <code>reindex</code></td></tr>
+      <tr><td>Eval</td><td><code>eval-retrieval</code> (hit@k + MRR), <code>eval-distillation</code> (per-provider matrix)</td></tr>
+      <tr><td>Ops</td><td><code>recall</code>, <code>write-event</code>, <code>render</code></td></tr>
+    </tbody>
+  </table>
+  <p class="kv"><code>njhook health</code> verifies: Neo4j reachability, the three UNIQUE constraints, all indexes, per-client
+  hook wrappers, env/config, llama.cpp &amp; Ollama reachability, the scheduled task, dream-log freshness, spool/DLQ
+  rate, egress policy, rehearsal age, and nightly staleness.</p>
+
+  <div class="grid2">
+    <div>
+      <h3>REST API <span style="font-weight:400;font-size:12.5px;color:var(--muted)">(<code>api/server.py</code>, loopback)</span></h3>
+      <p class="kv"><b>Bind:</b> <code>NJHOOK_API_HOST=127.0.0.1</code> : <code>NJHOOK_API_PORT=5099</code>. No auth (loopback only).</p>
+      <table>
+        <thead><tr><th>Method</th><th>Route</th><th>Body → Response</th></tr></thead>
+        <tbody>
+          <tr><td>POST</td><td><code>/recall</code></td><td><code>{prompt, cwd?, limit?}</code> → <code>{hits:[{path,score,project,content}]}</code></td></tr>
+          <tr><td>POST</td><td><code>/events</code></td><td><code>{client, …payload}</code> → <code>{ok:true}</code></td></tr>
+          <tr><td>GET</td><td><code>/health</code></td><td>→ <code>{ok, active_memories, spool_backlog}</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h3>MCP tools <span style="font-weight:400;font-size:12.5px;color:var(--muted)">(<code>api/mcp_server.py</code>, stdio)</span></h3>
+      <table>
+        <thead><tr><th>Tool</th><th>Signature → returns</th></tr></thead>
+        <tbody>
+          <tr><td><code>search_memory</code></td><td><code>(prompt, cwd?, limit=5)</code> → ranked hits</td></tr>
+          <tr><td><code>get_project_context</code></td><td><code>(cwd?)</code> → session-start markdown</td></tr>
+          <tr><td><code>record_event</code></td><td><code>(client, payload)</code> → <code>{ok}</code></td></tr>
+          <tr><td><code>propose_memory</code></td><td><code>(path, content)</code> → lands as <span class="pill pending">pending_review</span> (won’t clobber active)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <h3>Dashboard <span style="font-weight:400;font-size:13px;color:var(--muted)">(Flask · <code>127.0.0.1:5000</code> · read-only unless <code>DASHBOARD_WRITE=1</code>)</span></h3>
+  <table>
+    <thead><tr><th>Route</th><th>Shows</th></tr></thead>
+    <tbody>
+      <tr><td><code>/memories</code>, <code>/memory/&lt;path&gt;</code></td><td>Filterable list; single-memory view with provenance, access count, lineage.</td></tr>
+      <tr><td><code>/memory/&lt;path&gt;/{edit,delete,archive,history}</code></td><td>Mutations (write-gated) + evolution view (revisions + diffs + lineage).</td></tr>
+      <tr><td><code>/sessions</code>, <code>/session/&lt;sid&gt;</code></td><td>Session list and per-session event walk.</td></tr>
+      <tr><td><code>/search</code>, <code>/review</code>, <code>/review/&lt;action&gt;</code></td><td>Hybrid search; pending + contradiction queue with write-gated actions.</td></tr>
+      <tr><td><code>/stats</code>, <code>/nightly</code></td><td>Counts by kind/client/access; the <code>:NightlyRun</code> ledger flagging zero-yield / all-fallback runs.</td></tr>
+      <tr><td><code>/toggle-write</code></td><td>Flips write mode per session (an accidental-write guard, not a security boundary).</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Agent-file renderers <span style="font-weight:400;font-size:13px;color:var(--muted)">(<code>hooks/render.py</code>)</span></h3>
+  <p>For agents without hook support, <code>njhook render</code> splices the session-start buckets into a managed block
+  (<code>&lt;!-- BEGIN njhook memory --&gt;…&lt;!-- END --&gt;</code>) of a target file: <code>AGENTS.md</code>, <code>CLAUDE.md</code>,
+  <code>GEMINI.md</code>, or <code>.cursor/rules/njhook-memory.mdc</code> (with a Cursor YAML preamble). Idempotent — content
+  outside the markers is preserved.</p>
+</section>
+
+<!-- ============================================================= 8 -->
+<section id="config">
+  <h2><span class="num">8</span> Configuration Reference</h2>
+  <p>Everything is environment-driven with safe defaults. Grouped below; <i>unset</i> means the feature is off or
+  uses the listed default.</p>
+
+  <h4>Connectivity &amp; binding</h4>
+  <table><thead><tr><th>Variable</th><th>Default</th><th>Controls</th></tr></thead><tbody>
+    <tr><td><code>HOOKS_NEO4J_URI</code></td><td><code>bolt://localhost:7687</code></td><td>Graph DB endpoint</td></tr>
+    <tr><td><code>HOOKS_NEO4J_USER</code> / <code>_PASSWORD</code></td><td><code>neo4j</code> / <code>password</code></td><td>Auth</td></tr>
+    <tr><td><code>NJHOOK_API_HOST</code> / <code>_PORT</code></td><td><code>127.0.0.1</code> / <code>5099</code></td><td>REST API bind</td></tr>
+    <tr><td><code>DASHBOARD_HOST</code> / <code>_PORT</code></td><td><code>127.0.0.1</code> / <code>5000</code></td><td>Dashboard bind</td></tr>
+    <tr><td><code>DASHBOARD_WRITE</code> / <code>_SECRET</code></td><td>off / random</td><td>Write mode; cookie signing</td></tr>
+  </tbody></table>
+
+  <h4>Local model stack (llama.cpp / Ollama)</h4>
+  <table><thead><tr><th>Variable</th><th>Default</th><th>Controls</th></tr></thead><tbody>
+    <tr><td><code>LLAMACPP_CHAT_URL</code></td><td><code>http://127.0.0.1:8080/v1</code></td><td>Chat/dream/judge/critic endpoint</td></tr>
+    <tr><td><code>LLAMACPP_EMBED_URL</code></td><td><code>http://127.0.0.1:8081/v1</code></td><td>Embeddings endpoint</td></tr>
+    <tr><td><code>LLAMACPP_N_CTX</code></td><td>probed (fallback 8192)</td><td>Context window for cap derivation</td></tr>
+    <tr><td><code>LLAMACPP_OUTPUT_RESERVE</code></td><td><code>3072</code></td><td>Tokens reserved for output</td></tr>
+    <tr><td><code>OLLAMA_HOST</code></td><td><code>http://localhost:11434</code></td><td>Ollama daemon (legacy)</td></tr>
+  </tbody></table>
+
+  <h4>Embeddings</h4>
+  <table><thead><tr><th>Variable</th><th>Default</th><th>Controls</th></tr></thead><tbody>
+    <tr><td><code>EMBED_PROVIDER</code></td><td>unset → fulltext-only</td><td><code>openai</code> / <code>ollama</code> / <code>llamacpp</code></td></tr>
+    <tr><td><code>EMBED_MODEL[_OPENAI|_OLLAMA|_LLAMACPP]</code></td><td>per-provider</td><td>Model override (e.g. <code>nomic-embed-text-v1.5</code>, 768-dim)</td></tr>
+    <tr><td><code>EMBED_MAX_CHARS</code></td><td><code>6000</code></td><td>Max chars embedded per memory</td></tr>
+  </tbody></table>
+
+  <h4>Dream behaviour &amp; gates</h4>
+  <table><thead><tr><th>Variable</th><th>Default</th><th>Controls</th></tr></thead><tbody>
+    <tr><td><code>DREAM_PROVIDER</code> / <code>DREAM_FALLBACK_PROVIDER</code></td><td><code>anthropic</code> / <code>anthropic</code></td><td>Primary &amp; 0-yield fallback (nightly sets primary=<code>llamacpp</code>)</td></tr>
+    <tr><td><code>DREAM_{ANTHROPIC,OPENAI,OLLAMA,LLAMACPP}_MODEL</code></td><td>see §4</td><td>Per-provider model</td></tr>
+    <tr><td><code>DREAM_MAX_TOKENS</code></td><td><code>16384</code></td><td>Output ceiling</td></tr>
+    <tr><td><code>DREAM_TRANSCRIPT_MAX_CHARS</code> / <code>_CTX_FRACTION</code></td><td>derived / <code>0.7</code></td><td>Transcript cap (local)</td></tr>
+    <tr><td><code>DREAM_GROUNDING_MIN</code></td><td><code>0.10</code></td><td>Grounding gate threshold</td></tr>
+    <tr><td><code>DREAM_CRITIQUE</code> / <code>_MAX_CHARS</code></td><td>off / <code>12000</code></td><td>Faithfulness critic (opt-in)</td></tr>
+    <tr><td><code>DREAM_POISON_MIN_EVENTS</code> / <code>_NOVELTY_MIN</code></td><td><code>5</code> / <code>0.6</code></td><td>Anti-poisoning thresholds</td></tr>
+    <tr><td><code>DREAM_GATE_UPDATES</code></td><td><code>1</code></td><td>Apply anti-poison to updates too</td></tr>
+    <tr><td><code>DREAM_CONTRADICTION_CHECK</code></td><td>off (on in nightly)</td><td>Pre-commit contradiction detection</td></tr>
+    <tr><td><code>DREAM_LOCAL_MERGE</code> / <code>_MAX</code></td><td>off / <code>10</code></td><td>Local same-path body merge</td></tr>
+    <tr><td><code>DREAM_ALLOW_SENSITIVE_EGRESS</code></td><td>off</td><td>Permit remote providers on sensitive sessions</td></tr>
+    <tr><td><code>DREAM_USAGE_CAPTURE</code> / <code>DREAM_PRICE_TABLE_JSON</code></td><td>on / built-in</td><td>Cost accounting</td></tr>
+    <tr><td><code>DREAM_MEMORY_MIN_CHARS</code> / <code>_MAX_CHARS</code></td><td><code>30</code> / <code>20000</code></td><td>Quality size gate</td></tr>
+  </tbody></table>
+
+  <h4>Recall</h4>
+  <table><thead><tr><th>Variable</th><th>Default</th><th>Controls</th></tr></thead><tbody>
+    <tr><td><code>INJECT_CHAR_BUDGET</code></td><td><code>4000</code></td><td>Session-start injection budget</td></tr>
+    <tr><td><code>INJECT_{PROFILE,TOOLS,PROJECT}_LIMIT</code></td><td><code>5</code> each</td><td>Per-bucket cap</td></tr>
+    <tr><td><code>INJECT_PROJECT_BOOST</code> / <code>INJECT_BUCKET_OVERFETCH</code></td><td><code>0.5</code> / <code>3</code></td><td>In-project boost; over-fetch factor</td></tr>
+    <tr><td><code>RECALL_RECENCY_ANCHOR</code></td><td><code>access</code></td><td><code>access</code> | <code>content</code> decay anchor</td></tr>
+    <tr><td><code>RECALL_USAGE_BOOST_MAX</code></td><td><code>0.15</code></td><td>Usage lift (content mode)</td></tr>
+    <tr><td><code>RECALL_DEAD_RECENCY_FLOOR</code> / <code>_NEVER_INJECTED_MIN_AGE_DAYS</code></td><td><code>0.05</code> / <code>30</code></td><td>Worklist thresholds</td></tr>
+    <tr><td><code>INJECT_EVENT_CONTEXT</code></td><td>off</td><td>Also inject raw event snippets</td></tr>
+  </tbody></table>
+
+  <h4>Capture, retention &amp; health</h4>
+  <table><thead><tr><th>Variable</th><th>Default</th><th>Controls</th></tr></thead><tbody>
+    <tr><td><code>HOOKS_CAPTURE_MODE</code></td><td><code>direct</code></td><td><code>direct</code> | <code>spool</code></td></tr>
+    <tr><td><code>HOOKS_SPOOL_DIR</code></td><td><code>~/.njhook/spool</code></td><td>Spool/DLQ location</td></tr>
+    <tr><td><code>HOOKS_CAPTURE_TRANSCRIPT</code> / <code>HOOKS_TRANSCRIPT_MAX_CHARS</code></td><td>off / <code>20000</code></td><td>Full-transcript capture</td></tr>
+    <tr><td><code>HOOKS_DISABLE_SCRUB</code></td><td>off</td><td>Disable secret scrub (tests only)</td></tr>
+    <tr><td><code>HOOKS_{OPT_OUT,SENSITIVE}_PATHS</code></td><td>see files</td><td>Privacy path lists</td></tr>
+    <tr><td><code>MEMORY_STRIP_SUPERSEDED_EMBEDDING</code></td><td><code>1</code></td><td>Drop superseded vectors from HNSW</td></tr>
+    <tr><td><code>EVENT_RETENTION_DAYS</code></td><td><code>30</code></td><td>Tier-1 event pruning age</td></tr>
+    <tr><td><code>NJHOOK_FRESHNESS_DAYS</code> / <code>_REHEARSAL_DAYS</code> / <code>_NIGHTLY_STALE_HOURS</code></td><td><code>7</code> / <code>30</code> / <code>48</code></td><td>Health-check thresholds</td></tr>
+  </tbody></table>
+</section>
+
+<!-- ============================================================= 9 -->
+<section id="ops">
+  <h2><span class="num">9</span> Operations Runbook</h2>
+
+  <h3>The nightly (<code>dream/run_dream.cmd</code>)</h3>
+  <div class="diagram">
+    <div class="mermaid">
+flowchart LR
+  S1[Stage 1 · distill<br/>dream.py --since 36h]:::p --> S2[Stage 2 · consolidate<br/>merge near-dupes ≥ 0.92]:::p
+  S2 --> S3[Stage 3 · archive<br/>stale &gt; 60d]:::p
+  S3 --> S4[Stage 4 · prune-events<br/>Tier-1 blank &gt; 30d · gated]:::p
+  classDef p fill:#eef4ff,stroke:#2f6fb0,color:#10243e;
+    </div>
+    <div class="cap">Figure 7 — Nightly stages. Each logs independently to <code>dream/logs/dream_YYYY-MM-DD.log</code>; a failure in one stage does not abort the others. Stages 2–4 skip when <code>DREAM_SKIP_MAINTENANCE=1</code>; stage 4 runs only when <code>DREAM_PRUNE_EVENTS=1</code>.</div>
+  </div>
+
+  <table>
+    <thead><tr><th>Stage</th><th>Command</th><th>Key env (default)</th></tr></thead>
+    <tbody>
+      <tr><td>1 · distill</td><td><code>dream.py --since $DREAM_SINCE</code></td><td><code>DREAM_PROVIDER=llamacpp</code>, <code>EMBED_PROVIDER=llamacpp</code>, <code>DREAM_CONTRADICTION_CHECK=1</code>, <code>DREAM_SINCE=36h</code></td></tr>
+      <tr><td>2 · consolidate</td><td><code>dream.py --consolidate</code></td><td><code>DREAM_CONSOLIDATE_THRESHOLD=0.92</code>, <code>_ROUNDS=5</code></td></tr>
+      <tr><td>3 · archive</td><td><code>dream.py --archive</code></td><td><code>DREAM_STALE_DAYS=60</code></td></tr>
+      <tr><td>4 · prune-events</td><td><code>njhook prune-events</code></td><td><code>EVENT_RETENTION_DAYS=30</code>, gated by <code>DREAM_PRUNE_EVENTS=1</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Common workflows</h3>
+  <table>
+    <thead><tr><th>Goal</th><th>Command(s)</th></tr></thead>
+    <tbody>
+      <tr><td>Check the stack is healthy</td><td><code>njhook health</code></td></tr>
+      <tr><td>See last night’s runs</td><td><code>njhook dream-stats</code> · dashboard <code>/nightly</code></td></tr>
+      <tr><td>Adjudicate quarantined memories</td><td><code>njhook review list</code> → <code>approve/reject/supersede</code></td></tr>
+      <tr><td>Why is memory X like this?</td><td><code>njhook history X --diff</code> · <code>njhook audit X</code></td></tr>
+      <tr><td>What did memory look like on a date?</td><td><code>njhook recall "…" --as-of 2026-05-01</code> · <code>njhook history X --as-of …</code></td></tr>
+      <tr><td>Storage / dead-weight review</td><td><code>njhook storage</code> · <code>njhook stale</code></td></tr>
+      <tr><td>Run the dream manually (preview)</td><td><code>python dream/dream.py --since 24h --dry-run</code></td></tr>
+      <tr><td>Drain a spool backlog</td><td><code>njhook ingest</code></td></tr>
+      <tr><td>Verify backups actually restore</td><td><code>njhook rehearse-restore</code></td></tr>
+      <tr><td>Score recall / distillation quality</td><td><code>njhook eval-retrieval</code> · <code>njhook eval-distillation --providers …</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="warn"><b>Output-capture quirk on this stack</b>
+  In some Windows/PowerShell setups pytest auto-backgrounds and tool output files can come back empty —
+  trust exit codes and the live graph (a SQL/Cypher count, a <code>njhook</code> read) over scrollback when verifying.</div>
+</section>
+
+<!-- ============================================================= A -->
+<section id="appendix">
+  <h2><span class="num">A</span> Glossary &amp; Hard Rules</h2>
+
+  <h3>Glossary</h3>
+  <table>
+    <thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><b>Dream</b></td><td>The periodic distillation phase that turns raw events into durable memories.</td></tr>
+      <tr><td><b>Recall</b></td><td>Retrieval + ranking + injection of relevant memories into a new session.</td></tr>
+      <tr><td><b>Grounding</b></td><td>Token overlap between a candidate memory and its source transcript — the anti-fabrication signal.</td></tr>
+      <tr><td><b>Critique</b></td><td>Opt-in LLM faithfulness check; catches fluent hallucinations grounding can’t (value inversions).</td></tr>
+      <tr><td><b>Poisoning</b></td><td>A short adversarial session injecting a durable, unverifiable directive.</td></tr>
+      <tr><td><b>Watermark</b></td><td><code>last_dreamed_at</code> — the resume cursor that keeps the dream incremental.</td></tr>
+      <tr><td><b>RRF</b></td><td>Reciprocal Rank Fusion — combines the vector and lexical rank lists (K=60).</td></tr>
+      <tr><td><b>kind</b></td><td>The 15-type semantic label on a memory (the <code>path</code> prefix is the orthogonal storage axis).</td></tr>
+      <tr><td><b>session_key</b></td><td><code>client:session_id</code> — the composite identity that prevents cross-client collisions.</td></tr>
+      <tr><td><b>as-of</b></td><td>Bi-temporal query: reconstruct the active memory set as it stood at an arbitrary timestamp.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Hard rules to internalize</h3>
+  <ol>
+    <li><b>Never</b> walk the event chain with <code>[:FIRST_EVENT|NEXT*0..]</code> — it OOMs Neo4j. Hop one <code>NEXT</code> at a time with a <code>seen</code> guard.</li>
+    <li>Neo4j cannot <code>MERGE</code> on a <code>null</code> property — status-only revisions key on <code>ts</code> and store <code>content_snapshot=null</code>.</li>
+    <li>Gates only downgrade a <b>NEW</b> memory; an update to an existing active memory is never silently hidden (it’s <i>held</i>, not pended).</li>
+    <li>Recall injects <span class="pill active">active</span> only — pending/rejected/superseded are invisible to agents.</li>
+    <li>Local-first by default; high-sensitivity content never egresses to hosted models unless explicitly allowed.</li>
+    <li>Nothing is hard-deleted on the write path — supersede + revision chain preserve lineage.</li>
+  </ol>
+</section>
+
+<footer>
+  njhook architecture reference · generated for <code>VinSoLiTon/agent-memory-hooks-neo4j</code> · diagrams via Mermaid.
+  Section sources are named inline; consult the cited modules for line-level detail.
+</footer>
+
+</main>
+</div>
+</body>
+</html>
