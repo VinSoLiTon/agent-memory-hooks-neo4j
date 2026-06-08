@@ -141,6 +141,55 @@ def test_importance_promotes_a_lower_ranked_hit():
     assert out[0]["path"] == "b"
 
 
+# --- item #12: content-currency recency anchor (gated, default unchanged) ----
+
+def test_recency_anchor_default_is_access_and_unchanged(monkeypatch):
+    # default mode anchors on last_accessed_at first → a freshly-injected but
+    # content-stale memory still reads ~1.0 (today's behaviour, byte-stable).
+    monkeypatch.setattr(recall, "RECENCY_ANCHOR_MODE", "access")
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    row = {"path": "project/x.md", "last_accessed_at": "2026-06-01T00:00:00+00:00",
+           "updated_at": "2025-06-01T00:00:00+00:00"}
+    assert abs(recall.recency_factor(row, now) - 1.0) < 1e-6
+
+
+def test_content_anchor_ignores_access_freshness(monkeypatch):
+    # same row, content mode → heavily decayed because updated_at is a year stale
+    # at a 30d project half-life, despite the fresh last_accessed_at.
+    monkeypatch.setattr(recall, "RECENCY_ANCHOR_MODE", "content")
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    row = {"path": "project/x.md", "last_accessed_at": "2026-06-01T00:00:00+00:00",
+           "updated_at": "2025-06-01T00:00:00+00:00"}
+    assert recall.recency_factor(row, now) < 0.5   # the popularity feedback loop is broken
+
+
+def test_content_anchor_usage_boost_is_bounded(monkeypatch):
+    # two rows, identical (fresh) content currency; one freshly used, one not.
+    # the used one ranks higher BUT by no more than (1 + USAGE_BOOST_MAX).
+    monkeypatch.setattr(recall, "RECENCY_ANCHOR_MODE", "content")
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    fresh_use = {"path": "project/a.md", "updated_at": "2026-06-01T00:00:00+00:00",
+                 "last_accessed_at": "2026-06-01T00:00:00+00:00"}
+    no_use = {"path": "project/b.md", "updated_at": "2026-06-01T00:00:00+00:00",
+              "last_accessed_at": "2024-06-01T00:00:00+00:00"}
+    rf_fresh = recall.recency_factor(fresh_use, now)
+    rf_stale_use = recall.recency_factor(no_use, now)
+    assert rf_fresh > rf_stale_use                                          # usage gives a lift...
+    assert rf_fresh / rf_stale_use <= 1.0 + recall.USAGE_BOOST_MAX + 1e-9   # ...but a capped one
+
+
+def test_value_density_inherits_anchor_mode(monkeypatch):
+    # value_density calls recency_factor, so flipping the anchor flips its input
+    # with no change to value_density itself.
+    monkeypatch.setattr(recall, "RECENCY_ANCHOR_MODE", "content")
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    stale = {"path": "project/x.md", "content": "body", "importance": 5,
+             "updated_at": "2025-06-01T00:00:00+00:00", "last_accessed_at": "2026-06-01T00:00:00+00:00"}
+    fresh = {"path": "project/y.md", "content": "body", "importance": 5,
+             "updated_at": "2026-06-01T00:00:00+00:00", "last_accessed_at": "2026-06-01T00:00:00+00:00"}
+    assert recall.value_density(fresh, now) > recall.value_density(stale, now)
+
+
 # --- C3: raw-event retrieval ------------------------------------------------
 
 def test_render_event_context_labels_and_omits_when_empty():

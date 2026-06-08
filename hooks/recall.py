@@ -26,6 +26,8 @@ Tunables (env):
   INJECT_PROFILE_LIMIT / INJECT_TOOLS_LIMIT / INJECT_PROJECT_LIMIT  (default 5)
   INJECT_CHAR_BUDGET   session-start total-chars soft cap            (default 4000)
   INJECT_PROJECT_BOOST RRF tie-break for in-project hits             (default 0.5)
+  RECALL_RECENCY_ANCHOR  recency-decay anchor: access (default) | content
+  RECALL_USAGE_BOOST_MAX bounded usage lift in content mode          (default 0.15)
 """
 from __future__ import annotations
 
@@ -51,6 +53,16 @@ PROJECT_BOOST = float(os.environ.get("INJECT_PROJECT_BOOST", "0.5"))
 # times the limit, then keep the value-densest `limit` (see _rank_bucket). Mirrors
 # the prompt/vector path's `max(limit*3, limit+5)` over-fetch idiom.
 BUCKET_OVERFETCH = int(os.environ.get("INJECT_BUCKET_OVERFETCH", "3"))
+# Recency-decay anchor (item #12). "access" (default) = today's behaviour: decay
+# anchored on last_accessed_at first, which _bump_access resets on every injection
+# (a popularity feedback loop — injected memories stay "fresh" regardless of
+# content currency). "content" = bi-temporal split: decay anchored on content
+# currency (updated_at/ingested_at), with a small bounded usage lift so a
+# recently-USED memory can't leapfrog a content-fresher one by more than the cap.
+# Read once into a module constant so per-call cost is a branch, not an env read;
+# tests monkeypatch RECENCY_ANCHOR_MODE (mirrors EVENT_MIN_SCORE override).
+RECENCY_ANCHOR_MODE = os.environ.get("RECALL_RECENCY_ANCHOR", "access")
+USAGE_BOOST_MAX = float(os.environ.get("RECALL_USAGE_BOOST_MAX", "0.15"))
 
 # Closed vocabulary of recall modes (mirrors the roadmap; tool_context is a thin
 # variant of prompt_context for now and gains a dedicated plan in a later phase).
@@ -104,18 +116,50 @@ def importance_factor(importance) -> float:
     return imp / float(DEFAULT_IMPORTANCE)
 
 
+def _decay_one(now, lam: float, ts):
+    """exp(-lambda * hours) since `ts`, or None if `ts` is absent/unparseable."""
+    anchor = _parse_ts(ts)
+    if anchor is None:
+        return None
+    hours = max(0.0, (now - anchor).total_seconds() / 3600.0)
+    return math.exp(-lam * hours)
+
+
 def recency_factor(row: dict, now=None) -> float:
-    """exp(-lambda * hours) since the memory was last touched. Anchor on
-    last_accessed_at, else updated_at, else ingested_at; a memory with no
-    timestamp is treated as fresh (1.0) rather than penalized."""
+    """Decayed recency. A memory with no timestamp at all is treated as fresh
+    (1.0) rather than penalized.
+
+    RECALL_RECENCY_ANCHOR=access (default): anchor on last_accessed_at, else
+    updated_at, else ingested_at — kept byte-identical to the original so the
+    default path and all existing tests are unaffected.
+
+    RECALL_RECENCY_ANCHOR=content (bi-temporal split): decay anchored on CONTENT
+    currency (updated_at, else ingested_at, else last_accessed_at) so injecting a
+    memory can't keep it "fresh" via _bump_access; a recently-USED memory still
+    gets a small lift bounded by (1 + USAGE_BOOST_MAX), which can never leapfrog a
+    content-fresher memory by more than that cap."""
     now = now or _now_utc()
+    lam = _lambda_for(row.get("path", ""))
+
+    if RECENCY_ANCHOR_MODE == "content":
+        base = None
+        for field in ("updated_at", "ingested_at", "last_accessed_at"):
+            base = _decay_one(now, lam, row.get(field))
+            if base is not None:
+                break
+        if base is None:
+            return 1.0
+        usage = _decay_one(now, lam, row.get("last_accessed_at"))
+        return base if usage is None else base * (1.0 + USAGE_BOOST_MAX * usage)
+
+    # default: access-anchored (unchanged behaviour)
     anchor = (_parse_ts(row.get("last_accessed_at"))
               or _parse_ts(row.get("updated_at"))
               or _parse_ts(row.get("ingested_at")))
     if anchor is None:
         return 1.0
     hours = max(0.0, (now - anchor).total_seconds() / 3600.0)
-    return math.exp(-_lambda_for(row.get("path", "")) * hours)
+    return math.exp(-lam * hours)
 
 
 def value_density(row: dict, now=None) -> float:
