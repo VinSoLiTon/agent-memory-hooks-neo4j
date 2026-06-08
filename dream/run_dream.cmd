@@ -18,6 +18,13 @@ rem Only the sessions the local model can't handle egress. Set
 rem DREAM_FALLBACK_PROVIDER=none to keep the nightly fully local (no egress).
 if "%DREAM_FALLBACK_PROVIDER%"=="" set "DREAM_FALLBACK_PROVIDER=anthropic"
 
+rem Contradiction detection ON by default in the nightly (it shipped off, so the
+rem scheduled run never detected conflicts). The judge is conservative-by-failure
+rem (returns False on any doubt) so this can only MISS contradictions, never wrongly
+rem quarantine; candidates come from BOTH the vector and fulltext channels. Set
+rem DREAM_CONTRADICTION_CHECK=0 to disable. (Applies to the distill stage below.)
+if "%DREAM_CONTRADICTION_CHECK%"=="" set "DREAM_CONTRADICTION_CHECK=1"
+
 rem Nightly window + maintenance knobs (conservative defaults). The dedup and
 rem archival jobs already existed (consolidate.py / `njhook consolidate|archive`)
 rem but nothing scheduled them, so graph hygiene depended on a human remembering
@@ -31,7 +38,7 @@ if "%DREAM_CONSOLIDATE_ROUNDS%"=="" set "DREAM_CONSOLIDATE_ROUNDS=5"
 if "%DREAM_STALE_DAYS%"=="" set "DREAM_STALE_DAYS=60"
 
 rem --- stage 1: distill recent sessions into memories -------------------------
-echo [%date% %time%] dream distill start (provider=%DREAM_PROVIDER% embed=%EMBED_PROVIDER% since=%DREAM_SINCE%) >> "%LOG%"
+echo [%date% %time%] dream distill start (provider=%DREAM_PROVIDER% embed=%EMBED_PROVIDER% since=%DREAM_SINCE% contradiction=%DREAM_CONTRADICTION_CHECK%) >> "%LOG%"
 python dream\dream.py --since %DREAM_SINCE% >> "%LOG%" 2>&1
 echo [%date% %time%] dream distill end exit=%errorlevel% >> "%LOG%"
 

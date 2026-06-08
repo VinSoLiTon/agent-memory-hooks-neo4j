@@ -194,6 +194,43 @@ def vector_candidates(embed_fn, k: int = 5, threshold: float = 0.85):
     return _find
 
 
+def fulltext_candidates(search_fn, k: int = 5):
+    """Build a `find_candidates(session, path, content)` that returns active
+    memories whose TEXT overlaps the new content via Lucene fulltext — a SECOND
+    channel alongside `vector_candidates`. Cosine similarity misses antonym-style
+    contradictions ("deploy via Docker" vs "never use containers") because the
+    bodies are lexically close but semantically opposite; fulltext surfaces them
+    as candidates so the LLM judge (the precision gate) gets to see the pair.
+
+    `search_fn` is injected (recall.fulltext_search in production) so this module
+    doesn't import the recall engine. fulltext_search already filters active +
+    non-archived and returns hit dicts with `path`/`content`."""
+    def _find(session, path, content):
+        try:
+            hits = search_fn(session, content, limit=k)
+        except Exception:
+            return []
+        return [(h["path"], h["content"]) for h in hits
+                if h.get("path") and h["path"] != path]
+    return _find
+
+
+def union_candidates(*finders):
+    """Combine several `find_candidates` into one, deduped by path (first finder
+    wins, the new memory's own path is dropped). Lets the contradiction check draw
+    from the vector AND fulltext channels in one pass."""
+    def _find(session, path, content):
+        seen, out = set(), []
+        for finder in finders:
+            for cand_path, cand_content in finder(session, path, content):
+                if cand_path == path or cand_path in seen:
+                    continue
+                seen.add(cand_path)
+                out.append((cand_path, cand_content))
+        return out
+    return _find
+
+
 def detect_contradiction(session, path: str, content: str, judge, find_candidates,
                          on_contradiction=None) -> list[str]:
     """Pre-commit/contradiction detection: for each semantically-related active
