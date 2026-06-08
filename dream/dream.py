@@ -38,7 +38,7 @@ from neo4j import GraphDatabase
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "hooks"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from project import dominant_project  # noqa: E402
-from providers import get_provider, default_model  # noqa: E402
+from providers import get_provider, default_model, estimate_cost  # noqa: E402
 import embeddings  # noqa: E402
 import consolidate as consolidate_mod  # noqa: E402
 import quality as quality_mod  # noqa: E402
@@ -331,25 +331,29 @@ def render_existing(memories: list[dict], paths_only: bool = False) -> str:
 
 
 def call_provider(provider_fn, transcript: str, existing: str, model: str,
-                  system_prompt: str) -> list[dict]:
-    """Thin wrapper so call sites don't need to know provider internals."""
+                  system_prompt: str, usage_out: dict | None = None) -> list[dict]:
+    """Thin wrapper so call sites don't need to know provider internals. When
+    `usage_out` is given (item #13), the provider fills it in place with
+    {input_tokens, output_tokens} — additive, never changes the return type."""
     return provider_fn(
         transcript=transcript,
         existing=existing,
         system=system_prompt,
         model=model,
         max_tokens=MAX_TOKENS,
+        usage_out=usage_out,
     )
 
 
 def safe_distil(provider_fn, transcript: str, existing: str, model: str,
-                system_prompt: str, provider_name: str = "local") -> list[dict]:
+                system_prompt: str, provider_name: str = "local",
+                usage_out: dict | None = None) -> list[dict]:
     """Call the primary provider but NEVER raise: on any error (unreachable,
     HTTP 4xx, malformed JSON, timeout) return [] so the hybrid fallback takes over
     instead of crashing the whole run (PR-4). 0-yield and hard-error converge to
-    the same []-then-fallback path."""
+    the same []-then-fallback path. On error `usage_out` is left as-is (no usage)."""
     try:
-        return call_provider(provider_fn, transcript, existing, model, system_prompt)
+        return call_provider(provider_fn, transcript, existing, model, system_prompt, usage_out=usage_out)
     except Exception as e:
         print(f"  primary {provider_name} errored ({type(e).__name__}: {str(e)[:140]}); "
               f"treating as 0-yield → fallback", file=sys.stderr)
@@ -415,7 +419,7 @@ def attribute_events(content: str, events: list[dict], k: int, min_overlap: int)
     return [eid for _, eid in scored[:k]]
 
 
-def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None, provider: str = "unknown", model: str = "unknown", events: list[dict] | None = None, contradiction_judge=None, find_candidates=None) -> int:
+def write_memories(driver, session_key: str, memories: list[dict], watermark: str, project: str | None = None, provider: str = "unknown", model: str = "unknown", events: list[dict] | None = None, contradiction_judge=None, find_candidates=None, usage: dict | None = None, cost: float | None = None) -> int:
     """Upsert memories and advance the session's last_dreamed_at watermark.
 
     `watermark` is the timestamp of the latest event we just dreamed over —
@@ -577,7 +581,9 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
             """
             MATCH (s:Session {session_key: $session_key})
             MERGE (dr:DreamRun {run_id: $run_id})
-              ON CREATE SET dr.ts = $now, dr.provider = $provider, dr.model = $model
+              ON CREATE SET dr.ts = $now, dr.provider = $provider, dr.model = $model,
+                            dr.input_tokens = $input_tokens, dr.output_tokens = $output_tokens,
+                            dr.est_cost_usd = $est_cost
             WITH s, dr
             UNWIND $rows AS row
             MERGE (m:Memory {path: row.path})
@@ -624,6 +630,11 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
                 "session_key": session_key, "rows": rows,
                 "run_id": run_id, "now": now,
                 "provider": provider, "model": model,
+                # item #13: per-DreamRun token usage + estimated cost (additive;
+                # None when usage wasn't captured — e.g. a hand-built test write).
+                "input_tokens": (usage or {}).get("input_tokens"),
+                "output_tokens": (usage or {}).get("output_tokens"),
+                "est_cost": cost,
             },
         )
 
@@ -857,19 +868,26 @@ def main():
                 print(f"\n=== dreaming over {label} ({len(events)} new events"
                       + ("; SENSITIVE" if session_sensitive else "") + ") ===")
                 used_name, used_model = provider_name, model
+                # item #13: capture token usage of whichever provider produced the
+                # kept memories (no-op alloc when DREAM_USAGE_CAPTURE=0).
+                capture = os.environ.get("DREAM_USAGE_CAPTURE", "1") != "0"
+                prim_usage: dict = {}
+                used_usage = prim_usage if capture else None
                 # PR-4: safe_distil never raises — a hard provider error (e.g. llama.cpp
                 # down / 4xx / malformed) becomes [] so the fallback below fires instead
                 # of crashing the run.
-                memories = safe_distil(provider_fn, render_events(events, max_chars=transcript_cap), existing, model, system_prompt, provider_name)
+                memories = safe_distil(provider_fn, render_events(events, max_chars=transcript_cap), existing, model, system_prompt, provider_name, usage_out=used_usage)
                 # Fall back only if it won't egress a sensitive session to a remote provider.
                 if not memories and fallback and not egress_blocked(fallback[0], session_sensitive, allow_egress):
                     fb_name, fb_fn, fb_model, fb_system = fallback
                     print(f"  local yielded 0 — falling back to {fb_name}/{fb_model} for this session")
                     try:
                         fb_existing = render_existing(fetch_existing_memories(driver, project), paths_only=False)
-                        fb_mems = call_provider(fb_fn, render_events(events), fb_existing, fb_model, fb_system)
+                        fb_usage: dict = {}
+                        fb_mems = call_provider(fb_fn, render_events(events), fb_existing, fb_model, fb_system, usage_out=(fb_usage if capture else None))
                         if fb_mems:
                             memories, used_name, used_model = fb_mems, fb_name, fb_model
+                            used_usage = fb_usage if capture else None  # bill the fallback that won
                     except Exception as e:
                         print(f"  fallback failed: {e}", file=sys.stderr)
                 elif not memories and fallback and session_sensitive:
@@ -884,9 +902,11 @@ def main():
                     print(m.get("content", ""))
                 if not args.dry_run:
                     watermark = events[-1].get("timestamp")
-                    n = write_memories(driver, session_key, memories, watermark, project=project, provider=used_name, model=used_model, events=events)
+                    est = estimate_cost(used_name, used_model, used_usage)
+                    n = write_memories(driver, session_key, memories, watermark, project=project, provider=used_name, model=used_model, events=events, usage=used_usage, cost=est)
                     stats["written"] += n
-                    print(f"\n  wrote/updated {n} memories (via {used_name}); watermark -> {watermark}")
+                    cost_note = f", est ${est:.4f}" if est else ""
+                    print(f"\n  wrote/updated {n} memories (via {used_name}{cost_note}); watermark -> {watermark}")
         finally:
             if not args.dry_run:
                 _write_nightly_run(driver, run_id, stats, provider_name, model,

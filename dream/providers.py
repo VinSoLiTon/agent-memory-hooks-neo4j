@@ -38,9 +38,45 @@ def _extract_json_object(text: str) -> dict:
     return json.loads(text[start : end + 1])
 
 
+# --- usage / cost (item #13) -------------------------------------------------
+# Static $/Mtok (input, output) per provider+model, used by estimate_cost. Local
+# providers are free. Override the WHOLE table via DREAM_PRICE_TABLE_JSON (a JSON
+# blob) so retuning prices isn't a code change. `_default` covers unknown models.
+PRICE_PER_MTOK = {
+    "anthropic": {"claude-opus-4-8": (15.0, 75.0), "claude-opus-4-7": (15.0, 75.0),
+                  "claude-sonnet-4-6": (3.0, 15.0), "_default": (15.0, 75.0)},
+    "openai": {"gpt-4o": (2.5, 10.0), "gpt-4o-mini": (0.15, 0.6), "_default": (2.5, 10.0)},
+    "ollama": {"_default": (0.0, 0.0)},
+    "llamacpp": {"_default": (0.0, 0.0)},
+}
+
+
+def _price_table() -> dict:
+    env = os.environ.get("DREAM_PRICE_TABLE_JSON")
+    if env:
+        try:
+            return json.loads(env)
+        except Exception:
+            pass
+    return PRICE_PER_MTOK
+
+
+def estimate_cost(provider: str, model: str, usage: dict | None) -> float:
+    """USD estimate from a {input_tokens, output_tokens} usage dict. Unknown
+    provider/model or a local provider → 0.0. Never raises."""
+    if not usage:
+        return 0.0
+    table = (_price_table().get(provider) or {})
+    in_p, out_p = table.get(model) or table.get("_default") or (0.0, 0.0)
+    it = usage.get("input_tokens", 0) or 0
+    ot = usage.get("output_tokens", 0) or 0
+    return round(it / 1_000_000 * in_p + ot / 1_000_000 * out_p, 6)
+
+
 # --- Anthropic ----------------------------------------------------------
 
-def dream_anthropic(transcript: str, existing: str, system: str, model: str, max_tokens: int = 4096) -> list[dict]:
+def dream_anthropic(transcript: str, existing: str, system: str, model: str,
+                    max_tokens: int = 4096, usage_out: dict | None = None) -> list[dict]:
     from anthropic import Anthropic  # lazy import — provider may not be selected
     client = Anthropic()
     user_msg = f"<existing_memories>\n{existing}\n</existing_memories>\n\n<events>\n{transcript}\n</events>"
@@ -50,13 +86,16 @@ def dream_anthropic(transcript: str, existing: str, system: str, model: str, max
         system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": user_msg}],
     )
+    if usage_out is not None and getattr(msg, "usage", None):
+        usage_out.update(input_tokens=msg.usage.input_tokens, output_tokens=msg.usage.output_tokens)
     text = "".join(b.text for b in msg.content if b.type == "text")
     return _extract_json_object(text).get("memories", [])
 
 
 # --- OpenAI -------------------------------------------------------------
 
-def dream_openai(transcript: str, existing: str, system: str, model: str, max_tokens: int = 4096) -> list[dict]:
+def dream_openai(transcript: str, existing: str, system: str, model: str,
+                 max_tokens: int = 4096, usage_out: dict | None = None) -> list[dict]:
     from openai import OpenAI  # lazy
     client = OpenAI()
     user_msg = f"<existing_memories>\n{existing}\n</existing_memories>\n\n<events>\n{transcript}\n</events>"
@@ -69,13 +108,18 @@ def dream_openai(transcript: str, existing: str, system: str, model: str, max_to
             {"role": "user", "content": user_msg},
         ],
     )
+    u = getattr(resp, "usage", None)
+    if usage_out is not None and u:
+        usage_out.update(input_tokens=getattr(u, "prompt_tokens", 0) or 0,
+                         output_tokens=getattr(u, "completion_tokens", 0) or 0)
     text = resp.choices[0].message.content or ""
     return _extract_json_object(text).get("memories", [])
 
 
 # --- Ollama (local) -----------------------------------------------------
 
-def dream_ollama(transcript: str, existing: str, system: str, model: str, max_tokens: int = 4096) -> list[dict]:
+def dream_ollama(transcript: str, existing: str, system: str, model: str,
+                 max_tokens: int = 4096, usage_out: dict | None = None) -> list[dict]:
     """Hit a local Ollama server. No API key needed; data never leaves the machine.
 
     PR-C bundle for smaller-model quality:
@@ -134,6 +178,10 @@ def dream_ollama(transcript: str, existing: str, system: str, model: str, max_to
                 f"Ollama unreachable at {OLLAMA_HOST}: {e}. "
                 "Is `ollama serve` running, or is the daemon installed?"
             ) from e
+        if usage_out is not None and (body.get("prompt_eval_count") is not None
+                                      or body.get("eval_count") is not None):
+            usage_out.update(input_tokens=body.get("prompt_eval_count", 0) or 0,
+                             output_tokens=body.get("eval_count", 0) or 0)
         text = (body.get("message") or {}).get("content", "")
         if not text:
             raise RuntimeError(f"empty response from Ollama: {body}")
@@ -209,7 +257,8 @@ def _llamacpp_n_ctx(base: str) -> int:
     return n
 
 
-def dream_llamacpp(transcript: str, existing: str, system: str, model: str, max_tokens: int = 4096) -> list[dict]:
+def dream_llamacpp(transcript: str, existing: str, system: str, model: str,
+                   max_tokens: int = 4096, usage_out: dict | None = None) -> list[dict]:
     """Hit a local llama.cpp server's OpenAI-compatible API (e.g. the docker
     `infra-llama` container serving Gemma). LOCAL — data never leaves the machine.
 
@@ -268,6 +317,10 @@ def dream_llamacpp(transcript: str, existing: str, system: str, model: str, max_
         )
         with urllib.request.urlopen(req, timeout=600) as resp:
             body = json.loads(resp.read().decode("utf-8"))
+        u = body.get("usage") or {}
+        if usage_out is not None and u:
+            usage_out.update(input_tokens=u.get("prompt_tokens", 0) or 0,
+                             output_tokens=u.get("completion_tokens", 0) or 0)
         choices = body.get("choices") or []
         if not choices:
             raise RuntimeError(f"empty response from llama.cpp: {body}")
