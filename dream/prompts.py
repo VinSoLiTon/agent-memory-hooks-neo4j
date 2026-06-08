@@ -67,8 +67,15 @@ Set the top-level `kind` to one of the 15 types above, and mirror it in the \
 body's frontmatter (`title` + `kind`). Pick the type by what the memory IS, not \
 where it's stored: a preference in profile/ is `preference`, a build rule in \
 project/ is `projectrule` or `constraint`.
-Optionally include `importance`: an integer 1-10 for how broadly and durably useful \
-this memory is (10 = core identity / standing rule, 1 = trivial detail). Omit if unsure.
+Include `importance`: an integer 1-10 for how broadly and durably useful this \
+memory is. Anchor your rating to these bands — and SPREAD ratings across them, \
+do not default everything to 7-8:
+  9-10  core identity or a standing hard rule that applies across most sessions \
+(e.g. "user is a Rust engineer"; "never deploy without approval")
+  7-8   a durable preference, project rule, or decision that will recur
+  5-6   useful context or a procedure scoped to one area
+  3-4   a narrow tool detail or a fact that ages quickly
+  1-2   trivial / near-ephemeral — rarely worth recalling
 The body should be tight markdown a future agent can read cold."""
 
 
@@ -148,7 +155,14 @@ DREAM_JSON_SCHEMA = {
                     "content": {"type": "string", "minLength": 10},
                     "importance": {"type": "integer", "minimum": 1, "maximum": 10},
                 },
-                "required": ["path", "content"],
+                # importance is REQUIRED here so the schema-constrained local
+                # paths (ollama `format=`, llama.cpp `json_schema`) MUST emit it —
+                # killing the degenerate "omitted → flat default 5" distribution
+                # on the 12B model. The providers that send `json_object` instead
+                # (anthropic, openai) don't enforce this required list, so it stays
+                # optional there — handled by the kind-prior floor in
+                # dream._coerce_importance.
+                "required": ["path", "content", "importance"],
             },
         }
     },

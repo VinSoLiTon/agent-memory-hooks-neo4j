@@ -354,16 +354,32 @@ def safe_distil(provider_fn, transcript: str, existing: str, model: str,
         return []
 
 
-def _coerce_importance(v):
-    """Clamp a model-supplied importance to an int in [1,10]; None if absent/invalid.
-    Phase C2: importance is optional — a missing/garbage value leaves the field
-    unset and recall treats it as neutral."""
-    if v is None:
-        return None
+# Deterministic importance priors by semantic kind — used as a fallback ONLY when
+# the model omits/garbles importance (a recognized model value always wins). Gives
+# ranking a real signal even on local models that skip the field: durable identity
+# / hard rules sit high; produced artifacts and transient observations sit low.
+# Resurrects IMPLEMENTATION_PLAN D2 (content-type prior). Keyed by normalized kind.
+DEFAULT_KIND_IMPORTANCE = 4  # floor for an unrecognized kind (normalize_kind → context)
+_KIND_IMPORTANCE_PRIOR = {
+    "constraint": 8, "preference": 7, "projectrule": 7, "decision": 7,
+    "goal": 6, "commitment": 6, "procedure": 6, "fact": 6,
+    "toolpattern": 5, "incident": 5, "learning": 5,
+    "context": 4, "openquestion": 4, "observation": 3, "artifact": 3,
+}
+
+
+def _coerce_importance(v, kind=None):
+    """Clamp a model-supplied importance to an int in [1,10]. A recognized value
+    always wins. When the model omits/garbles it, fall back to a deterministic
+    per-kind prior (so ranking still has a real signal) instead of None; if no
+    kind is given either, return None (recall then treats it as neutral)."""
     try:
         return max(1, min(10, int(v)))
     except (TypeError, ValueError):
-        return None
+        pass
+    if kind is not None:
+        return _KIND_IMPORTANCE_PRIOR.get(memory_types.normalize_kind(kind), DEFAULT_KIND_IMPORTANCE)
+    return None
 
 
 _ATTR_TOKEN_RE = re.compile(r"[a-z0-9_]{4,}")
@@ -500,18 +516,22 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
     embed_model_name = embeddings.model() if (valid and embeddings.is_enabled() and embeds) else None
     rows = []
     for i, m in enumerate(valid):
+        # Phase D1: the semantic `kind` (queryable node property). Prefer the
+        # model's top-level field, fall back to body frontmatter, normalize legacy
+        # bucket labels → semantic types. Computed once: also feeds the importance
+        # prior below.
+        row_kind = memory_types.normalize_kind(
+            m.get("kind") or memory_types.parse_kind(m["content"]) or memory_types.DEFAULT_KIND)
         rows.append({
             "path": m["path"],
             "content": m["content"],
             "updated_at": now,
             "created_by": f"dream_{provider}",
             "status": mem_status[m["path"]],
-            # Phase D1: stamp the semantic `kind` as a queryable node property.
-            # Prefer the model's top-level field, fall back to the body
-            # frontmatter, normalize legacy bucket labels → semantic types.
-            "kind": memory_types.normalize_kind(
-                m.get("kind") or memory_types.parse_kind(m["content"]) or memory_types.DEFAULT_KIND),
-            "importance": _coerce_importance(m.get("importance")),
+            "kind": row_kind,
+            # importance: the model's value when present; else a per-kind prior so
+            # ranking has a real signal even when a local model skips the field.
+            "importance": _coerce_importance(m.get("importance"), row_kind),
             "project": None
             if m["path"].startswith(("profile/", "tools/")) or not project
             else project,
