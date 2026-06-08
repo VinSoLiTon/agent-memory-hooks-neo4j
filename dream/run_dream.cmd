@@ -36,6 +36,7 @@ if "%DREAM_SINCE%"=="" set "DREAM_SINCE=36h"
 if "%DREAM_CONSOLIDATE_THRESHOLD%"=="" set "DREAM_CONSOLIDATE_THRESHOLD=0.92"
 if "%DREAM_CONSOLIDATE_ROUNDS%"=="" set "DREAM_CONSOLIDATE_ROUNDS=5"
 if "%DREAM_STALE_DAYS%"=="" set "DREAM_STALE_DAYS=60"
+if "%EVENT_RETENTION_DAYS%"=="" set "EVENT_RETENTION_DAYS=30"
 
 rem --- stage 1: distill recent sessions into memories -------------------------
 echo [%date% %time%] dream distill start (provider=%DREAM_PROVIDER% embed=%EMBED_PROVIDER% since=%DREAM_SINCE% contradiction=%DREAM_CONTRADICTION_CHECK%) >> "%LOG%"
@@ -53,6 +54,18 @@ rem --- stage 3: archive stale memories (excluded from recall, kept queryable) -
 echo [%date% %time%] dream archive start (stale_days=%DREAM_STALE_DAYS%) >> "%LOG%"
 python dream\dream.py --archive --stale-days %DREAM_STALE_DAYS% >> "%LOG%" 2>&1
 echo [%date% %time%] dream archive end exit=%errorlevel% >> "%LOG%"
+
+rem --- stage 4: Tier-1 down-tier old dreamed events (blank heavy text, keep chain).
+rem Reversible + lineage-preserving. OFF by default (DREAM_PRUNE_EVENTS=1 to enable)
+rem until validated on this graph; prompt is kept unless DREAM_TIER_BLANK_PROMPT=1.
+if not "%DREAM_PRUNE_EVENTS%"=="1" goto :done
+echo [%date% %time%] dream prune-events start (retention_days=%EVENT_RETENTION_DAYS%) >> "%LOG%"
+if "%DREAM_TIER_BLANK_PROMPT%"=="1" (
+  python cli\njhook.py prune-events --retention-days %EVENT_RETENTION_DAYS% --blank-prompt >> "%LOG%" 2>&1
+) else (
+  python cli\njhook.py prune-events --retention-days %EVENT_RETENTION_DAYS% >> "%LOG%" 2>&1
+)
+echo [%date% %time%] dream prune-events end exit=%errorlevel% >> "%LOG%"
 
 :done
 echo [%date% %time%] dream run end >> "%LOG%"

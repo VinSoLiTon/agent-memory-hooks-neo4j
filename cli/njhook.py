@@ -847,6 +847,22 @@ def cmd_archive(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prune_events(args: argparse.Namespace) -> int:
+    """Item #5 — Tier-1 down-tier old, dreamed events (blank heavy text fields,
+    keep the node + chain so lineage survives). Reversible, non-destructive."""
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dream"))
+    import prune_events as pe  # type: ignore
+    with driver() as d:
+        res = pe.prune_events(d, retention_days=args.retention_days,
+                              blank_prompt=args.blank_prompt, dry_run=args.dry_run)
+    verb = "[dry-run] would tier" if args.dry_run else "tiered"
+    print(f"prune-events: {verb} {res['events_tiered']} event(s) across "
+          f"{res['sessions']} session(s); ~{res['chars_reclaimed']} chars reclaimable"
+          + ("  (prompt blanked)" if args.blank_prompt else ""))
+    return 0
+
+
 def cmd_unarchive(args: argparse.Namespace) -> int:
     with driver() as d, d.session() as s:
         r = s.run(
@@ -1880,6 +1896,9 @@ def cmd_stats(_: argparse.Namespace) -> int:
             "MATCH (s:Session) RETURN s.client AS client, count(*) AS n ORDER BY n DESC"
         ))
         e_total = s.run("MATCH (e:Event) RETURN count(e) AS n").single()["n"]
+        e_tiered = s.run(
+            "MATCH (e:Event) WHERE coalesce(e.tiered,false)=true RETURN count(e) AS n"
+        ).single()["n"]
 
     print(f"Memories: {m_total}  ({m_archived} archived, {m_with_emb} embedded)")
     print("  by bucket:")
@@ -1891,7 +1910,8 @@ def cmd_stats(_: argparse.Namespace) -> int:
     print(f"\nSessions: {s_total}")
     for r in s_by_client:
         print(f"  {r['client'] or '?':<12} {r['n']}")
-    print(f"\nEvents: {e_total}")
+    tiered_note = f" ({e_tiered} tiered)" if e_tiered else ""
+    print(f"\nEvents: {e_total}{tiered_note}")
     return 0
 
 
@@ -2023,6 +2043,14 @@ def build_parser() -> argparse.ArgumentParser:
     pds = sub.add_parser("dream-stats", help="recent nightly run ledger (:NightlyRun): yield, fallback, written")
     pds.add_argument("--limit", type=int, default=10, help="how many recent runs to show (default 10)")
     pds.set_defaults(fn=cmd_dream_stats)
+
+    ppe = sub.add_parser("prune-events", help="Tier-1 down-tier old dreamed events (blank heavy text, keep the chain)")
+    ppe.add_argument("--retention-days", type=int, default=int(os.environ.get("EVENT_RETENTION_DAYS", "30")),
+                     help="events older than this (and past the dream watermark) are eligible (default 30)")
+    ppe.add_argument("--blank-prompt", action="store_true",
+                     help="also blank e.prompt (default off — it feeds event_fulltext recall)")
+    ppe.add_argument("--dry-run", action="store_true", help="report what would be tiered; write nothing")
+    ppe.set_defaults(fn=cmd_prune_events)
 
     pmg = sub.add_parser("migrate", help="run full schema migration (idempotent; run after install or upgrade)")
     pmg.set_defaults(fn=cmd_migrate)
