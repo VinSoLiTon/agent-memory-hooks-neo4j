@@ -129,11 +129,24 @@ Register-ScheduledTask -TaskName "njhook-dream-nightly" `
   -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited
 ```
 
-`run_dream.cmd` defaults `DREAM_PROVIDER=ollama` and
-`DREAM_OLLAMA_MODEL=qwen3.5:latest` (chosen for clean output and ~5s latency
-— gemma4 had a merge-vs-replace pollution failure mode that consolidate
-can't fix within a single memory). Override via User-scope env vars. Logs
-at `dream/logs/dream_YYYY-MM-DD.log`.
+`run_dream.cmd` defaults `DREAM_PROVIDER=llamacpp` + `EMBED_PROVIDER=llamacpp`
+(the local Gemma 12B / nomic-embed servers; see `docs/LLAMACPP_MIGRATION.md`)
+with `DREAM_FALLBACK_PROVIDER=anthropic` as the 0-yield/error safety net.
+Override via User-scope env vars. Logs at `dream/logs/dream_YYYY-MM-DD.log`.
+
+It runs **three logged stages** (the dedup + archival jobs already existed but
+nothing scheduled them; each is mutually exclusive with distillation inside
+`dream.py`, so they need their own invocations):
+
+1. **distill** — `dream.py --since %DREAM_SINCE%` (default `36h`).
+2. **consolidate** — `dream.py --consolidate` (vector-similarity merge of
+   near-duplicates; `DREAM_CONSOLIDATE_THRESHOLD` 0.92, `DREAM_CONSOLIDATE_ROUNDS` 5).
+3. **archive** — `dream.py --archive` (flag memories untouched for
+   `DREAM_STALE_DAYS`, default 60; excluded from recall, kept queryable).
+
+Each stage logs `<stage> start … / <stage> end exit=<rc>` so a failure in one is
+visible and does not abort the others. Set `DREAM_SKIP_MAINTENANCE=1` for an
+ad-hoc distill-only run.
 
 ## Schema
 

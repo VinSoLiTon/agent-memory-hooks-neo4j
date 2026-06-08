@@ -56,3 +56,43 @@ def test_history_page_shows_audit_operation_and_actor(client):
     html = resp.data.decode("utf-8", "replace")
     assert "approve" in html        # the review transition is shown as an operation
     assert "audit log" in html.lower()
+
+
+# --- write-mode toggle (header opt-in, no restart) --------------------------
+
+def test_write_routes_403_until_toggled_on(client, monkeypatch):
+    # default launch state is read-only...
+    monkeypatch.setattr(dash, "WRITE_DEFAULT", False)
+    resp = client.post(f"/memory/{_PATH}/archive")
+    assert resp.status_code == 403          # gated
+
+    # ...one POST to the header toggle flips this browser session to write mode...
+    t = client.post("/toggle-write")
+    assert t.status_code in (301, 302)      # redirects back
+
+    # ...and the same destructive route now succeeds (redirect, not 403).
+    resp2 = client.post(f"/memory/{_PATH}/archive")
+    assert resp2.status_code in (301, 302)
+    assert resp2.status_code != 403
+
+
+def test_toggle_is_reversible(client, monkeypatch):
+    monkeypatch.setattr(dash, "WRITE_DEFAULT", False)
+    client.post("/toggle-write")            # on
+    client.post("/toggle-write")            # off again
+    assert client.post(f"/memory/{_PATH}/archive").status_code == 403
+
+
+def test_header_shows_toggle_control(client, monkeypatch):
+    monkeypatch.setattr(dash, "WRITE_DEFAULT", False)
+    html = client.get("/memories").data.decode("utf-8", "replace")
+    assert "/toggle-write" in html          # the header form is rendered
+    assert "read-only" in html              # ...labelled read-only when off
+
+
+def test_write_default_on_renders_unlocked(client, monkeypatch):
+    # launching with DASHBOARD_WRITE=1 / --write makes write the session default
+    monkeypatch.setattr(dash, "WRITE_DEFAULT", True)
+    html = client.get("/memories").data.decode("utf-8", "replace")
+    assert "/toggle-write" in html
+    assert "write \U0001f513" in html       # "write 🔓" — unlocked label

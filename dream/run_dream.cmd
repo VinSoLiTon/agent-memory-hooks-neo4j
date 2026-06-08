@@ -22,9 +22,37 @@ rem Contradiction detection ON by default in the nightly (it shipped off, so the
 rem scheduled run never detected conflicts). The judge is conservative-by-failure
 rem (returns False on any doubt) so this can only MISS contradictions, never wrongly
 rem quarantine; candidates come from BOTH the vector and fulltext channels. Set
-rem DREAM_CONTRADICTION_CHECK=0 to disable.
+rem DREAM_CONTRADICTION_CHECK=0 to disable. (Applies to the distill stage below.)
 if "%DREAM_CONTRADICTION_CHECK%"=="" set "DREAM_CONTRADICTION_CHECK=1"
 
-echo [%date% %time%] dream run start (provider=%DREAM_PROVIDER% embed=%EMBED_PROVIDER% contradiction=%DREAM_CONTRADICTION_CHECK%) >> "%LOG%"
-python dream\dream.py --since 36h >> "%LOG%" 2>&1
-echo [%date% %time%] dream run end exit=%errorlevel% >> "%LOG%"
+rem Nightly window + maintenance knobs (conservative defaults). The dedup and
+rem archival jobs already existed (consolidate.py / `njhook consolidate|archive`)
+rem but nothing scheduled them, so graph hygiene depended on a human remembering
+rem to run them. They run as separate stages below because each is mutually
+rem exclusive with distillation inside dream.py (early return). Each stage logs
+rem its own start/end+exit so a failure in one is visible and does not abort the
+rem others. Set DREAM_SKIP_MAINTENANCE=1 to run only the distill stage.
+if "%DREAM_SINCE%"=="" set "DREAM_SINCE=36h"
+if "%DREAM_CONSOLIDATE_THRESHOLD%"=="" set "DREAM_CONSOLIDATE_THRESHOLD=0.92"
+if "%DREAM_CONSOLIDATE_ROUNDS%"=="" set "DREAM_CONSOLIDATE_ROUNDS=5"
+if "%DREAM_STALE_DAYS%"=="" set "DREAM_STALE_DAYS=60"
+
+rem --- stage 1: distill recent sessions into memories -------------------------
+echo [%date% %time%] dream distill start (provider=%DREAM_PROVIDER% embed=%EMBED_PROVIDER% since=%DREAM_SINCE% contradiction=%DREAM_CONTRADICTION_CHECK%) >> "%LOG%"
+python dream\dream.py --since %DREAM_SINCE% >> "%LOG%" 2>&1
+echo [%date% %time%] dream distill end exit=%errorlevel% >> "%LOG%"
+
+if "%DREAM_SKIP_MAINTENANCE%"=="1" goto :done
+
+rem --- stage 2: consolidate near-duplicate memories (vector-similarity merge) --
+echo [%date% %time%] dream consolidate start (threshold=%DREAM_CONSOLIDATE_THRESHOLD% rounds=%DREAM_CONSOLIDATE_ROUNDS%) >> "%LOG%"
+python dream\dream.py --consolidate --consolidate-threshold %DREAM_CONSOLIDATE_THRESHOLD% --consolidate-rounds %DREAM_CONSOLIDATE_ROUNDS% >> "%LOG%" 2>&1
+echo [%date% %time%] dream consolidate end exit=%errorlevel% >> "%LOG%"
+
+rem --- stage 3: archive stale memories (excluded from recall, kept queryable) --
+echo [%date% %time%] dream archive start (stale_days=%DREAM_STALE_DAYS%) >> "%LOG%"
+python dream\dream.py --archive --stale-days %DREAM_STALE_DAYS% >> "%LOG%" 2>&1
+echo [%date% %time%] dream archive end exit=%errorlevel% >> "%LOG%"
+
+:done
+echo [%date% %time%] dream run end >> "%LOG%"
