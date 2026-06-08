@@ -25,10 +25,16 @@ gates (each tunable; see `cli/README.md` env table):
   not `active`.
 - **Anti-poisoning gate** (Phase H3) — a NEW directive memory from a thin, novel
   session is quarantined to `pending_review` (`quality.poisoning_risk`).
-- **Contradiction check** (Phase E, opt-in `DREAM_CONTRADICTION_CHECK=1` /
-  `--check-contradictions`) — asks the LLM whether each new memory contradicts an
-  active one; on a hit, links `:CONTRADICTS` and quarantines the NEW memory while
-  the established one stays active.
+- **Contradiction check** (Phase E) — asks the LLM whether each new memory
+  contradicts an active one; on a hit, links `:CONTRADICTS` and quarantines the
+  NEW memory while the established one stays active. **On by default in the
+  nightly** (`run_dream.cmd` sets `DREAM_CONTRADICTION_CHECK=1`; set `=0` to
+  disable); also available ad-hoc via `--check-contradictions`. The judge is
+  conservative-by-failure (returns "no" on any doubt), so it can only miss a
+  contradiction, never wrongly quarantine. Candidates come from **two channels**:
+  vector neighbours (semantic) ∪ Lucene fulltext (lexical) — the latter catches
+  antonym-style contradictions ("deploy via Docker" vs "never containers") that
+  score low on cosine.
 
 Pending/quarantined/contradicted memories are advisory-only (recall injects
 `active` only); adjudicate with `njhook review`. Evaluate output quality with

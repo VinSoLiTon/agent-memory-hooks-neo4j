@@ -42,6 +42,7 @@ import embeddings  # noqa: E402
 import consolidate as consolidate_mod  # noqa: E402
 import quality as quality_mod  # noqa: E402
 import review as review_mod  # noqa: E402  (Phase E — contradiction detection/flagging)
+import recall as recall_mod  # noqa: E402  (fulltext candidate channel for contradiction detection)
 import judge as judge_mod  # noqa: E402  (Phase E PR-3 — LLM contradiction judge)
 import memory_types  # noqa: E402  (Phase D1 — semantic kind vocabulary)
 
@@ -635,7 +636,14 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
     # judge + find_candidates are injectable so the wiring is tested without an LLM.
     if rows and (contradiction_judge is not None or os.environ.get("DREAM_CONTRADICTION_CHECK") == "1"):
         judge = contradiction_judge or judge_mod.get_judge(provider, model)
-        finder = find_candidates or review_mod.vector_candidates(embeddings.embed)
+        # Two candidate channels, unioned: vector neighbours (semantic) + fulltext
+        # overlap (lexical) — the latter catches antonym-style contradictions that
+        # score low on cosine. The LLM judge stays the precision gate. Injectable
+        # `find_candidates` (tests) still overrides both.
+        finder = find_candidates or review_mod.union_candidates(
+            review_mod.vector_candidates(embeddings.embed),
+            review_mod.fulltext_candidates(recall_mod.fulltext_search),
+        )
         new_active = [(r["path"], r["content"]) for r in rows if mem_status.get(r["path"]) == "active"]
         flagged = check_contradictions(driver, new_active, judge, finder)
         if flagged:

@@ -18,6 +18,13 @@ rem Only the sessions the local model can't handle egress. Set
 rem DREAM_FALLBACK_PROVIDER=none to keep the nightly fully local (no egress).
 if "%DREAM_FALLBACK_PROVIDER%"=="" set "DREAM_FALLBACK_PROVIDER=anthropic"
 
-echo [%date% %time%] dream run start (provider=%DREAM_PROVIDER% embed=%EMBED_PROVIDER%) >> "%LOG%"
+rem Contradiction detection ON by default in the nightly (it shipped off, so the
+rem scheduled run never detected conflicts). The judge is conservative-by-failure
+rem (returns False on any doubt) so this can only MISS contradictions, never wrongly
+rem quarantine; candidates come from BOTH the vector and fulltext channels. Set
+rem DREAM_CONTRADICTION_CHECK=0 to disable.
+if "%DREAM_CONTRADICTION_CHECK%"=="" set "DREAM_CONTRADICTION_CHECK=1"
+
+echo [%date% %time%] dream run start (provider=%DREAM_PROVIDER% embed=%EMBED_PROVIDER% contradiction=%DREAM_CONTRADICTION_CHECK%) >> "%LOG%"
 python dream\dream.py --since 36h >> "%LOG%" 2>&1
 echo [%date% %time%] dream run end exit=%errorlevel% >> "%LOG%"
