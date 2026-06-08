@@ -17,9 +17,17 @@ Archival needs neither.
 """
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime, timezone, timedelta
 from typing import Callable
+
+
+def _strip_superseded_embedding() -> bool:
+    """Item #21: whether to remove a memory's embedding when it becomes superseded
+    (drops it from the HNSW index). Default ON; MEMORY_STRIP_SUPERSEDED_EMBEDDING=0
+    retains superseded vectors (e.g. for offline analytics)."""
+    return os.environ.get("MEMORY_STRIP_SUPERSEDED_EMBEDDING", "1") != "0"
 
 # These modules are picked up via sys.path in dream.py before this is imported.
 from providers import get_provider, default_model  # type: ignore  # noqa: E402
@@ -196,6 +204,18 @@ def consolidate(driver, provider_name: str | None, threshold: float, max_rounds:
                     "p1": p["p1"], "p2": p["p2"], "emb": new_embedding,
                 },
             )
+            # Item #21: strip the now-superseded sources' embedding so they drop out
+            # of the HNSW vector index (Neo4j removes a node from a vector index when
+            # the indexed property is removed) — reclaims storage + frees ANN top-k
+            # slots. Content/lineage/audit untouched. Default-ON; set
+            # MEMORY_STRIP_SUPERSEDED_EMBEDDING=0 to retain superseded vectors.
+            if _strip_superseded_embedding():
+                ses.run(
+                    "MATCH (old:Memory) WHERE old.path IN [$p1, $p2] "
+                    "AND coalesce(old.status,'active') = 'superseded' "
+                    "REMOVE old.embedding, old.embedding_model, old.embedding_dim",
+                    p1=p["p1"], p2=p["p2"],
+                )
         merges += 1
         print(f"    merged into '{new_path}'; originals superseded")
 

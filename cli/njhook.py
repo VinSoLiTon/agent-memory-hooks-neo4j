@@ -886,6 +886,22 @@ def cmd_prune_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prune_embeddings(args: argparse.Namespace) -> int:
+    """Item #21 — one-shot backfill: strip embeddings from already-superseded
+    memories (new supersessions strip automatically). Drops them from the HNSW
+    index; content/lineage untouched. --dry-run counts without writing."""
+    with driver() as d, d.session() as s:
+        n = s.run("MATCH (m:Memory) WHERE coalesce(m.status,'active')='superseded' "
+                  "AND m.embedding IS NOT NULL RETURN count(m) AS n").single()["n"]
+        if not args.dry_run and n:
+            s.run("MATCH (m:Memory) WHERE coalesce(m.status,'active')='superseded' "
+                  "AND m.embedding IS NOT NULL "
+                  "REMOVE m.embedding, m.embedding_model, m.embedding_dim")
+    verb = "[dry-run] would strip" if args.dry_run else "stripped"
+    print(f"prune-embeddings: {verb} embeddings from {n} superseded memory(ies)")
+    return 0
+
+
 def cmd_unarchive(args: argparse.Namespace) -> int:
     with driver() as d, d.session() as s:
         r = s.run(
@@ -2190,6 +2206,10 @@ def build_parser() -> argparse.ArgumentParser:
     ppe.add_argument("--dry-run", action="store_true", help="report what would be tiered; write nothing")
     ppe.add_argument("--session", help="scope to a single session_key (default: all dreamed sessions)")
     ppe.set_defaults(fn=cmd_prune_events)
+
+    pme = sub.add_parser("prune-embeddings", help="one-shot: strip embeddings from already-superseded memories (item #21 backfill)")
+    pme.add_argument("--dry-run", action="store_true", help="count without writing")
+    pme.set_defaults(fn=cmd_prune_embeddings)
 
     pmg = sub.add_parser("migrate", help="run full schema migration (idempotent; run after install or upgrade)")
     pmg.set_defaults(fn=cmd_migrate)

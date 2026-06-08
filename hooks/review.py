@@ -12,6 +12,7 @@ separately and feeds this queue; here we provide the surfaces + resolution.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 import audit
@@ -103,9 +104,15 @@ def supersede(session, winner: str, loser: str) -> None:
     if winner in states and states[winner]["s"] != "active":
         audit.record(session, winner, "approve", actor="user",
                      status=states[winner]["s"], content_snapshot=states[winner]["c"], ts=now)
+    # Item #21: strip the loser's embedding so it drops out of the HNSW vector index
+    # (default ON; MEMORY_STRIP_SUPERSEDED_EMBEDDING=0 retains it). Atomic with the
+    # status flip; the winner is never touched. Content/lineage/audit unaffected.
+    strip = ("REMOVE l.embedding, l.embedding_model, l.embedding_dim "
+             if os.environ.get("MEMORY_STRIP_SUPERSEDED_EMBEDDING", "1") != "0" else "")
     session.run(
         "MATCH (w:Memory {path: $w}), (l:Memory {path: $l}) "
         "SET w.status = 'active', l.status = 'superseded', l.valid_until = $now "
+        + strip +
         "MERGE (l)-[:SUPERSEDED_BY]->(w) "
         "WITH w, l OPTIONAL MATCH (w)-[c:CONTRADICTS]-(l) DELETE c",
         w=winner, l=loser, now=now,
