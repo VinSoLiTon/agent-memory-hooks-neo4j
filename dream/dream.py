@@ -76,6 +76,32 @@ def get_driver():
     )
 
 
+def _derived_transcript_cap(provider_name: str) -> int:
+    """Item #19: the local-provider transcript char cap. DREAM_TRANSCRIPT_MAX_CHARS,
+    if set, is honored verbatim (back-compat). Otherwise, for llama.cpp, derive it
+    from the server's n_ctx so the dream-layer slice stays a comfortable fraction
+    (DREAM_TRANSCRIPT_CTX_FRACTION, default 0.7) under the provider-layer trim —
+    a bigger server → a bigger slice, no per-window summarization. The max(8000,..)
+    floor preserves today's behaviour on a tiny/8192 server; non-llamacpp local
+    (e.g. ollama, n_ctx unknown) falls back to the historical 16000."""
+    env = os.environ.get("DREAM_TRANSCRIPT_MAX_CHARS")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    if provider_name == "llamacpp":
+        try:
+            from providers import _llamacpp_n_ctx, LLAMACPP_CHAT_URL, _CHARS_PER_TOK
+            n_ctx = _llamacpp_n_ctx(LLAMACPP_CHAT_URL.rstrip("/"))
+            reserve = int(os.environ.get("LLAMACPP_OUTPUT_RESERVE", "3072"))
+            frac = float(os.environ.get("DREAM_TRANSCRIPT_CTX_FRACTION", "0.7"))
+            return max(8000, int((n_ctx - reserve - 256) * _CHARS_PER_TOK * frac))
+        except Exception:
+            pass
+    return 16000
+
+
 def parse_since(s: str) -> datetime:
     m = re.fullmatch(r"(\d+)([hdm])", s)
     if not m:
@@ -918,8 +944,11 @@ def main():
         # swamps the model.
         paths_only = provider_name not in ("anthropic", "openai")
         # Local models also get a bounded transcript (large real sessions overflow
-        # their context → 0 memories); frontier models get the full transcript.
-        transcript_cap = int(os.environ.get("DREAM_TRANSCRIPT_MAX_CHARS", "16000")) if paths_only else None
+        # their context → 0 memories); frontier models get the full transcript. The
+        # cap is DERIVED from the server's n_ctx (item #19) so a bigger server uses a
+        # bigger slice and the provider-layer trim never has to fire — no per-window
+        # summarization needed.
+        transcript_cap = _derived_transcript_cap(provider_name) if paths_only else None
 
         # Hybrid fallback: small local models reliably fail to distil large, real
         # sessions (qwen returns empty, gemma hallucinates). When the local primary
