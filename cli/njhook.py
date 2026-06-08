@@ -1511,6 +1511,39 @@ def _rehearsal_health_row(latest: dict | None, rehearsal_days: int, now=None):
     return ("ok", "restore rehearsal", f"last ok {str(ts)[:10]} ({age_str})")
 
 
+def _nightly_health_row(latest: dict | None, stale_hours: int, now=None):
+    """Compute the `health` row for the nightly dream run from the latest
+    :NightlyRun (or None). Pure so it's unit-testable (item #8). A zero-yield or
+    all-fallback run looks identical to a perfect one without this surface."""
+    if not latest:
+        return ("warn", "nightly run",
+                "no nightly run recorded — has run_dream.cmd fired?")
+    now = now or datetime.now(timezone.utc)
+    ts = latest.get("ts")
+    seen = latest.get("sessions_seen") or 0
+    yielded = latest.get("with_yield") or 0
+    fell_back = latest.get("fallback_fired") or 0
+    written = latest.get("written") or 0
+    if seen > 0 and yielded == 0:
+        return ("warn", "nightly run",
+                f"last nightly distilled 0/{seen} sessions — provider yielding nothing?")
+    if seen > 0 and fell_back == seen:
+        return ("warn", "nightly run",
+                f"every session ({seen}) fell back to the remote provider — local model yielding nothing")
+    try:
+        dt = datetime.fromisoformat(str(ts))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age_hours = (now - dt).total_seconds() / 3600.0
+    except Exception:
+        age_hours = None
+    if age_hours is not None and age_hours > stale_hours:
+        return ("warn", "nightly run",
+                f"last run {str(ts)[:19]} (>{stale_hours}h ago) — is the scheduler running?")
+    return ("ok", "nightly run",
+            f"last ok {str(ts)[:19]}: {yielded}/{seen} sessions yielded, {written} written")
+
+
 def cmd_health(args: argparse.Namespace) -> int:
     """Run a series of stack-readiness checks. Exit 0 if all OK or only WARN;
     exit 1 if any FAIL.
@@ -1765,6 +1798,19 @@ def cmd_health(args: argparse.Namespace) -> int:
     except Exception as e:
         rows.append((WARN, "restore rehearsal", f"check failed: {e}"))
 
+    # --- 14. Nightly run ledger (item #8) ---
+    try:
+        stale_hours = int(os.environ.get("NJHOOK_NIGHTLY_STALE_HOURS", "48"))
+        with driver() as d, d.session() as s:
+            nr = s.run(
+                "MATCH (r:NightlyRun) RETURN r.ts AS ts, r.sessions_seen AS sessions_seen, "
+                "r.with_yield AS with_yield, r.fallback_fired AS fallback_fired, "
+                "r.written AS written ORDER BY r.ts DESC LIMIT 1"
+            ).single()
+        rows.append(_nightly_health_row(dict(nr) if nr else None, stale_hours))
+    except Exception as e:
+        rows.append((WARN, "nightly run", f"check failed: {e}"))
+
     return _print_health(rows)
 
 
@@ -1846,6 +1892,28 @@ def cmd_stats(_: argparse.Namespace) -> int:
     for r in s_by_client:
         print(f"  {r['client'] or '?':<12} {r['n']}")
     print(f"\nEvents: {e_total}")
+    return 0
+
+
+def cmd_dream_stats(args: argparse.Namespace) -> int:
+    """Item #8: the recent per-nightly run ledger (:NightlyRun) — sessions seen,
+    how many yielded, how many fell back to the remote provider, memories written,
+    and wall-clock. A zero-yield / all-fallback run is otherwise invisible."""
+    limit = getattr(args, "limit", 10) or 10
+    with driver() as d, d.session() as s:
+        rows = [dict(r) for r in s.run(
+            "MATCH (r:NightlyRun) RETURN r.ts AS ts, r.provider AS provider, "
+            "r.sessions_seen AS seen, r.with_yield AS yielded, r.fallback_fired AS fell_back, "
+            "r.written AS written, r.skipped_sensitive AS skipped, r.duration_ms AS ms "
+            "ORDER BY r.ts DESC LIMIT $n", n=limit)]
+    if not rows:
+        print("(no nightly runs recorded yet — run dream/run_dream.cmd)")
+        return 0
+    print(f"{'ts':<20} {'provider':<10} {'seen':>4} {'yield':>5} {'fb':>3} {'wrote':>5} {'skip':>4} {'ms':>8}")
+    for r in rows:
+        print(f"{str(r['ts'])[:19]:<20} {str(r['provider'] or '')[:10]:<10} "
+              f"{r['seen'] or 0:>4} {r['yielded'] or 0:>5} {r['fell_back'] or 0:>3} "
+              f"{r['written'] or 0:>5} {r['skipped'] or 0:>4} {r['ms'] or 0:>8}")
     return 0
 
 
@@ -1951,6 +2019,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     pst = sub.add_parser("stats", help="counts by client / kind")
     pst.set_defaults(fn=cmd_stats)
+
+    pds = sub.add_parser("dream-stats", help="recent nightly run ledger (:NightlyRun): yield, fallback, written")
+    pds.add_argument("--limit", type=int, default=10, help="how many recent runs to show (default 10)")
+    pds.set_defaults(fn=cmd_dream_stats)
 
     pmg = sub.add_parser("migrate", help="run full schema migration (idempotent; run after install or upgrade)")
     pmg.set_defaults(fn=cmd_migrate)
