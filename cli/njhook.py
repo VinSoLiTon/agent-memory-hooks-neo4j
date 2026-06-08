@@ -1294,9 +1294,13 @@ def cmd_restore(args: argparse.Namespace) -> int:
             if not p:
                 continue
             s.run(
+                # item #23: key the revision on its (non-null) ts, not on
+                # content_snapshot — status-only revisions carry a null snapshot now,
+                # and Neo4j cannot MERGE on a null property value. content_snapshot is
+                # SET (nullable) instead.
                 "MATCH (m:Memory {path: $path}) "
-                "MERGE (m)<-[:VERSION_OF]-(r:MemoryRevision {ts: $ts, content_snapshot: $cs}) "
-                "SET r.status = $st, r.operation = $op, r.actor = $ac",
+                "MERGE (m)<-[:VERSION_OF]-(r:MemoryRevision {ts: $ts}) "
+                "SET r.status = $st, r.operation = $op, r.actor = $ac, r.content_snapshot = $cs",
                 parameters={"path": p, "ts": rev.get("ts"), "cs": rev.get("content_snapshot"),
                             "st": rev.get("status"), "op": rev.get("operation"), "ac": rev.get("actor")},
             )
@@ -1409,8 +1413,9 @@ def run_rehearsal() -> dict:
                 "MERGE (m:Memory {path:$p}) "
                 "SET m.content=$c, m.status='active', m.created_by='rehearsal', "
                 "    m.updated_at=$now, m.valid_from=$now, m.ingested_at=$now "
-                "MERGE (rev:MemoryRevision {ts:$rt, content_snapshot:$cs}) "
-                "SET rev.operation='dream_update', rev.actor='rehearsal', rev.status='active' "
+                "MERGE (rev:MemoryRevision {ts:$rt}) "
+                "SET rev.operation='dream_update', rev.actor='rehearsal', rev.status='active', "
+                "    rev.content_snapshot=$cs "
                 "MERGE (rev)-[:VERSION_OF]->(m)",
                 p=marker, c=content, now=seed_ts, rt=seed_ts, cs="prior rehearsal body",
             )

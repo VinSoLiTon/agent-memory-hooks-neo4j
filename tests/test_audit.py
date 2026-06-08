@@ -141,6 +141,34 @@ def test_edit_is_audited(driver):
     assert edits and edits[0]["snapshot_len"] == len("original body")
 
 
+# --- item #23: status-only ops carry NO body snapshot -----------------------
+
+def test_status_only_ops_snapshot_none_content_ops_still_snapshot(driver):
+    with driver.session() as s:
+        p = _mk(s, "_c23", status="pending_review", content="the body")
+        review.approve(s, p)                                  # status-only → no snapshot
+        audit.record(s, p, "edit", actor="user", status="active", content_snapshot="the body")  # content op
+        snaps = {r["op"]: r["cs"] for r in s.run(
+            "MATCH (rev:MemoryRevision)-[:VERSION_OF]->(m:Memory {path:$p}) "
+            "RETURN rev.operation AS op, rev.content_snapshot AS cs", p=p)}
+    assert snaps.get("approve") is None        # status-only op stored a null snapshot
+    assert snaps.get("edit") == "the body"     # content op still snapshots the prior body
+
+
+def test_audit_record_drops_snapshot_for_status_op(driver):
+    # even if a caller passes a snapshot for a status-only op, record() drops it
+    with driver.session() as s:
+        p = _mk(s, "_c23b", content="b")
+        audit.record(s, p, "supersede", actor="user", status="active", content_snapshot="SHOULD BE DROPPED")
+        cs = s.run("MATCH (rev:MemoryRevision {operation:'supersede'})-[:VERSION_OF]->(m:Memory {path:$p}) "
+                   "RETURN rev.content_snapshot AS cs", p=p).single()["cs"]
+    assert cs is None
+
+
+def test_content_ops_is_the_closed_snapshot_vocab():
+    assert audit.CONTENT_OPS == frozenset({"dream_create", "dream_update", "edit"})
+
+
 def test_recent_is_graph_wide_newest_first(driver):
     with driver.session() as s:
         p1 = _mk(s, "_r1")

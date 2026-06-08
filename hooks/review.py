@@ -71,8 +71,11 @@ def _set_status(session, path: str, status: str, *, operation: str, actor: str =
     ).single()
     if not cur:
         return 0
+    # item #23: status-only ops (approve/reject/...) replace NO body, so they carry
+    # content_snapshot=None — the prior STATUS is the load-bearing audit datum and
+    # the body is unchanged, so copying it again only bloats the revision chain.
     audit.record(session, path, operation, actor=actor, status=cur["s"],
-                 content_snapshot=cur["c"], ts=now)
+                 content_snapshot=None, ts=now)
     return session.run(
         "MATCH (m:Memory {path: $p}) SET m.status = $s, m.reviewed_at = $now RETURN count(m) AS n",
         p=path, s=status, now=now,
@@ -98,12 +101,12 @@ def supersede(session, winner: str, loser: str) -> None:
     states = {r["p"]: r for r in session.run(
         "MATCH (m:Memory) WHERE m.path IN [$w, $l] "
         "RETURN m.path AS p, coalesce(m.status, 'active') AS s, m.content AS c", w=winner, l=loser)}
-    if loser in states:
+    if loser in states:  # item #23: status-only op → content_snapshot=None
         audit.record(session, loser, "supersede", actor="user",
-                     status=states[loser]["s"], content_snapshot=states[loser]["c"], ts=now)
+                     status=states[loser]["s"], content_snapshot=None, ts=now)
     if winner in states and states[winner]["s"] != "active":
         audit.record(session, winner, "approve", actor="user",
-                     status=states[winner]["s"], content_snapshot=states[winner]["c"], ts=now)
+                     status=states[winner]["s"], content_snapshot=None, ts=now)   # item #23
     # Item #21: strip the loser's embedding so it drops out of the HNSW vector index
     # (default ON; MEMORY_STRIP_SUPERSEDED_EMBEDDING=0 retains it). Atomic with the
     # status flip; the winner is never touched. Content/lineage/audit unaffected.
@@ -129,7 +132,7 @@ def flag_contradiction(session, p1: str, p2: str) -> None:
     for p in (p1, p2):
         if p in states:
             audit.record(session, p, "flag_contradiction", actor="system",
-                         status=states[p]["s"], content_snapshot=states[p]["c"])
+                         status=states[p]["s"], content_snapshot=None)   # item #23: status-only
     session.run(
         "MATCH (a:Memory {path: $a}), (b:Memory {path: $b}) "
         "MERGE (a)-[:CONTRADICTS]->(b) "
@@ -150,7 +153,7 @@ def flag_new_contradiction(session, existing_path: str, new_path: str) -> None:
     ).single()
     if cur:
         audit.record(session, new_path, "flag_contradiction", actor="dream",
-                     status=cur["s"], content_snapshot=cur["c"])
+                     status=cur["s"], content_snapshot=None)   # item #23: status-only
     session.run(
         "MATCH (n:Memory {path: $n}), (e:Memory {path: $e}) "
         "MERGE (n)-[:CONTRADICTS]->(e) "
