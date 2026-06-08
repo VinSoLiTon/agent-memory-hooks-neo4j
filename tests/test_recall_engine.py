@@ -280,6 +280,30 @@ def test_memory_history_missing_path_returns_none(hist_driver):
         assert recall.memory_history(s, "general/__hist_does_not_exist.md") is None
 
 
+def test_history_excludes_status_only_revisions_and_as_of_stays_correct(hist_driver):
+    # item #23 x #7 interaction: a status-only revision (null content_snapshot)
+    # must NOT appear in the content timeline, else content_as_of reconstructs an
+    # empty body for a ts landing just before it.
+    p = "general/__hist_s.md"
+    with hist_driver.session() as s:
+        s.run("CREATE (m:Memory {path:$p, content:'NEW body', updated_at:'2026-06-05T00:00:00+00:00', status:'active'}) "
+              # a CONTENT revision (the prior body, replaced at T1) ...
+              "CREATE (:MemoryRevision {content_snapshot:'OLD body', operation:'dream_update', actor:'t', "
+              "                          ts:'2026-06-02T00:00:00+00:00'})-[:VERSION_OF]->(m) "
+              # ... then a STATUS-only revision at T2 (null snapshot, e.g. an approve)
+              "CREATE (:MemoryRevision {content_snapshot:null, operation:'approve', actor:'user', "
+              "                          ts:'2026-06-04T00:00:00+00:00'})-[:VERSION_OF]->(m)", p=p)
+        h = recall.memory_history(s, p)
+    ops = [v["operation"] for v in h["versions"]]
+    assert "approve" not in ops                          # status-only revision excluded from content timeline
+    assert [v["content"] for v in h["versions"]] == ["OLD body", "NEW body"]
+    # as-of BETWEEN the content change (T1) and the status op (T2): the live body
+    # was NEW (OLD was already replaced) — must NOT reconstruct '' from the approve.
+    assert recall.content_as_of(h["versions"], "2026-06-03T00:00:00+00:00") == "NEW body"
+    # before the content change → the old body
+    assert recall.content_as_of(h["versions"], "2026-06-01T00:00:00+00:00") == "OLD body"
+
+
 def test_value_density_orders_session_start_truncation():
     now = datetime(2026, 6, 1, tzinfo=timezone.utc)
     buckets = {
