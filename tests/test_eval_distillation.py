@@ -85,6 +85,49 @@ def test_empty_candidates_fail():
     assert r["n"] == 0 and r["coverage"] == 0.0 and r["pass"] is False
 
 
+# --- item #11: anti-noise / count-discipline metric -------------------------
+
+def test_noise_metric_present_and_clean_for_useful_set():
+    r = ed.score(_good(), _TRANSCRIPT, _EXPECTED)
+    assert "noise" in r and "precision" in r and "negative_hits" in r
+    assert r["noise"] == 0.0 and r["precision"] == 1.0   # both candidates cover a fact
+    assert r["pass"] is True
+
+
+def test_padding_inflates_noise_and_fails():
+    # 2 useful + 3 valid, grounded, on-topic-but-fact-IRRELEVANT memories (padding).
+    # the OLD scorer would pass (grounded=1.0, coverage=1.0); the noise gate fails it.
+    padding = [
+        _cand("project/p1.md", "context", "deploy via staging pipeline never prod"),
+        _cand("project/p2.md", "context", "the user prefers terse descriptions on deploy"),
+        _cand("project/p3.md", "context", "staging pipeline is used for deploy steps"),
+    ]
+    r = ed.score(_good() + padding, _TRANSCRIPT, _EXPECTED)
+    assert r["grounded_rate"] == 1.0 and r["coverage"] == 1.0   # old scorer would have passed
+    assert r["noise"] > ed.NOISE_MAX and r["pass"] is False     # ...but count-discipline catches it
+
+
+def test_negative_hit_fails_even_when_facts_covered():
+    expected = {"facts": [["rust", "engineer"]], "negatives": [["cargo", "passed"]]}
+    cands = [_cand("profile/role.md", "fact", "rust engineer building systems"),
+             _cand("general/run.md", "observation", "cargo test passed in 1.2s")]  # ephemera memorialized
+    r = ed.score(cands, _TRANSCRIPT, expected)
+    assert r["negative_hits"] == 1 and r["pass"] is False
+
+
+def test_no_facts_declared_means_no_noise_penalty():
+    # a fixture with no facts can't judge usefulness → noise must not penalize it
+    r = ed.score(_good(), _TRANSCRIPT, {"facts": []})
+    assert r["noise"] == 0.0
+
+
+def test_golden_fixtures_carry_negatives_and_widen_kinds():
+    names = {fx["name"] for fx in ed.GOLDEN_SESSIONS}
+    assert {"incident-postmortem", "build-procedure"} <= names      # widened beyond the original 2
+    for fx in ed.GOLDEN_SESSIONS:
+        assert "negatives" in fx                                    # contract: every fixture declares it
+
+
 def test_print_report_smoke(capsys):
     rep = {"provider": "ollama", "model": "m", "pass": True,
            "sessions": [{"name": "s1", "pass": True, "valid_rate": 1.0, "path_ok_rate": 1.0,
