@@ -2130,7 +2130,6 @@ def build_parser() -> argparse.ArgumentParser:
     pst.set_defaults(fn=cmd_stats)
 
     pso = sub.add_parser("storage", help="on-demand byte accounting: where storage accumulates (estimates)")
-    pso.add_argument("--top", type=int, default=10, help="how many heaviest sessions to list (default 10)")
     pso.add_argument("--json", action="store_true", help="machine-readable JSON output")
     pso.set_defaults(fn=cmd_storage)
 
