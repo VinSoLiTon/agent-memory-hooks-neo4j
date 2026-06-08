@@ -23,6 +23,16 @@ gates (each tunable; see `cli/README.md` env table):
 - **A-MAC grounding gate** (Phase D2) — a NEW memory whose body doesn't overlap
   the source transcript (`< DREAM_GROUNDING_MIN`) is routed to `pending_review`,
   not `active`.
+- **Critique / faithfulness pass** (item #18, opt-in `DREAM_CRITIQUE=1`) — the
+  semantic complement to grounding. Grounding (token overlap) passes a fluent
+  hallucination that reuses the session's words but inverts a value ("port 5000"
+  → "port 9999"); this pass asks the LLM whether each NEW candidate is *faithful*
+  to the bounded transcript and quarantines the ones that aren't (`critic.py`).
+  Lenient-by-failure — the inverse of the contradiction judge: it returns
+  "faithful" on any error/ambiguity, so a flaky model can only miss a
+  hallucination, never wrongly quarantine a good memory. NEW-only; updates to an
+  existing-active memory are exempt. Transcript capped at `DREAM_CRITIQUE_MAX_CHARS`
+  (default 12000).
 - **Anti-poisoning gate** (Phase H3) — a NEW directive memory from a thin, novel
   session is quarantined to `pending_review` (`quality.poisoning_risk`).
 - **Contradiction check** (Phase E) — asks the LLM whether each new memory
