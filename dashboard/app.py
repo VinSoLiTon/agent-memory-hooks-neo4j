@@ -27,7 +27,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, abort, redirect, render_template_string, request, url_for
+import secrets
+
+from flask import Flask, abort, redirect, render_template_string, request, session, url_for
 from neo4j import GraphDatabase
 from markupsafe import Markup, escape
 
@@ -55,18 +57,31 @@ def driver():
 
 
 app = Flask(__name__)
+# Signs the session cookie that holds the per-browser write toggle. A fresh key
+# each launch is fine (and safer): write mode resets to its default on restart.
+# Set DASHBOARD_SECRET to make the toggle survive restarts.
+app.secret_key = os.environ.get("DASHBOARD_SECRET") or secrets.token_hex(16)
 
-# PR-H #3: write routes (edit, delete, archive, save) are gated behind an
-# explicit env var. Dashboard binds to localhost by default but the routes are
-# still destructive and any local process can hit them; require opt-in.
-WRITE_ENABLED = os.environ.get("DASHBOARD_WRITE") == "1"
+# PR-H #3: write routes (edit, delete, archive, save) are gated — the dashboard
+# binds to localhost by default but the routes are still destructive and any
+# local process can hit them, so require an explicit opt-in. DASHBOARD_WRITE=1
+# (or --write) sets the *initial* state; from then on it's a one-click toggle in
+# the header (no restart) — the live value lives in the signed session cookie.
+WRITE_DEFAULT = os.environ.get("DASHBOARD_WRITE") == "1"
+
+
+def write_enabled() -> bool:
+    """Current write state for this request: the session toggle if set, else the
+    launch default (DASHBOARD_WRITE / --write)."""
+    return bool(session.get("write", WRITE_DEFAULT))
 
 
 def _require_write():
     """abort(403) when write routes are disabled. Use as the first line of
     every POST/destructive handler."""
-    if not WRITE_ENABLED:
-        abort(403, "dashboard is read-only; set DASHBOARD_WRITE=1 to enable edit/delete/archive")
+    if not write_enabled():
+        abort(403, "dashboard is read-only; click 'read-only' in the header (or set "
+                   "DASHBOARD_WRITE=1) to enable edit/delete/archive")
 
 
 # --- minimal styling, embedded so there are no static-file deps -----------
@@ -86,6 +101,8 @@ BASE = """<!doctype html>
   header a:hover, header a.active{border-color:var(--accent);color:#fff}
   header form{margin-left:auto}
   header input[type=search]{background:var(--bg);border:1px solid var(--border);color:var(--fg);padding:6px 10px;border-radius:4px;width:280px;font:inherit}
+  button.toggle{cursor:pointer;font:inherit;padding:4px 10px}
+  button.toggle:hover{border-color:var(--accent);color:#fff}
   main{padding:24px;max-width:1100px;margin:0 auto}
   table{width:100%;border-collapse:collapse;margin:8px 0}
   th,td{padding:6px 12px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
@@ -119,8 +136,14 @@ BASE = """<!doctype html>
   <a href="{{url_for('sessions')}}" {% if active=='sessions' %}class="active"{% endif %}>Sessions</a>
   <a href="{{url_for('stats')}}" {% if active=='stats' %}class="active"{% endif %}>Stats</a>
   <a href="{{url_for('review_view')}}" {% if active=='review' %}class="active"{% endif %}>Review</a>
-  {% if read_only %}<span class="pill" title="set DASHBOARD_WRITE=1 to enable">read-only</span>{% endif %}
-  <form action="{{url_for('search')}}" method="get">
+  <form method="post" action="{{url_for('toggle_write')}}" style="margin-left:auto">
+    {% if read_only %}
+      <button class="pill toggle" title="read-only — click to enable edit / delete / archive / review">read-only 🔒</button>
+    {% else %}
+      <button class="pill ok toggle" title="write enabled — click to lock">write 🔓</button>
+    {% endif %}
+  </form>
+  <form action="{{url_for('search')}}" method="get" style="margin-left:12px">
     <input type="search" name="q" placeholder="search memories…" value="{{q or ''}}" autofocus>
   </form>
 </header>
@@ -132,7 +155,7 @@ BASE = """<!doctype html>
 def page(active: str, title: str, body_html: str, q: str | None = None) -> str:
     return render_template_string(
         BASE, active=active, title=title, body=Markup(body_html), q=q,
-        read_only=not WRITE_ENABLED,
+        read_only=not write_enabled(),
     )
 
 
@@ -226,7 +249,7 @@ def memory_view(path: str):
 
     body = f'<h1 class="mono">{escape(r["path"])}</h1>'
     body += f'<p><a href="{url_for("memory_history_view", path=path)}">View history / evolution &rarr;</a></p>'
-    if WRITE_ENABLED:
+    if write_enabled():
         body += '<div class="toolbar">'
         body += f'<a href="{url_for("memory_edit", path=path)}">Edit</a>'
         arch_label = "Unarchive" if r["archived"] else "Archive"
@@ -240,7 +263,7 @@ def memory_view(path: str):
         )
         body += "</div>"
     else:
-        body += '<p class="muted small">Read-only mode. Set <code>DASHBOARD_WRITE=1</code> to enable edit / archive / delete.</p>'
+        body += '<p class="muted small">Read-only mode. Click <strong>read-only 🔒</strong> in the header to enable edit / archive / delete.</p>'
 
     body += '<div class="row"><div>updated</div><div>' + escape(fmt_ts(r["u"])) + "</div></div>"
     if r["project"]:
@@ -503,9 +526,10 @@ def review_view():
         pending = rv.list_pending(s)
         pairs = rv.list_contradictions(s)
 
+    can_write = write_enabled()
     body = "<h1>Review queue</h1>"
-    if not WRITE_ENABLED:
-        body += '<p class="muted small">Read-only. Set <code>DASHBOARD_WRITE=1</code> to resolve from here.</p>'
+    if not can_write:
+        body += '<p class="muted small">Read-only. Click <strong>read-only 🔒</strong> in the header to resolve from here.</p>'
     elif pairs:
         body += (f'<form method="post" action="{url_for("review_action", action="auto-resolve")}" style="margin-bottom:12px">'
                  f'<button>Auto-resolve all conflicts (authority × recency)</button></form>')
@@ -517,7 +541,7 @@ def review_view():
         body += "<table><tr><th>path</th><th>by</th><th>updated</th><th></th></tr>"
         for m in pending:
             actions = ""
-            if WRITE_ENABLED:
+            if can_write:
                 for act, label in (("approve", "Approve"), ("reject", "Reject")):
                     actions += (f'<form method="post" action="{url_for("review_action", action=act)}" style="display:inline">'
                                 f'<input type="hidden" name="path" value="{escape(m["path"])}">'
@@ -534,7 +558,7 @@ def review_view():
         body += "<table><tr><th>A</th><th>B</th><th></th></tr>"
         for c in pairs:
             actions = ""
-            if WRITE_ENABLED:
+            if can_write:
                 for winner, loser, label in ((c["a"], c["b"], "keep A"), (c["b"], c["a"], "keep B")):
                     actions += (f'<form method="post" action="{url_for("review_action", action="supersede")}" style="display:inline">'
                                 f'<input type="hidden" name="winner" value="{escape(winner)}">'
@@ -544,6 +568,16 @@ def review_view():
                      f'<td>{actions}</td></tr>')
         body += "</table>"
     return page("review", "Review", body)
+
+
+@app.route("/toggle-write", methods=["POST"])
+def toggle_write():
+    """Flip write mode for this browser session and return to the prior page.
+    This is the convenient, no-restart counterpart to DASHBOARD_WRITE — the gate
+    is an accidental-write guard, not a security boundary (the server is loopback
+    only), so a click is enough."""
+    session["write"] = not write_enabled()
+    return redirect(request.referrer or url_for("memories"))
 
 
 @app.route("/review/<action>", methods=["POST"])
@@ -606,8 +640,15 @@ def main():
     p.add_argument("--host", default=os.environ.get("DASHBOARD_HOST", "127.0.0.1"))
     p.add_argument("--port", type=int, default=int(os.environ.get("DASHBOARD_PORT", "5000")))
     p.add_argument("--debug", action="store_true")
+    p.add_argument("--write", action="store_true",
+                   help="start with write mode on (same as DASHBOARD_WRITE=1); "
+                        "toggle it live from the header either way")
     args = p.parse_args()
-    print(f"njhook dashboard on http://{args.host}:{args.port}")
+    if args.write:
+        global WRITE_DEFAULT
+        WRITE_DEFAULT = True
+    print(f"njhook dashboard on http://{args.host}:{args.port}"
+          f"  (write {'ON' if WRITE_DEFAULT else 'off'}; toggle in header)")
     app.run(host=args.host, port=args.port, debug=args.debug)
 
 
