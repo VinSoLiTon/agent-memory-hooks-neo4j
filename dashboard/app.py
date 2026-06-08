@@ -135,6 +135,7 @@ BASE = """<!doctype html>
   <a href="{{url_for('memories')}}" {% if active=='memories' %}class="active"{% endif %}>Memories</a>
   <a href="{{url_for('sessions')}}" {% if active=='sessions' %}class="active"{% endif %}>Sessions</a>
   <a href="{{url_for('stats')}}" {% if active=='stats' %}class="active"{% endif %}>Stats</a>
+  <a href="{{url_for('nightly')}}" {% if active=='nightly' %}class="active"{% endif %}>Nightly</a>
   <a href="{{url_for('review_view')}}" {% if active=='review' %}class="active"{% endif %}>Review</a>
   <form method="post" action="{{url_for('toggle_write')}}" style="margin-left:auto">
     {% if read_only %}
@@ -631,6 +632,35 @@ def stats():
             body += f'<tr><td><a class="mono" href="{url_for("memory_view", path=r["path"])}">{escape(r["path"])}</a></td><td>{r["n"]}</td></tr>'
         body += "</table>"
     return page("stats", "Stats", body)
+
+
+@app.route("/nightly")
+def nightly():
+    """Item #8: the per-nightly run ledger (:NightlyRun). A zero-yield or
+    all-fallback run is flagged so a silently-degrading nightly is visible."""
+    with driver().session() as s:
+        rows = [dict(r) for r in s.run(
+            "MATCH (r:NightlyRun) RETURN r.ts AS ts, r.provider AS provider, "
+            "r.sessions_seen AS seen, r.with_yield AS yielded, r.fallback_fired AS fell_back, "
+            "r.written AS written, r.skipped_sensitive AS skipped, r.duration_ms AS ms "
+            "ORDER BY r.ts DESC LIMIT 30")]
+    body = "<h1>Nightly runs</h1>"
+    if not rows:
+        body += "<p class='muted'>No nightly runs recorded yet — the scheduler runs <code>dream/run_dream.cmd</code>.</p>"
+        return page("nightly", "Nightly", body)
+    body += ("<table><tr><th>ts</th><th>provider</th><th>seen</th><th>yielded</th>"
+             "<th>fell back</th><th>written</th><th>skipped</th><th>ms</th></tr>")
+    for r in rows:
+        seen = r["seen"] or 0
+        bad = seen > 0 and ((r["yielded"] or 0) == 0 or (r["fell_back"] or 0) == seen)
+        flag = ' class="pill bad"' if bad else ""
+        body += (f'<tr{flag}><td class="mono small">{escape(fmt_ts(r["ts"]))}</td>'
+                 f'<td class="small">{escape(str(r["provider"] or ""))}</td>'
+                 f'<td>{seen}</td><td>{r["yielded"] or 0}</td><td>{r["fell_back"] or 0}</td>'
+                 f'<td>{r["written"] or 0}</td><td>{r["skipped"] or 0}</td>'
+                 f'<td class="small muted">{r["ms"] or 0}</td></tr>')
+    body += "</table>"
+    return page("nightly", "Nightly", body)
 
 
 # --- launcher -------------------------------------------------------------

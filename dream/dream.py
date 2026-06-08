@@ -28,6 +28,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 
 from neo4j import GraphDatabase
@@ -688,6 +689,27 @@ def check_contradictions(driver, candidates: list, judge, find_candidates) -> li
     return flagged
 
 
+def _write_nightly_run(driver, run_id, stats, provider, model, duration_ms):
+    """Item #8: persist one per-nightly ledger node. Written unconditionally (even
+    on a zero-yield run or a mid-loop crash, via the caller's finally) so a run
+    that distilled nothing or fell back on every session is VISIBLE — the per-write
+    :DreamRun can't show that, since it's skipped on zero-yield sessions. Errors are
+    swallowed (like the rehearsal-run writer) so observability never crashes the
+    nightly."""
+    try:
+        with driver.session() as s:
+            s.run(
+                "CREATE (:NightlyRun {run_id:$rid, ts:$ts, provider:$p, model:$m, "
+                "sessions_seen:$ss, with_yield:$wy, fallback_fired:$ff, written:$w, "
+                "skipped_sensitive:$sk, duration_ms:$d})",
+                rid=run_id, ts=datetime.now(timezone.utc).isoformat(), p=provider, m=model,
+                ss=stats["sessions_seen"], wy=stats["with_yield"], ff=stats["fallback_fired"],
+                w=stats["written"], sk=stats["skipped_sensitive"], d=duration_ms,
+            )
+    except Exception:
+        pass
+
+
 def egress_blocked(provider_name: str, session_sensitive: bool, allow_egress: bool) -> bool:
     """Phase H egress policy: a high-sensitivity session must not be sent to a
     remote dream provider (anthropic/openai) unless DREAM_ALLOW_SENSITIVE_EGRESS=1.
@@ -811,44 +833,64 @@ def main():
         # Phase H egress policy: high-sensitivity sessions stay off remote providers.
         allow_egress = os.environ.get("DREAM_ALLOW_SENSITIVE_EGRESS") == "1"
 
-        for session_key, events in sessions:
-            project = dominant_project([e.get("cwd") for e in events])
-            session_sensitive = any(e.get("sensitivity") == "high" for e in events)
-            # Primary provider is remote + session is sensitive → don't egress; skip.
-            if egress_blocked(provider_name, session_sensitive, allow_egress):
-                print(f"\n=== skipping {session_key}: sensitive session, remote egress blocked "
-                      f"(DREAM_ALLOW_SENSITIVE_EGRESS=1 to allow) ===")
-                continue
-            existing = render_existing(fetch_existing_memories(driver, project), paths_only=paths_only)
-            label = f"{session_key}" + (f"  project={project}" if project else "")
-            print(f"\n=== dreaming over {label} ({len(events)} new events"
-                  + ("; SENSITIVE" if session_sensitive else "") + ") ===")
-            used_name, used_model = provider_name, model
-            # PR-4: safe_distil never raises — a hard provider error (e.g. llama.cpp
-            # down / 4xx / malformed) becomes [] so the fallback below fires instead
-            # of crashing the run.
-            memories = safe_distil(provider_fn, render_events(events, max_chars=transcript_cap), existing, model, system_prompt, provider_name)
-            # Fall back only if it won't egress a sensitive session to a remote provider.
-            if not memories and fallback and not egress_blocked(fallback[0], session_sensitive, allow_egress):
-                fb_name, fb_fn, fb_model, fb_system = fallback
-                print(f"  local yielded 0 — falling back to {fb_name}/{fb_model} for this session")
-                try:
-                    fb_existing = render_existing(fetch_existing_memories(driver, project), paths_only=False)
-                    fb_mems = call_provider(fb_fn, render_events(events), fb_existing, fb_model, fb_system)
-                    if fb_mems:
-                        memories, used_name, used_model = fb_mems, fb_name, fb_model
-                except Exception as e:
-                    print(f"  fallback failed: {e}", file=sys.stderr)
-            elif not memories and fallback and session_sensitive:
-                print(f"  local yielded 0; {fallback[0]} fallback skipped (sensitive session, egress blocked)",
-                      file=sys.stderr)
-            for m in memories:
-                print(f"\n--- {m.get('path')} ---")
-                print(m.get("content", ""))
+        # Item #8: one per-nightly run-ledger node, written UNCONDITIONALLY in the
+        # finally below (even on a mid-loop crash) so a zero-yield / all-fallback
+        # run is visible — unlike the per-write :DreamRun, which is skipped on
+        # zero-yield sessions. Distinct :NightlyRun label.
+        stats = {"sessions_seen": 0, "with_yield": 0, "fallback_fired": 0,
+                 "written": 0, "skipped_sensitive": 0}
+        run_id = f"nightly@{datetime.now(timezone.utc).isoformat()}"
+        run_t0 = time.monotonic()
+        try:
+            for session_key, events in sessions:
+                stats["sessions_seen"] += 1
+                project = dominant_project([e.get("cwd") for e in events])
+                session_sensitive = any(e.get("sensitivity") == "high" for e in events)
+                # Primary provider is remote + session is sensitive → don't egress; skip.
+                if egress_blocked(provider_name, session_sensitive, allow_egress):
+                    stats["skipped_sensitive"] += 1
+                    print(f"\n=== skipping {session_key}: sensitive session, remote egress blocked "
+                          f"(DREAM_ALLOW_SENSITIVE_EGRESS=1 to allow) ===")
+                    continue
+                existing = render_existing(fetch_existing_memories(driver, project), paths_only=paths_only)
+                label = f"{session_key}" + (f"  project={project}" if project else "")
+                print(f"\n=== dreaming over {label} ({len(events)} new events"
+                      + ("; SENSITIVE" if session_sensitive else "") + ") ===")
+                used_name, used_model = provider_name, model
+                # PR-4: safe_distil never raises — a hard provider error (e.g. llama.cpp
+                # down / 4xx / malformed) becomes [] so the fallback below fires instead
+                # of crashing the run.
+                memories = safe_distil(provider_fn, render_events(events, max_chars=transcript_cap), existing, model, system_prompt, provider_name)
+                # Fall back only if it won't egress a sensitive session to a remote provider.
+                if not memories and fallback and not egress_blocked(fallback[0], session_sensitive, allow_egress):
+                    fb_name, fb_fn, fb_model, fb_system = fallback
+                    print(f"  local yielded 0 — falling back to {fb_name}/{fb_model} for this session")
+                    try:
+                        fb_existing = render_existing(fetch_existing_memories(driver, project), paths_only=False)
+                        fb_mems = call_provider(fb_fn, render_events(events), fb_existing, fb_model, fb_system)
+                        if fb_mems:
+                            memories, used_name, used_model = fb_mems, fb_name, fb_model
+                    except Exception as e:
+                        print(f"  fallback failed: {e}", file=sys.stderr)
+                elif not memories and fallback and session_sensitive:
+                    print(f"  local yielded 0; {fallback[0]} fallback skipped (sensitive session, egress blocked)",
+                          file=sys.stderr)
+                if memories:
+                    stats["with_yield"] += 1
+                if used_name != provider_name:
+                    stats["fallback_fired"] += 1
+                for m in memories:
+                    print(f"\n--- {m.get('path')} ---")
+                    print(m.get("content", ""))
+                if not args.dry_run:
+                    watermark = events[-1].get("timestamp")
+                    n = write_memories(driver, session_key, memories, watermark, project=project, provider=used_name, model=used_model, events=events)
+                    stats["written"] += n
+                    print(f"\n  wrote/updated {n} memories (via {used_name}); watermark -> {watermark}")
+        finally:
             if not args.dry_run:
-                watermark = events[-1].get("timestamp")
-                n = write_memories(driver, session_key, memories, watermark, project=project, provider=used_name, model=used_model, events=events)
-                print(f"\n  wrote/updated {n} memories (via {used_name}); watermark -> {watermark}")
+                _write_nightly_run(driver, run_id, stats, provider_name, model,
+                                   duration_ms=int((time.monotonic() - run_t0) * 1000))
     finally:
         driver.close()
 
