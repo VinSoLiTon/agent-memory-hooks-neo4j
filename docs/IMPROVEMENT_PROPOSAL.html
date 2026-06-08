@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>njhook — Improvement Proposal</title>
+<style>
+:root{--bg:#0f1115;--fg:#dde2e6;--muted:#7a8590;--accent:#7aa2f7;--card:#171a21;--border:#262b33;--ok:#98c379;--bad:#e06c75;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:15px;line-height:1.65}
+main{max-width:960px;margin:0 auto;padding:48px 28px 96px}
+h1{font-size:28px;margin:0 0 8px;line-height:1.25}
+h2{font-size:21px;margin:40px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+h3{font-size:16px;margin:24px 0 6px;color:#fff}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+p{margin:10px 0}
+strong{color:#fff}
+code{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;background:var(--card);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:.88em}
+pre{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:14px;overflow-x:auto}
+pre code{border:0;padding:0;background:none}
+blockquote{margin:16px 0;padding:10px 16px;border-left:3px solid var(--accent);background:var(--card);border-radius:0 6px 6px 0;color:var(--muted)}
+ul,ol{padding-left:22px}
+li{margin:4px 0}
+hr{border:0;border-top:1px solid var(--border);margin:32px 0}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px}
+th,td{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--card);color:var(--muted);text-transform:uppercase;font-size:11px;letter-spacing:.5px}
+tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+.meta{color:var(--muted);font-size:13px;margin-bottom:24px}
+</style></head>
+<body><main>
+<p class="meta">njhook deep-review · generated from docs/IMPROVEMENT_PROPOSAL.md</p>
+<h1 id="njhook-deep-review-roadmap-memory-generation-maintenance-recall">njhook Deep-Review Roadmap: Memory Generation, Maintenance &amp; Recall</h1>
+<blockquote>
+<p><strong>Status:</strong> Proposal only — no code. Every item below survived adversarial, code-grounded critique; already-implemented and false-premise proposals were removed. Effort/impact are corrected against the actual codebase, and overstated claims (invented commands, "free reuse", inflated impact) are flagged in each entry.</p>
+</blockquote>
+<hr>
+<h2 id="executive-summary">Executive Summary</h2>
+<p>njhook's universal-memory program (Phases A–H) is functionally complete, and the review confirms the core is sound. What survives the critique clusters around one structural theme: <strong>the system extracts well but maintains weakly</strong>, and that weakness is concentrated on (a) the local-model nightly path and (b) maintenance jobs that exist but are never scheduled.</p>
+<p>The cheapest, highest-leverage wins are in the <strong>Now</strong> tier: make the most-used recall surface rank-aware, fix the degenerate importance distribution, schedule the dedup/archive jobs that already exist, and turn on the contradiction detector that ships off. Everything heavier is sequenced behind those.</p>
+<h3 id="whats-already-strong-acknowledged-not-re-proposed">What's already strong (acknowledged, not re-proposed)</h3>
+<ul>
+<li><strong>Non-destructive bi-temporal supersession</strong> + audit/revision chain.</li>
+<li><strong>Hybrid recall</strong>: fulltext (with OR-term fallback) + vector, RRF-fused, project-boosted, importance × recency ranked.</li>
+<li><strong>Admission gates</strong>: token-overlap grounding + anti-poisoning (thin/novel directive quarantine).</li>
+<li><strong>15-type kind vocabulary</strong> enforced via constrained decoding.</li>
+<li><strong>Eval harness</strong>: deterministic distillation scorer <strong>and</strong> vector/RRF/recency retrieval regression coverage are <strong>already CI-gated</strong> (the critique explicitly rejected proposals to "add" these — they exist).</li>
+<li><strong>Local-first provider stack</strong>: llama.cpp primary, Anthropic fallback on 0-yield.</li>
+</ul>
+<h3 id="honesty-caveats-threaded-through-this-document">Honesty caveats threaded through this document</h3>
+<ol>
+<li><strong>This is a single-user local tool.</strong> Most "scale" and "security" framings are <em>preventive / defense-in-depth</em>, not active fires — which is why several superficially-attractive items land lower than their prose implied.</li>
+<li><strong>Several proposals oversold reuse or invented integration points.</strong> There is no <code>njhook prune</code> command; <code>:DreamRun</code> is per-session-write (not per-nightly) and is skipped on zero-yield sessions; the write path already runs a vector-neighbour scan behind a flag. Estimates below correct for this.</li>
+</ol>
+<hr>
+<h2 id="prioritized-table">Prioritized Table</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Proposal</th>
+<th>Theme</th>
+<th style="text-align: center;">Effort</th>
+<th style="text-align: center;">Impact</th>
+<th style="text-align: center;">Tier</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Rank-aware session-start bucket fetch</td>
+<td>Retrieval</td>
+<td style="text-align: center;">S</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;"><strong>Now</strong></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Anchored salience rubric + kind-prior floor</td>
+<td>Generation</td>
+<td style="text-align: center;">S</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;"><strong>Now</strong></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Schedule consolidate + archive into nightly</td>
+<td>Dreaming</td>
+<td style="text-align: center;">S</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;"><strong>Now</strong></td>
+</tr>
+<tr>
+<td>4</td>
+<td>Default-on contradiction detection + fulltext channel</td>
+<td>Update/Conflict</td>
+<td style="text-align: center;">M</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;"><strong>Now</strong></td>
+</tr>
+<tr>
+<td>5</td>
+<td>Event tier-down (blank heavy fields on dreamed sessions)</td>
+<td>Storage</td>
+<td style="text-align: center;">M</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;">Next</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Opt-in write-time dedup on existing vector finder</td>
+<td>Generation</td>
+<td style="text-align: center;">M</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;">Next</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Bi-temporal as-of recall replay</td>
+<td>Update/Conflict</td>
+<td style="text-align: center;">M</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;">Next</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Per-nightly run-ledger node + dream-stats + health</td>
+<td>Observability</td>
+<td style="text-align: center;">M</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;">Next</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Consolidation kind/project stamping (part 1)</td>
+<td>Update/Conflict</td>
+<td style="text-align: center;">S</td>
+<td style="text-align: center;">low</td>
+<td style="text-align: center;">Next</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Update admission gates (non-destructive)</td>
+<td>Update/Conflict</td>
+<td style="text-align: center;">M</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;">Later</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Distillation precision eval + kind fixtures</td>
+<td>Generation</td>
+<td style="text-align: center;">L</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;">Later</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Decouple recency decay from access freshness</td>
+<td>Retrieval</td>
+<td style="text-align: center;">S</td>
+<td style="text-align: center;">low</td>
+<td style="text-align: center;">Later</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Token/cost capture into run ledger</td>
+<td>Observability</td>
+<td style="text-align: center;">M</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;">Later</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Recall-effectiveness telemetry</td>
+<td>Observability</td>
+<td style="text-align: center;">M</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;">Later</td>
+</tr>
+<tr>
+<td>15</td>
+<td>Storage-accounting view</td>
+<td>Storage</td>
+<td style="text-align: center;">S</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;">Later</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Per-collision local UPDATE-with-body merge</td>
+<td>Dreaming</td>
+<td style="text-align: center;">L</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;">Research</td>
+</tr>
+<tr>
+<td>17</td>
+<td>Reflection/synthesis layer</td>
+<td>Dreaming</td>
+<td style="text-align: center;">L</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;">Research</td>
+</tr>
+<tr>
+<td>18</td>
+<td>Critique pass (claim verification)</td>
+<td>Dreaming</td>
+<td style="text-align: center;">M</td>
+<td style="text-align: center;">med</td>
+<td style="text-align: center;">Research</td>
+</tr>
+<tr>
+<td>19</td>
+<td>Hierarchical rolling summarization</td>
+<td>Dreaming</td>
+<td style="text-align: center;">L</td>
+<td style="text-align: center;">low</td>
+<td style="text-align: center;">Research</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Corroboration promotion + graduated decay</td>
+<td>Update/Conflict</td>
+<td style="text-align: center;">L</td>
+<td style="text-align: center;">low</td>
+<td style="text-align: center;">Research</td>
+</tr>
+<tr>
+<td>21</td>
+<td>Embedding storage reduction</td>
+<td>Storage</td>
+<td style="text-align: center;">L</td>
+<td style="text-align: center;">low</td>
+<td style="text-align: center;">Research</td>
+</tr>
+<tr>
+<td>22</td>
+<td>Provider A/B eval matrix</td>
+<td>Observability</td>
+<td style="text-align: center;">M</td>
+<td style="text-align: center;">low</td>
+<td style="text-align: center;">Research</td>
+</tr>
+<tr>
+<td>23</td>
+<td>MemoryRevision chain compaction</td>
+<td>Storage</td>
+<td style="text-align: center;">M</td>
+<td style="text-align: center;">low</td>
+<td style="text-align: center;">Research</td>
+</tr>
+<tr>
+<td>24</td>
+<td>Salience/batched dreaming (--max-sessions only)</td>
+<td>Dreaming</td>
+<td style="text-align: center;">M</td>
+<td style="text-align: center;">low</td>
+<td style="text-align: center;">Research</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="tier-now-high-leverage-lowmed-effort">Tier: NOW (high leverage, low/med effort)</h2>
+<h3 id="1-rank-aware-session-start-bucket-fetch">1. Rank-aware session-start bucket fetch</h3>
+<ul>
+<li><strong>Problem.</strong> Session-start injection is the single most-used recall surface (fires on every SessionStart, before any prompt exists) yet the least intelligent path. <code>fetch_bucket</code>/<code>fetch_project</code> (<code>hooks/recall.py:261,277</code>) do <code>ORDER BY coalesce(m.updated_at,'') DESC LIMIT $limit</code> — a pure-recency cut <strong>at the DB</strong>. Only afterward does <code>render_session_start</code> re-sort the returned ≤5 rows by value-density (<code>recall.py:351</code>). A high-importance, slightly-older memory ranked 6th by recency is never fetched and can never be injected.</li>
+<li><strong>Proposal.</strong> Adopt <strong>option (b) only</strong>: over-fetch a candidate pool (<code>raw_limit = max(limit*OVERFETCH, limit+5)</code>), apply the existing <code>value_density()</code> in Python, slice to <code>limit</code>. <strong>Reject option (a)</strong> (in-Cypher decay) — it duplicates <code>_lambda_for</code>/<code>recency_factor</code> and reintroduces the drift the repo deliberately centralizes in Python.</li>
+<li><strong>Grounding.</strong> <code>recall.py:261,277</code> (recency-only DB cut); <code>recall.py:351</code> (value_density only on returned rows); <code>recall.py:171,206,381</code> (the over-fetch idiom the prompt path already uses — this surface is the lone exception); <code>docs/UNIVERSAL_MEMORY_RESEARCH.md:134</code> item 9 lists this as a planned win.</li>
+<li><strong>Effort/Impact.</strong> <strong>S / med.</strong> Impact is med not high: with <code>limit=5</code> and a 4000-char budget, the char budget is often the binding constraint at render, so the loss is a tail case. Honest total scope (env gate + a <em>new</em> bucket eval fixture — <code>eval_retrieval.py</code> covers only <code>prompt_query</code> today) is borderline S/M.</li>
+<li><strong>Prior art.</strong> BudgetMem token-value-density ordering (already the project's chosen model); standard two-stage retrieve-then-rank.</li>
+</ul>
+<h3 id="2-anchored-salience-rubric-deterministic-kind-prior-floor">2. Anchored salience rubric + deterministic kind-prior floor</h3>
+<ul>
+<li><strong>Problem.</strong> Importance is a two-place ranking signal (the 0.2x–2.0x <code>importance_factor</code> multiplier <strong>and</strong> value-density budget order) generated by a single vague, <em>optional</em> prompt line ("an integer 1-10 … Omit if unsure", <code>prompts.py:70-71</code>). On the 12B local model this produces a degenerate distribution (everything at 7-8 or omitted → flat default 5). No kind-aware prior exists, even though kind strongly predicts durability.</li>
+<li><strong>Proposal.</strong> (1) Replace the one-liner with an <strong>anchored rubric</strong> (3-4 band→example mappings) and make importance <strong>required</strong> in <code>DREAM_JSON_SCHEMA</code>. (2) Add a deterministic <strong>kind-prior floor</strong> in <code>_coerce_importance</code> (constraint/preference→7 … artifact→3) used when the model omits importance, reusing the kind already normalized in the same row dict; model-supplied values always win.</li>
+<li><strong>Grounding.</strong> <code>prompts.py:70-71,149,151</code>; <code>dream.py:357-366</code> (clamp-only); <code>dream.py:512-514</code> (kind available at coercion site); <code>recall.py:63,92-121</code>. Resurrects <code>IMPLEMENTATION_PLAN.md:117</code> (D2 content-type prior — designed, never built).</li>
+<li><strong>Effort/Impact.</strong> <strong>S / med.</strong> "Required" only binds on the schema-constrained local path (the frontier <code>json_object</code> path doesn't enforce it) — coherent with the target, since the degenerate distribution is a local-model problem. Add dream-side tests for the new branch (none exist).</li>
+<li><strong>Prior art.</strong> Anchored-rubric LLM-as-rater calibration; A-MEM/Memanto content-type durability weighting.</li>
+</ul>
+<h3 id="3-schedule-consolidation-archival-into-the-nightly">3. Schedule consolidation + archival into the nightly</h3>
+<ul>
+<li><strong>Problem.</strong> <code>run_dream.cmd:22</code> runs only <code>python dream\dream.py --since 36h</code>. <code>consolidate()</code> and <code>archive()</code> are complete, tested, and CLI-exposed, but <strong>no scheduler invokes them</strong> — graph hygiene depends on a human remembering <code>njhook consolidate</code>. The proposal correctly identifies that <code>--consolidate</code>/<code>--archive</code> are <em>mutually exclusive</em> with distillation (early <code>return</code> in <code>dream.py</code>), so they need separate chained invocations.</li>
+<li><strong>Proposal.</strong> Extend <code>run_dream.cmd</code> into a multi-stage nightly: (1) distill; (2) consolidate (conservative threshold, capped rounds); (3) archive — each stage logged separately. <strong>Ship the chaining now (S).</strong> Defer importance-weighted triggering to an M follow-up: it needs a new-memory count <code>dream.py</code> doesn't currently emit machine-readably.</li>
+<li><strong>Grounding.</strong> <code>run_dream.cmd:22</code>; <code>consolidate.py:102</code> (consolidate), <code>:191</code> (archive); <code>cli/njhook.py:819,841</code>; health watches only <code>njhook-dream-nightly</code>.</li>
+<li><strong>Effort/Impact.</strong> <strong>S / med.</strong> Impact bounded by present scale (~20 memories / ~34 sessions) — preventive hygiene insurance, not an active fire. Note task registration is a manual README PowerShell snippet (no register-task CLI), so the second-cadence entry is a runbook edit.</li>
+<li><strong>Prior art.</strong> Letta sleep-time agents; Zep/Graphiti background maintenance; Mem0 async consolidation.</li>
+</ul>
+<h3 id="4-default-on-contradiction-detection-fulltext-candidate-channel">4. Default-on contradiction detection + fulltext candidate channel</h3>
+<ul>
+<li><strong>Problem.</strong> Contradiction detection ships <strong>off</strong>: <code>dream.py:636</code> gates on <code>DREAM_CONTRADICTION_CHECK</code>, which the nightly never sets — so the default schedule <strong>never detects conflicts</strong>. It also only inspects new-vs-existing pairs, and candidates come only from cosine neighbours above 0.85, missing antonym-style contradictions ("deploy via Docker" vs "never containers") that score low on cosine.</li>
+<li><strong>Proposal.</strong> <strong>(a)</strong> Default-on in the nightly (effectively a one-liner). The judge is conservative-by-failure (<code>judge.py:8-11</code>, returns False on any doubt), so enabling can only <strong>miss</strong> contradictions, never wrongly quarantine — bounded downside. <strong>(c, fulltext slice)</strong> Add a fulltext second channel (reuse <code>recall.fulltext_search</code>) so low-cosine contradictions still surface as candidates; the LLM judge stays the precision gate. <strong>Defer</strong> the all-pairs full-scan (b) and the 0.78 cosine drop — both multiply LLM calls; ship them as a separate cost-bounded follow-up with an explicit per-run pair cap.</li>
+<li><strong>Grounding.</strong> <code>dream.py:636,639</code>; <code>run_dream.cmd:22</code>; <code>review.py:173</code>; <code>judge.py:8-11</code>. Default provider is local (<code>DREAM_PROVIDER=llamacpp</code>), so default-on stays local; the <code>egress_blocked</code> gate covers the remote-fallback case.</li>
+<li><strong>Effort/Impact.</strong> <strong>M / med.</strong> Impact med not high: single low-volume user, manual <code>njhook review flag</code>/<code>auto-resolve</code> already exist as a backstop — this activates a dormant safety net.</li>
+<li><strong>Prior art.</strong> Graphiti/Zep continuous edge-invalidation on contradiction.</li>
+</ul>
+<hr>
+<h2 id="tier-next">Tier: NEXT</h2>
+<h3 id="5-event-tier-down-blank-heavy-text-fields-on-dreamed-aged-out-sessions">5. Event tier-down: blank heavy text fields on dreamed, aged-out sessions</h3>
+<ul>
+<li><strong>Problem.</strong> Events are the dominant unbounded storage cost — write-once, read-by-dream-once, ~4KB <code>tool_response</code> each (<code>log_event.py:40</code>), never pruned. After the watermark advances (<code>dream.py:528-531</code>), the heavy text is never read again except by opt-in event-fulltext recall.</li>
+<li><strong>Proposal.</strong> A <code>njhook prune-events</code> command (scheduled alongside the nightly) operating only on Events whose Session has <code>last_dreamed_at</code> set AND timestamp older than <code>EVENT_RETENTION_DAYS</code>. <strong>Tier-1 (default):</strong> REMOVE <code>tool_response</code>/<code>tool_input</code>/<code>transcript</code>/<code>last_assistant_message</code>, set <code>tiered=true</code>, <strong>keep</strong> the node + ids + <code>FIRST/NEXT/LATEST</code> chain so lineage survives. <strong>Tier-2 (opt-in, longer window):</strong> <code>DETACH DELETE</code> whole dreamed chains, mirroring the proven backup-wipe Cypher.</li>
+<li><strong>Grounding.</strong> <code>log_event.py:40,90-197</code>; <code>dream.py:186-190</code> (re-dream only reads events <em>past</em> the watermark — so blanking pre-watermark text is safe); <code>cli/njhook.py:1286-1291</code> (wipe pattern to mirror). Roadmap lists "raw event retention policy" as unbuilt.</li>
+<li><strong>Effort/Impact.</strong> <strong>M / med.</strong> Decide explicitly whether <code>prompt</code> is in the blanked set (it feeds <code>event_fulltext</code> at <code>schema.py:52</code> and lineage snippets) — tier-1 <em>degrades</em> event recall, doesn't break it. Update stats to report tiered vs full counts. Preventive (graph is small today), so sequence after the Now tier.</li>
+<li><strong>Prior art.</strong> Letta/MemGPT recursive summarization + eviction; Zep session-summary-then-evict.</li>
+</ul>
+<h3 id="6-opt-in-write-time-semantic-dedup-on-the-existing-vector-finder">6. Opt-in write-time semantic dedup on the existing vector finder</h3>
+<ul>
+<li><strong>Problem.</strong> No semantic dedup at write time: local models see existing memories as <strong>paths only</strong> (<code>dream.py:316-324,760</code>), so a duplicate emitted at a different path becomes a new active node until the manual consolidate pass.</li>
+<li><strong>Proposal.</strong> Add a pre-write near-duplicate check that <strong>reuses the per-candidate vector-neighbour scan already wired into <code>write_memories</code></strong> (<code>review_mod.vector_candidates</code>, gated behind <code>DREAM_CONTRADICTION_CHECK</code>). On a high-confidence hit, rewrite the candidate's path to the neighbour's so the existing MERGE-on-path turns it into an in-place update. <strong>Honesty corrections baked in:</strong> (1) this is a second consumer of an existing finder + a path-rewrite branch, <em>not</em> new infra; (2) it is an <strong>overwrite-redirect, not a merge</strong> (the new body replaces the old, prior snapshotted to MemoryRevision); (3) ship <strong>default OFF</strong>, env-gated like the contradiction check; (4) use a <strong>high</strong> threshold (0.97+ and/or same path-prefix/kind), since this is a blind unsupervised overwrite; (5) de-dupe redirects <strong>within</strong> the write batch to avoid intra-UNWIND clobber.</li>
+<li><strong>Grounding.</strong> <code>dream.py:491-495,561,636-644</code>; <code>review.py:173-221</code>; <code>consolidate.py:102</code> (offline-only merge, threshold 0.92).</li>
+<li><strong>Effort/Impact.</strong> <strong>M / med.</strong> Local-provider-only gap (frontier providers already get full bodies + merge instructions). Duplicates only accumulate between consolidations, which the scheduled consolidate (item 3) will also catch.</li>
+<li><strong>Prior art.</strong> Mem0 ADD/UPDATE/NOOP at write time; Graphiti/Zep ingest-time entity resolution.</li>
+</ul>
+<h3 id="7-bi-temporal-as-of-recall-replay">7. Bi-temporal as-of recall replay</h3>
+<ul>
+<li><strong>Problem.</strong> <code>valid_from</code>/<code>valid_until</code> are written on supersession (<code>review.py:108</code>) and consolidation (<code>consolidate.py:176</code>) but <strong>no recall query reads them</strong>; <code>_active()</code> filters status only. <code>content_as_of()</code> reconstructs from the MemoryRevision chain, not the temporal window. Acceptance bar #1 promised <code>njhook recall --as-of</code> but only <code>njhook history --as-of</code> shipped.</li>
+<li><strong>Proposal.</strong> Thread an optional <code>as_of</code> timestamp through the recall plan; when set, append a temporal predicate to <code>_active()</code>. On the dream-write path, stamp the prior generation's <code>valid_until</code> when content materially changes at an existing path. Expose <code>njhook recall --as-of &lt;ts&gt;</code> and a dashboard time-slider.</li>
+<li><strong>Grounding.</strong> <code>recall.py:56-59,449-458</code>; <code>review.py:108</code>; <code>consolidate.py:176</code>; <code>dream.py:583</code>. A <code>valid_until</code> index is genuinely missing (<code>schema.py</code> indexes status only).</li>
+<li><strong>Effort/Impact.</strong> <strong>M / med</strong> (borderline L). <strong>Sell as a new replay feature, not a correctness fix</strong> — supersession is atomic, so no stale-active node exists today. The dream-write <code>valid_until</code> boundary stamping (without disturbing the in-place-update + revision model) is the non-trivial part.</li>
+<li><strong>Prior art.</strong> Graphiti/Zep four-timestamp bi-temporal model.</li>
+</ul>
+<h3 id="8-per-nightly-run-ledger-node-njhook-dream-stats-one-health-signal">8. Per-nightly run-ledger node + <code>njhook dream-stats</code> + one health signal</h3>
+<ul>
+<li><strong>Problem.</strong> Run health is invisible: <code>:DreamRun</code> carries only <code>{run_id, ts, provider, model}</code> (<code>dream.py:557-558</code>), all counters print to a swallowed text log, and health only greps for <code>exit=0</code> (<code>cli/njhook.py:1699-1705</code>). A run that distilled 0 memories or fell back on every session looks identical to a perfect run.</li>
+<li><strong>Proposal.</strong> <strong>Redesign vs the original (which had a fatal grain error).</strong> <code>:DreamRun</code> is <strong>per-session-write</strong> and is <strong>skipped entirely on zero-yield sessions</strong> (early return before the MERGE) — so bolting counters onto it cannot see the all-zero-yield failure it's meant to catch. Instead create a <strong>new per-nightly run node</strong>, written <strong>unconditionally</strong> in <code>main()</code> (with a <code>finally</code>-flush of counts-so-far on mid-loop crash), carrying <code>sessions_seen/with_yield/fallback_fired/candidates/rejected/routed_grounding/routed_poisoning/written/duration_ms</code>. Add <code>njhook dream-stats</code>, a dashboard tab, and a WARN on zero-yield or high reject-rate.</li>
+<li><strong>Grounding.</strong> <code>dream.py:533-534</code> (zero-yield early return), <code>:557-558,802-823</code>; <code>cli/njhook.py:1699-1705</code>. Counters live in <code>validate_batch</code> / <code>write_memories</code> / the main loop — threading them out changes the <code>write_memories</code> return signature, so this is <strong>real plumbing, not one SET</strong>.</li>
+<li><strong>Effort/Impact.</strong> <strong>M / med.</strong> Note health check #10 (<code>dream freshness</code>) already partially covers "produced nothing lately" at the graph level.</li>
+<li><strong>Prior art.</strong> dbt <code>run_results.json</code>; Airflow TaskInstance ledger; OpenLLMetry GenAI spans.</li>
+</ul>
+<h3 id="9-consolidation-kindproject-stamping-part-1-only">9. Consolidation kind/project stamping (part 1 only)</h3>
+<ul>
+<li><strong>Problem.</strong> Consolidation's merge Cypher (<code>consolidate.py:152-162</code>) never sets <code>m.kind</code> or <code>m.project</code>; a merged node at a new path is untyped/unscoped.</li>
+<li><strong>Proposal.</strong> <strong>Part (1) only:</strong> apply the same <code>normalize_kind(parse_kind(content))</code> + M3 project CASE the dream writer uses (<code>dream.py:512-516,587-591</code>) — pure-additive, low-risk Cypher. Also add the <strong>one-line status guard</strong> to the consolidate candidate query so superseded-but-unarchived nodes aren't re-merged. <strong>Drop part (2)</strong> (path-enum + retry + max-importance) — it over-engineers an edge case off the automated path and needs new plumbing (<code>_fetch_pair_candidates</code> doesn't select importance).</li>
+<li><strong>Grounding.</strong> <code>consolidate.py:53-58,152-162</code>; contrast <code>dream.py:512-516,587-591</code>. <strong>Rationale correction:</strong> recall has <strong>no kind filter</strong> — <code>m.kind</code> is read only cosmetically by <code>njhook stats</code>; dashboard/CLI facets bucket by <em>path prefix</em>. So the "recall mis-handles" justification is false and null-project (not null-kind) is the real, narrow consequence. <code>migrate-kinds</code> already self-heals null kind on next run.</li>
+<li><strong>Effort/Impact.</strong> <strong>S / low.</strong> Consolidation is manual/opt-in (until item 3 schedules it), and the bug only fires when the LLM invents a third path.</li>
+<li><strong>Prior art.</strong> Internal consistency with the dream writer's own stamping.</li>
+</ul>
+<hr>
+<h2 id="tier-later">Tier: LATER</h2>
+<h3 id="10-apply-admission-gates-to-updates-of-existing-active-memories-non-destructive">10. Apply admission gates to UPDATES of existing active memories (non-destructive)</h3>
+<ul>
+<li><strong>Problem.</strong> Both gates exempt updates to existing-active paths (<code>dream.py:446,464-465</code>), opening an adversarial-update bypass.</li>
+<li><strong>Proposal.</strong> Gate updates <strong>non-destructively</strong>: when a candidate targets an existing path AND is BOTH low-overlap AND trips a gate, keep the existing body active and write the suspicious body as a <strong>sibling <code>pending_review</code> proposal</strong> (reuse <code>flag_new_contradiction</code> asymmetry). Record the gate reason on the revision (audit-reason-on-revision is independently valuable and cheaper).</li>
+<li><strong>Grounding.</strong> <code>dream.py:446,464-465,428-429,459-460</code>; <code>review.py:134-152</code>. <strong>Correction:</strong> the headline rm-rf example is partly misdiagnosed — grounding is <em>not</em> a malice oracle (<code>quality.py:60-62</code>), so the <strong>poison gate's update-exemption is the real, narrow hole</strong>, not grounding.</li>
+<li><strong>Effort/Impact.</strong> <strong>M / med</strong> (low end). Single-user tool — the realistic threat is a prompt-injected coding session, not a multi-tenant attacker.</li>
+<li><strong>Prior art.</strong> Anti-memory-poisoning update-channel-attack literature.</li>
+</ul>
+<h3 id="11-distillation-precision-anti-noise-eval-bar-expanded-kind-fixtures">11. Distillation precision (anti-noise) eval bar + expanded kind fixtures</h3>
+<ul>
+<li><strong>Problem.</strong> The distillation scorer measures only recall-side quality — a provider emitting 10 noisy memories to cover 2 facts scores a perfect pass. The "prefer fewer, sharper memories" rule is unmeasured, and the golden set covers only 3 of 15 kinds.</li>
+<li><strong>Proposal.</strong> Add a <code>noise_rate</code>/count-discipline metric to <code>score()</code> operationalizing the unmeasured rule, and expand the 2-session golden set toward the other 12 kinds with <strong>narrow negative expectations</strong> (ephemera the distiller should skip). <strong>Drop</strong> the self-consistency mode (can't be CI-gated; local nondeterminism is already known). <strong>Drop</strong> the "make <code>score()</code> CI-gated" framing — it <strong>already is</strong> (<code>tests/test_eval_distillation.py</code>).</li>
+<li><strong>Grounding.</strong> <code>eval_distillation.py:44-65,104-119</code>; <code>prompts.py:93,103-120</code>.</li>
+<li><strong>Effort/Impact.</strong> <strong>L / med.</strong> The metric is small; authoring ~8-10 fixtures across 12 kinds with curated expected/negative token sets AND matching candidate fixtures is the substantial work.</li>
+<li><strong>Prior art.</strong> LoCoMo / LongMemEval precision+recall memory benchmarks.</li>
+</ul>
+<h3 id="12-decouple-recency-decay-from-access-driven-freshness-gated">12. Decouple recency decay from access-driven freshness (gated)</h3>
+<ul>
+<li><strong>Problem.</strong> <code>recency_factor</code> anchors on <code>last_accessed_at</code> first, which <code>_bump_access</code> resets on <strong>every injection</strong> — a popularity feedback loop where injected memories stay "fresh" regardless of content currency.</li>
+<li><strong>Proposal.</strong> Preferred variant: <strong>content-currency anchor + a small bounded usage-recency multiplier</strong> (matches the project's endorsed bi-temporal split), gated behind <code>RECALL_RECENCY_ANCHOR</code> until a stale-but-popular eval fixture validates the flip.</li>
+<li><strong>Grounding.</strong> <code>recall.py:108-110,113-121</code>; <code>inject_memory.py:81-100</code>. <strong>Note:</strong> <code>last_accessed_at</code> is also the <strong>archive cutoff anchor</strong> (<code>consolidate.py:206</code>) where access-freshness is arguably correct — keep that path stable.</li>
+<li><strong>Effort/Impact.</strong> <strong>S / low.</strong> Impact corrected to low: 180d profile/tools half-lives largely absorb the reset, and session-start is pre-ordered by <code>updated_at</code> anyway, so real exposure is narrow (prompt_context hybrid recall).</li>
+<li><strong>Prior art.</strong> Graphiti/Zep transaction-time vs valid-time split; recommender popularity-bias literature.</li>
+</ul>
+<h3 id="13-capture-provider-token-usage-estimated-cost-into-the-run-ledger">13. Capture provider token usage + estimated cost into the run ledger</h3>
+<ul>
+<li><strong>Problem.</strong> Every provider call discards SDK usage data (<code>providers.py:53-54,72-73</code>), so the local-vs-fallback cost tradeoff — the system's explicit design tension — is unmeasurable.</li>
+<li><strong>Proposal.</strong> Change the provider contract to return <code>(memories, usage)</code> parsed from objects already in hand; store on the run-ledger node (item 8); add a static price table and a rolling-cost WARN. Prefer an <strong>additive/backward-compatible</strong> signature to avoid breaking the eval harness in one shot.</li>
+<li><strong>Grounding.</strong> <code>providers.py:53-54,72-73,212-270</code>; <code>run_dream.cmd:15-19</code>. Contract change fans out to <code>call_provider</code>, <code>safe_distil</code>, the per-session loop, the DreamRun write, and <code>eval_distillation.py:139</code>.</li>
+<li><strong>Effort/Impact.</strong> <strong>M / med.</strong> Impact med not high: nightly is local-by-default so the dollar figure is usually $0; the real value is the <strong>prompt-size regression signal</strong>. The claimed sibling "dreamrun-telemetry" proposal is item 8 here.</li>
+<li><strong>Prior art.</strong> LiteLLM/Helicone cost ledgers; Anthropic SDK usage object.</li>
+</ul>
+<h3 id="14-recall-effectiveness-telemetry-never-injected-cohort-decayed-recency-view">14. Recall-effectiveness telemetry: never-injected cohort + decayed-recency view</h3>
+<ul>
+<li><strong>Problem.</strong> <code>access_count</code> is bumped on <strong>return</strong> (<code>inject_memory.py:81-100</code>), conflating deterministically-injected with actually-useful; there is no signal for never-surfaced dead-weight memories — the input a pruning decision needs.</li>
+<li><strong>Proposal.</strong> Ship the two <strong>non-redundant</strong> signals: a never-injected cohort (<code>access_count=0</code> AND aged) and an effectively-dead-but-not-archived view (recency below floor). <strong>Skip</strong> rebuilding the pending_review backlog view — the <code>/review</code> tab already lists it with approve/reject. Worklist-only, no auto-archive.</li>
+<li><strong>Grounding.</strong> <code>inject_memory.py:81-100</code>; <code>dashboard/app.py:613-616,628-632</code>; <code>recall.py:103-114,305-313</code>. <strong>Correction:</strong> pending_review is NOT "stranded forever" — <code>/review</code> (<code>app.py:520-570</code>) already surfaces it.</li>
+<li><strong>Effort/Impact.</strong> <strong>M / med</strong> (M-L). Adding <code>injection_count</code> distinct from <code>access_count</code> is a real schema change, not one SET, and must not perturb the <code>last_accessed_at</code> ranking anchor. Never-injected cohort is only accurate going forward.</li>
+<li><strong>Prior art.</strong> Feature-store freshness/usage dashboards; recommender impression-vs-engagement splits.</li>
+</ul>
+<h3 id="15-storage-accounting-view-njhook-storage-stats-byte-breakdown">15. Storage-accounting view (<code>njhook storage</code> / stats byte breakdown)</h3>
+<ul>
+<li><strong>Problem.</strong> <code>stats</code> reports counts only; there is no way to see <strong>where</strong> bytes accumulate, so every pruning decision is blind.</li>
+<li><strong>Proposal.</strong> Cheap read-only aggregations (text-field length sums per label, embedding-byte estimate, top-N sessions by event bytes, <strong>dreamed-but-un-pruned reclaimable bytes</strong> as the headline trigger metric for item 5). Keep the byte scan in an on-demand subcommand, not on the routinely-invoked health path. Label all numbers as estimates.</li>
+<li><strong>Grounding.</strong> <code>cli/njhook.py:1810-1848</code> (counts only), <code>:1474-1486</code> (health watches DLQ rate only); <code>log_event.py:122-133</code>.</li>
+<li><strong>Effort/Impact.</strong> <strong>S / med.</strong> <strong>Explicitly contingent:</strong> reclaims nothing alone — value is entirely as scaffolding for the event tier-down. Adopt as a bundle with item 5.</li>
+<li><strong>Prior art.</strong> Postgres <code>pg_total_relation_size</code>; observability-before-optimization.</li>
+</ul>
+<hr>
+<h2 id="tier-research-bets-high-ambition-high-risk-overlaps-existing-machinery">Tier: RESEARCH BETS (high ambition / high risk / overlaps existing machinery)</h2>
+<h3 id="16-per-collision-local-update-with-body-merge-subset-of-mem0-addupdatedeletenoop">16. Per-collision local UPDATE-with-body merge (subset of Mem0 ADD/UPDATE/DELETE/NOOP)</h3>
+<p>The load-bearing 20%: for local providers, on a path collision, make <strong>one</strong> per-pair LLM call that includes the prior body so the model can actually merge (today a same-path local UPDATE silently clobbers the accumulated body — recoverable via MemoryRevision, so fidelity-regression not data-loss). <strong>Drop DELETE</strong> — a flaky local model auto-retracting an active memory directly contradicts the project's resolved non-destructive design and is the exact poisoning vector the gates resist. NOOP/ADD are near-zero value. <code>dream.py:760,313-324,561-575</code>. <strong>L (full pipeline) / med.</strong></p>
+<h3 id="17-reflectionsynthesis-layer-n1-abstraction-with-reflects_on-provenance">17. Reflection/synthesis layer (N→1 abstraction with <code>:REFLECTS_ON</code> provenance)</h3>
+<p>Genuine novelty is LLM synthesis of higher-order insights from memory clusters. But the baseline is misrepresented: <code>consolidate.py</code> already does cross-session vector-merge, and <code>detect/patterns.py</code> already covers ~2 of the 3 motivating examples deterministically. Real delta is incremental and high-effort (new edge + schema migration + backup round-trip + eval fixtures) with a real platitude/error-compounding drift risk. <code>dream.py:786-823</code>. <strong>L / med.</strong></p>
+<h3 id="18-critique-pass-between-extract-and-write-claim-verification">18. Critique pass between extract and write (claim verification)</h3>
+<p><code>grounding_score</code> is bag-of-tokens overlap that the code itself documents as unable to catch subtle errors (a wrong port whose digits appear in the transcript scores ~1.0; default floor 0.10). An opt-in <code>DREAM_CRITIQUE</code> LLM call re-reads candidates against the bounded source, copying <code>judge.py</code>'s conservative-by-failure pattern. <strong>Cannot be validated until new accuracy-specific eval fixtures exist</strong> — those are the real prerequisite. <code>quality.py:60-62</code>; <code>dream.py:430-453</code>. <strong>M / med.</strong></p>
+<h3 id="19-hierarchical-rolling-summarization-for-over-budget-long-sessions">19. Hierarchical rolling summarization for over-budget long sessions</h3>
+<p>Long sessions are handled by lossy truncation. <strong>But the headline double-truncation conflict is moot in production</strong> (<code>n_ctx=32768</code> → ~98K-char budget &gt;&gt; the 16K cap), and the 0-yield fallback already re-dreams worst cases on a frontier model with the full transcript. <strong>The cheap alternative the proposal ignores:</strong> derive <code>DREAM_TRANSCRIPT_MAX_CHARS</code> from <code>n_ctx</code> (or raise it) — most benefit, no per-window LLM calls. Map-reduce is L with unproven quality benefit. <code>dream.py:271-310</code>; <code>providers.py:243-246</code>. <strong>L / low.</strong></p>
+<h3 id="20-corroboration-based-promotion-graduated-decay-decay-on-contradiction-slice-only">20. Corroboration-based promotion + graduated decay (decay-on-contradiction slice only)</h3>
+<p>No auto-exit from pending_review; binary time-only archival. <strong>But</strong> part (b) graduated decay largely <strong>duplicates</strong> the shipped per-kind <code>recency_factor</code> + access reinforcement; part (a) annealing <strong>attacks the anti-poisoning gate</strong> it would auto-promote past, on provenance that is approximate/not-persisted. Survivable slice: decay-on-contradiction as a multiplier reusing existing <code>CONTRADICTS</code> edges, <strong>without</strong> auto-promotion. <code>consolidate.py:191-232</code>; <code>recall.py:103-114,247</code>. <strong>L / low.</strong></p>
+<h3 id="21-embedding-storage-reduction-matryoshka-dimensions-deferred-int8">21. Embedding storage reduction (Matryoshka dimensions; deferred int8)</h3>
+<p>Embeddings stored as float64 lists, duplicated in the HNSW index, retained on superseded nodes. The clean 3x lever (OpenAI <code>dimensions</code>) <strong>does not apply to the default nomic-embed</strong>. int8 needs Neo4j 5.18+ (no version floor in the repo) and is L. <strong>Cheaper independent win: REMOVE <code>m.embedding</code> on supersession.</strong> Defer until the corpus is large or OpenAI is in use; gate lever (a) on <code>EMBED_PROVIDER=openai</code>. <code>dream.py:592-596</code>; <code>embeddings.py:36-44</code>. <strong>L / low.</strong></p>
+<h3 id="22-provider-ab-eval-matrix-latency-only-first-cost-descoped">22. Provider A/B eval matrix (latency-only first; cost descoped)</h3>
+<p><code>eval_distillation</code> runs one provider per invocation. The multi-provider loop + JSON persistence is sound <strong>if cost is descoped</strong> (token capture is unbuilt; latency is standalone). But oversold: the real fallback is <strong>0-yield-triggered, not quality-delta-triggered</strong>, and n=2 toy fixtures cannot answer the central operational question. <code>eval_distillation.py:123-147</code>; <code>providers.py:316-321</code>. <strong>M / low.</strong></p>
+<h3 id="23-memoryrevision-chain-compaction">23. MemoryRevision chain compaction</h3>
+<p>Every content change appends a full prior-body snapshot. <strong>But</strong> impact is overstated: re-dream is idempotent on unchanged content (no revision) and most audit-path revisions carry <code>content_snapshot=None</code>. The proposed <code>njhook prune</code> host command <strong>does not exist</strong>, and dropping old snapshots defeats <code>content_as_of()</code>/<code>memory_history</code> — the feature the chain exists to provide. Also interacts with restore's <code>{ts, content_snapshot}</code> MERGE key. <code>dream.py:566-575</code>; <code>audit.py:55-64</code>. <strong>M / low.</strong></p>
+<h3 id="24-salience-triggered-batched-dreaming-max-sessions-backlog-guard-only">24. Salience-triggered + batched dreaming (<code>--max-sessions</code> backlog guard only)</h3>
+<p><code>fetch_events</code> returns all qualifying sessions with no LIMIT/ordering, so a backlog dreams hundreds in one run. The valid, cheap slice is a <code>--max-sessions</code> guard with resume-from-remainder. <strong>Drop the salience scoring/floor:</strong> the watermark already advances on 0-yield sessions (trivial sessions dreamed at most once, on a free local model), making the floor near-worthless. <strong>The cited "system map" grounding for this item is fabricated.</strong> <code>dream.py:167-172,786,528-531</code>. <strong>M / low.</strong></p>
+<hr>
+<h2 id="sequencing-notes">Sequencing notes</h2>
+<ul>
+<li><strong>Bundle</strong> item 15 (storage view) with item 5 (event tier-down) — the view is non-actionable alone.</li>
+<li><strong>Item 13</strong> (token/cost) depends on <strong>item 8</strong> (run ledger) for its storage target.</li>
+<li><strong>Items 3 + 4 + 6</strong> compound: scheduling consolidate, enabling the contradiction judge, and the opt-in write-time dedup all attack duplicate/conflict accumulation from different angles — ship 3 and 4 first (cheap, default-safe), then 6 as the opt-in finisher.</li>
+<li><strong>Items 11 + 18 + 22</strong> share a prerequisite: richer eval fixtures (precision/negative/accuracy-specific). Building that fixture corpus once unblocks all three.</li>
+</ul>
+</main></body></html>
