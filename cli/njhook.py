@@ -221,10 +221,22 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 def cmd_recall(args: argparse.Namespace) -> int:
     """Phase G — recall memories for a prompt over the shared core (same ranking
-    the hook uses). For programmatic use by non-hook runtimes."""
+    the hook uses). For programmatic use by non-hook runtimes. With --as-of, replay
+    the active set + each body as of an ISO timestamp (item #7), bypassing the
+    service hot path (which has no as-of mode)."""
     import service
-    with driver() as d, d.session() as s:
-        hits = service.recall_context(s, args.prompt, cwd=args.cwd, limit=args.limit)
+    if getattr(args, "as_of", None):
+        import recall
+        from project import dominant_project
+        proj = dominant_project([args.cwd]) if args.cwd else None
+        with driver() as d, d.session() as s:
+            hits = recall.as_of_query(s, args.prompt, current_project=proj,
+                                      limit=args.limit, as_of=args.as_of)
+        if not args.json:
+            print(f"# recall as of {args.as_of}\n")
+    else:
+        with driver() as d, d.session() as s:
+            hits = service.recall_context(s, args.prompt, cwd=args.cwd, limit=args.limit)
     if args.json:
         import json as _json
         print(_json.dumps(hits, indent=2))
@@ -1994,6 +2006,8 @@ def build_parser() -> argparse.ArgumentParser:
     prc.add_argument("--cwd", help="project scope — derive the project from this cwd")
     prc.add_argument("--limit", type=int, default=5)
     prc.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    prc.add_argument("--as-of", dest="as_of",
+                     help="replay: the memories live at this ISO timestamp, each body reconstructed to then")
     prc.set_defaults(fn=cmd_recall)
 
     pwe = sub.add_parser("write-event", help="capture an event from JSON (stdin or --json FILE) via the shared capture path")

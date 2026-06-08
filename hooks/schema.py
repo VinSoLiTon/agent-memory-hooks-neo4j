@@ -46,6 +46,10 @@ def create_constraints_and_indexes(tx) -> None:
     # dashboard surface superseded/pending memories. Keeps those scans cheap as
     # :MemoryRevision history and superseded nodes accumulate.
     tx.run("CREATE INDEX memory_status IF NOT EXISTS FOR (m:Memory) ON (m.status)")
+    # Item #7: bi-temporal as-of recall scans the valid_until window. valid_until is
+    # the sparse, selective field (set only on supersession/consolidation), so it's
+    # the one worth indexing for the point-in-time query.
+    tx.run("CREATE INDEX memory_valid_until IF NOT EXISTS FOR (m:Memory) ON (m.valid_until)")
     # Phase C3: make raw events retrievable (MemMachine — the episodic record is a
     # first-class retrieval target, not just dream input). Fulltext over the
     # signal-bearing event fields; null fields are simply not indexed.
