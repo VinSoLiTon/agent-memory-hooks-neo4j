@@ -284,7 +284,7 @@ def persist(report: dict, path: str | None = None) -> str:
 
 def print_matrix(report: dict) -> None:
     """Render the A/B matrix: one block per provider with a latency column, plus a
-    banner that the quality rates are NOT decision-grade at n=2 fixtures."""
+    banner that the quality rates are NOT decision-grade at this small fixture n."""
     for run in report["runs"]:
         print(f"\nprovider={run['provider']} model={run['model']} "
               f"total_lat={run.get('total_latency_s', 0.0):.2f}s")
@@ -296,8 +296,8 @@ def print_matrix(report: dict) -> None:
             print(f"  [{mark}] {s['name']:<20} valid={s['valid_rate']:.2f} grounded={s['grounded_rate']:.2f} "
                   f"coverage={s['coverage']:.2f} noise={s.get('noise', 0.0):.2f} "
                   f"lat={s.get('latency_s', 0.0):.2f}s")
-    print("\nNOTE: n=2 fixtures — latency is decision-grade; the quality rates are a regression "
-          "sanity check, NOT a provider-selection signal.")
+    print(f"\nNOTE: n={len(GOLDEN_SESSIONS)} fixtures — latency is decision-grade; the quality rates "
+          "are a regression sanity check, NOT a provider-selection signal.")
 
 
 def main() -> int:
