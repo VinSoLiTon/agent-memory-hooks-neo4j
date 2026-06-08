@@ -192,6 +192,15 @@ def cmd_eval_distillation(args: argparse.Namespace) -> int:
     is the same one the CI tests pin; this runs it against live model output."""
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dream"))
     import eval_distillation
+    if getattr(args, "providers", None):   # item #22 — A/B latency matrix
+        provs = [p.strip() for p in args.providers.split(",") if p.strip()]
+        persist_path = (getattr(args, "report_path", None) or eval_distillation._default_report_path()) \
+            if (args.persist or getattr(args, "report_path", None)) else None
+        rep = eval_distillation.run_matrix(provs, persist_path=persist_path)
+        eval_distillation.print_matrix(rep)
+        if persist_path:
+            print(f"\nappended report to {persist_path}")
+        return 0
     rep = eval_distillation.run(args.provider, args.model)
     eval_distillation.print_report(rep)
     return 0 if rep["pass"] else 1
@@ -2002,6 +2011,28 @@ def cmd_storage(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stale(args: argparse.Namespace) -> int:
+    """Item #14 — recall-effectiveness worklists: memories that never reached an
+    agent (access_count=0, aged) and once-used-but-now-stale ones. Worklist only —
+    nothing is archived; act via `njhook archive` / `njhook review`."""
+    import recall
+    with driver() as d, d.session() as s:
+        never = recall.never_injected(s, min_age_days=args.min_age_days, limit=args.limit)
+        dead = recall.effectively_dead(s, floor=args.floor, limit=args.limit)
+    if args.json:
+        import json as _json
+        print(_json.dumps({"never_injected": never, "effectively_dead": dead}, indent=2, default=str))
+        return 0
+    print(f"Never injected (access_count=0, >{args.min_age_days}d old, non-profile): {len(never)}")
+    for m in never[:20]:
+        print(f"  {m['path']:<48} ingested {str(m.get('ingested_at') or m.get('updated_at') or '')[:10]}")
+    print(f"\nEffectively dead (used, recency < {args.floor}): {len(dead)}")
+    for m in dead[:20]:
+        print(f"  {m['path']:<48} recency {m['recency']:.3f}  ({m['access_count']} reads)")
+    print("\n(worklist only — nothing archived; act via `njhook archive` / `njhook review`)")
+    return 0
+
+
 def cmd_dream_stats(args: argparse.Namespace) -> int:
     """Item #8: the recent per-nightly run ledger (:NightlyRun) — sessions seen,
     how many yielded, how many fell back to the remote provider, memories written,
@@ -2096,6 +2127,9 @@ def build_parser() -> argparse.ArgumentParser:
     ped = sub.add_parser("eval-distillation", help="score dream output quality over golden sessions via a real provider (Phase D3; opt-in)")
     ped.add_argument("--provider", choices=["anthropic", "openai", "ollama", "llamacpp"], help="LLM backend (default: $DREAM_PROVIDER or anthropic)")
     ped.add_argument("--model", help="override the provider's default model")
+    ped.add_argument("--providers", help="A/B latency matrix: comma list of providers (item #22), e.g. llamacpp,anthropic")
+    ped.add_argument("--persist", action="store_true", help="append the matrix report to the JSONL history")
+    ped.add_argument("--report-path", dest="report_path", help="JSONL history path (default $DREAM_EVAL_REPORT_PATH or .eval/distillation_matrix.jsonl)")
     ped.set_defaults(fn=cmd_eval_distillation)
 
     prn = sub.add_parser("render", help="render project memory into an agent context file (AGENTS.md/CLAUDE.md/GEMINI.md/Cursor) as a managed block")
@@ -2132,6 +2166,15 @@ def build_parser() -> argparse.ArgumentParser:
     pso = sub.add_parser("storage", help="on-demand byte accounting: where storage accumulates (estimates)")
     pso.add_argument("--json", action="store_true", help="machine-readable JSON output")
     pso.set_defaults(fn=cmd_storage)
+
+    psl = sub.add_parser("stale", help="recall-effectiveness worklists: never-injected + effectively-dead memories")
+    psl.add_argument("--min-age-days", type=int, default=int(os.environ.get("RECALL_NEVER_INJECTED_MIN_AGE_DAYS", "30")),
+                     help="never-injected memories must be older than this (default 30)")
+    psl.add_argument("--floor", type=float, default=float(os.environ.get("RECALL_DEAD_RECENCY_FLOOR", "0.05")),
+                     help="recency-multiplier floor below which a used memory is 'effectively dead' (default 0.05)")
+    psl.add_argument("--limit", type=int, default=200, help="max rows per cohort (default 200)")
+    psl.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    psl.set_defaults(fn=cmd_stale)
 
     pds = sub.add_parser("dream-stats", help="recent nightly run ledger (:NightlyRun): yield, fallback, written")
     pds.add_argument("--limit", type=int, default=10, help="how many recent runs to show (default 10)")
