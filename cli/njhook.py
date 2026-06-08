@@ -1936,6 +1936,28 @@ def cmd_stats(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stale(args: argparse.Namespace) -> int:
+    """Item #14 — recall-effectiveness worklists: memories that never reached an
+    agent (access_count=0, aged) and once-used-but-now-stale ones. Worklist only —
+    nothing is archived; act via `njhook archive` / `njhook review`."""
+    import recall
+    with driver() as d, d.session() as s:
+        never = recall.never_injected(s, min_age_days=args.min_age_days, limit=args.limit)
+        dead = recall.effectively_dead(s, floor=args.floor, limit=args.limit)
+    if args.json:
+        import json as _json
+        print(_json.dumps({"never_injected": never, "effectively_dead": dead}, indent=2, default=str))
+        return 0
+    print(f"Never injected (access_count=0, >{args.min_age_days}d old, non-profile): {len(never)}")
+    for m in never[:20]:
+        print(f"  {m['path']:<48} ingested {str(m.get('ingested_at') or m.get('updated_at') or '')[:10]}")
+    print(f"\nEffectively dead (used, recency < {args.floor}): {len(dead)}")
+    for m in dead[:20]:
+        print(f"  {m['path']:<48} recency {m['recency']:.3f}  ({m['access_count']} reads)")
+    print("\n(worklist only — nothing archived; act via `njhook archive` / `njhook review`)")
+    return 0
+
+
 def cmd_dream_stats(args: argparse.Namespace) -> int:
     """Item #8: the recent per-nightly run ledger (:NightlyRun) — sessions seen,
     how many yielded, how many fell back to the remote provider, memories written,
@@ -2065,6 +2087,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     pst = sub.add_parser("stats", help="counts by client / kind")
     pst.set_defaults(fn=cmd_stats)
+
+    psl = sub.add_parser("stale", help="recall-effectiveness worklists: never-injected + effectively-dead memories")
+    psl.add_argument("--min-age-days", type=int, default=int(os.environ.get("RECALL_NEVER_INJECTED_MIN_AGE_DAYS", "30")),
+                     help="never-injected memories must be older than this (default 30)")
+    psl.add_argument("--floor", type=float, default=float(os.environ.get("RECALL_DEAD_RECENCY_FLOOR", "0.05")),
+                     help="recency-multiplier floor below which a used memory is 'effectively dead' (default 0.05)")
+    psl.add_argument("--limit", type=int, default=200, help="max rows per cohort (default 200)")
+    psl.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    psl.set_defaults(fn=cmd_stale)
 
     pds = sub.add_parser("dream-stats", help="recent nightly run ledger (:NightlyRun): yield, fallback, written")
     pds.add_argument("--limit", type=int, default=10, help="how many recent runs to show (default 10)")
