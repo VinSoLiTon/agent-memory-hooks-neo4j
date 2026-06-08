@@ -23,6 +23,7 @@ from typing import Callable
 
 # These modules are picked up via sys.path in dream.py before this is imported.
 from providers import get_provider, default_model  # type: ignore  # noqa: E402
+import memory_types  # type: ignore  # noqa: E402  (semantic kind vocabulary, for merged-node stamping)
 
 CONSOLIDATE_SYSTEM_PROMPT = """You are merging two markdown memories that overlap significantly.
 
@@ -52,10 +53,12 @@ def _fetch_pair_candidates(session, threshold: float, limit: int) -> list[dict]:
             """
             MATCH (m1:Memory) WHERE m1.embedding IS NOT NULL
               AND coalesce(m1.archived, false) = false
+              AND coalesce(m1.status, 'active') = 'active'
             CALL db.index.vector.queryNodes('memory_embeddings', 5, m1.embedding)
             YIELD node AS m2, score
             WHERE m1.path < m2.path
               AND coalesce(m2.archived, false) = false
+              AND coalesce(m2.status, 'active') = 'active'
               AND score > $threshold
             RETURN m1.path AS p1, m1.content AS c1,
                    m2.path AS p2, m2.content AS c2,
@@ -144,6 +147,13 @@ def consolidate(driver, provider_name: str | None, threshold: float, max_rounds:
                 print(f"    warn: embedding failed for merged memory: {e}")
 
         now = datetime.now(timezone.utc).isoformat()
+        # Stamp the merged node's semantic kind the same way the dream writer does
+        # (parse the kept frontmatter, normalize legacy labels). The project axis is
+        # the M3 PATH-based half only: clear it for cross-project paths, otherwise
+        # PRESERVE whatever the MERGE'd node already had — consolidate has no
+        # session/cwd to derive a project from, so it never invents one.
+        new_kind = memory_types.normalize_kind(
+            memory_types.parse_kind(new_content) or memory_types.DEFAULT_KIND)
         with driver.session() as ses:
             # Re-parent provenance: every Session that DREAMED p1 or p2 also
             # DREAMED the merged memory. Then supersede (not delete) the originals.
@@ -154,6 +164,10 @@ def consolidate(driver, provider_name: str | None, threshold: float, max_rounds:
                     m.updated_at = $now,
                     m.ingested_at = $now,
                     m.status = 'active',
+                    m.kind = $new_kind,
+                    m.project = CASE
+                        WHEN $new_path STARTS WITH 'profile/' OR $new_path STARTS WITH 'tools/'
+                        THEN null ELSE coalesce(m.project, null) END,
                     m.created_by = coalesce(m.created_by, 'consolidate'),
                     m.valid_from = coalesce(m.valid_from, $now),
                     m.consolidated_from = coalesce(m.consolidated_from, []) + [$p1, $p2]
@@ -178,6 +192,7 @@ def consolidate(driver, provider_name: str | None, threshold: float, max_rounds:
                 """,
                 parameters={
                     "new_path": new_path, "new_content": new_content, "now": now,
+                    "new_kind": new_kind,
                     "p1": p["p1"], "p2": p["p2"], "emb": new_embedding,
                 },
             )
