@@ -596,7 +596,12 @@ def memory_history(session, path: str):
     ).single()
     if rec is None:
         return None
-    revs = [rv for rv in (rec["revs"] or []) if rv and rv.get("ts") is not None]
+    # Item #23 interaction: a revision with a NULL content_snapshot is a status-only
+    # op (approve/reject/supersede/...), NOT a content delta — exclude it from the
+    # CONTENT timeline so content_as_of (point-in-time replay, item #7) doesn't
+    # reconstruct an empty body for a timestamp landing just before such a revision.
+    revs = [rv for rv in (rec["revs"] or [])
+            if rv and rv.get("ts") is not None and rv.get("content") is not None]
     versions = []
     for i, rv in enumerate(revs):
         versions.append({"label": f"v{i + 1}", "ts": rv.get("ts"),
