@@ -155,12 +155,13 @@ DREAM_JSON_SCHEMA = {
                     "content": {"type": "string", "minLength": 10},
                     "importance": {"type": "integer", "minimum": 1, "maximum": 10},
                 },
-                # importance is REQUIRED here so the schema-constrained local path
-                # (ollama format=, llama.cpp/openai json_schema) must emit it —
+                # importance is REQUIRED here so the schema-constrained local
+                # paths (ollama `format=`, llama.cpp `json_schema`) MUST emit it —
                 # killing the degenerate "omitted → flat default 5" distribution
-                # on the 12B model. The anthropic json_object fallback path does
-                # not enforce this, so it stays optional there (handled by the
-                # kind-prior floor in dream._coerce_importance).
+                # on the 12B model. The providers that send `json_object` instead
+                # (anthropic, openai) don't enforce this required list, so it stays
+                # optional there — handled by the kind-prior floor in
+                # dream._coerce_importance.
                 "required": ["path", "content", "importance"],
             },
         }
