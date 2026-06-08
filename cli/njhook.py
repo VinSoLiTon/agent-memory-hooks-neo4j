@@ -874,9 +874,11 @@ def cmd_prune_events(args: argparse.Namespace) -> int:
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dream"))
     import prune_events as pe  # type: ignore
+    sks = [args.session] if getattr(args, "session", None) else None
     with driver() as d:
         res = pe.prune_events(d, retention_days=args.retention_days,
-                              blank_prompt=args.blank_prompt, dry_run=args.dry_run)
+                              blank_prompt=args.blank_prompt, dry_run=args.dry_run,
+                              session_keys=sks)
     verb = "[dry-run] would tier" if args.dry_run else "tiered"
     print(f"prune-events: {verb} {res['events_tiered']} event(s) across "
           f"{res['sessions']} session(s); ~{res['chars_reclaimed']} chars reclaimable"
@@ -2186,6 +2188,7 @@ def build_parser() -> argparse.ArgumentParser:
     ppe.add_argument("--blank-prompt", action="store_true",
                      help="also blank e.prompt (default off — it feeds event_fulltext recall)")
     ppe.add_argument("--dry-run", action="store_true", help="report what would be tiered; write nothing")
+    ppe.add_argument("--session", help="scope to a single session_key (default: all dreamed sessions)")
     ppe.set_defaults(fn=cmd_prune_events)
 
     pmg = sub.add_parser("migrate", help="run full schema migration (idempotent; run after install or upgrade)")

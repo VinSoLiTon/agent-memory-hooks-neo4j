@@ -57,12 +57,15 @@ def _walk_chain(ses, session_key: str):
 
 
 def prune_events(driver, retention_days: int, blank_prompt: bool = False,
-                 dry_run: bool = False, now=None) -> dict:
+                 dry_run: bool = False, now=None, session_keys: list | None = None) -> dict:
     """Tier-1 down-tier eligible events. Eligible = the Session has been dreamed
     (`last_dreamed_at` set), the event is older than `retention_days`, AND its
     timestamp is at/<= the watermark (so re-dream provably never needs it). Already
     -tiered events are skipped (idempotent). Returns counts + a char estimate of
-    the reclaimable heavy text."""
+    the reclaimable heavy text.
+
+    `session_keys` (optional) scopes the pass to specific sessions — useful for
+    pruning one session, and to keep tests from tiering the whole shared graph."""
     now = now or datetime.now(timezone.utc)
     cutoff = (now - timedelta(days=retention_days)).isoformat()
     now_iso = now.isoformat()
@@ -71,8 +74,10 @@ def prune_events(driver, retention_days: int, blank_prompt: bool = False,
     with driver.session() as ses:
         sessions = [(r["sk"], r["wm"]) for r in ses.run(
             "MATCH (s:Session) WHERE s.last_dreamed_at IS NOT NULL "
+            "AND ($sks IS NULL OR coalesce(s.session_key, s.client + ':' + s.session_id) IN $sks) "
             "RETURN coalesce(s.session_key, s.client + ':' + s.session_id) AS sk, "
-            "       s.last_dreamed_at AS wm"
+            "       s.last_dreamed_at AS wm",
+            sks=session_keys,
         )]
 
     sessions_touched = 0

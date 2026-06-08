@@ -83,7 +83,7 @@ def _chain_ids(d):
 
 
 def test_tier1_blanks_eligible_keeps_recent_and_past_watermark(driver):
-    res = pe.prune_events(driver, retention_days=30, now=NOW)
+    res = pe.prune_events(driver, retention_days=30, now=NOW, session_keys=[SK])
     assert res["events_tiered"] == 2 and res["sessions"] == 1   # only e1, e2
     e1, e2, e3, e4 = (_ev(driver, f"__pr_{i}") for i in (1, 2, 3, 4))
     # eligible events: heavy fields gone, tiered flag set
@@ -100,24 +100,24 @@ def test_tier1_blanks_eligible_keeps_recent_and_past_watermark(driver):
 
 
 def test_chain_and_ids_intact_after_tiering(driver):
-    pe.prune_events(driver, retention_days=30, now=NOW)
+    pe.prune_events(driver, retention_days=30, now=NOW, session_keys=[SK])
     assert _chain_ids(driver) == ["__pr_1", "__pr_2", "__pr_3", "__pr_4"]   # nothing deleted/reordered
 
 
 def test_idempotent(driver):
-    pe.prune_events(driver, retention_days=30, now=NOW)
-    again = pe.prune_events(driver, retention_days=30, now=NOW)
+    pe.prune_events(driver, retention_days=30, now=NOW, session_keys=[SK])
+    again = pe.prune_events(driver, retention_days=30, now=NOW, session_keys=[SK])
     assert again["events_tiered"] == 0   # already-tiered events are skipped
 
 
 def test_dry_run_writes_nothing(driver):
-    res = pe.prune_events(driver, retention_days=30, now=NOW, dry_run=True)
+    res = pe.prune_events(driver, retention_days=30, now=NOW, dry_run=True, session_keys=[SK])
     assert res["events_tiered"] == 2 and res["chars_reclaimed"] > 0
     assert not _ev(driver, "__pr_1").get("tiered")   # nothing actually written
 
 
 def test_blank_prompt_opt_in_removes_prompt(driver):
-    pe.prune_events(driver, retention_days=30, now=NOW, blank_prompt=True)
+    pe.prune_events(driver, retention_days=30, now=NOW, blank_prompt=True, session_keys=[SK])
     assert _ev(driver, "__pr_1").get("prompt") is None   # opt-in blanks it
 
 
@@ -127,7 +127,15 @@ def test_lineage_to_tiered_event_still_resolves(driver):
         s.run("MATCH (e:Event {event_id:'__pr_1'}) "
               "CREATE (m:Memory {path:'general/__pr_mem.md', content:'body', status:'active'}) "
               "MERGE (m)-[:EXTRACTED_FROM]->(e)")
-    pe.prune_events(driver, retention_days=30, now=NOW)
+    pe.prune_events(driver, retention_days=30, now=NOW, session_keys=[SK])
     with driver.session() as s:
         lin = recall.memory_lineage(s, "general/__pr_mem.md")
     assert any(e["event_id"] == "__pr_1" for e in lin["source_events"])   # edge survived tiering
+
+
+def test_session_keys_scope_isolates_other_sessions(driver):
+    # scoping to a different (non-existent) session must tier NOTHING here — proving
+    # the pass is session-scoped and never touches the rest of the graph.
+    res = pe.prune_events(driver, retention_days=30, now=NOW, session_keys=["test:__nope"])
+    assert res["events_tiered"] == 0 and res["sessions"] == 0
+    assert not _ev(driver, "__pr_1").get("tiered")   # SK's eligible events untouched
