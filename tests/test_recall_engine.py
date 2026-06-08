@@ -369,6 +369,90 @@ def test_content_as_of_reconstructs_point_in_time():
     assert recall.content_as_of(versions, "2026-06-04T00:00:00+00:00") == "C2 current"  # after all changes
 
 
+# --- item #7: bi-temporal as-of recall (window picks WHICH, revisions WHAT) ---
+
+def test_as_of_live_predicate_shape():
+    p = recall._as_of_live("node")
+    assert "coalesce(node.valid_from, '') <= $as_of" in p
+    assert "node.valid_until IS NULL OR node.valid_until > $as_of" in p
+    assert "coalesce(node.archived, false) = false" in p   # archived still excluded
+
+
+@pytest.fixture()
+def asof_driver():
+    d = GraphDatabase.driver(_URI, auth=(_USER, _PWD),
+                             notifications_disabled_classifications=["UNRECOGNIZED"])
+    with d.session() as s:
+        s.execute_write(schema.create_constraints_and_indexes)   # memory_fulltext + valid_until index
+    # Fulltext-only: with embeddings on, vector_search would return arbitrary
+    # nearest-neighbours to the query — all passing the (null) temporal window —
+    # and crowd out the seeded nodes. Isolate to the distinctive fulltext token.
+    saved = recall.embeddings.is_enabled
+    recall.embeddings.is_enabled = lambda: False
+
+    def _clean():
+        with d.session() as s:
+            s.run("MATCH (r:MemoryRevision)-[:VERSION_OF]->(m:Memory) WHERE m.path STARTS WITH 'general/__asof' DETACH DELETE r")
+            s.run("MATCH (m:Memory) WHERE m.path STARTS WITH 'general/__asof' DETACH DELETE m")
+
+    _clean()
+    try:
+        yield d
+    finally:
+        _clean()
+        recall.embeddings.is_enabled = saved
+        d.close()
+
+
+def _asof_paths(d, ts):
+    with d.session() as s:
+        return [h["path"] for h in recall.as_of_query(s, "QQASOF", as_of=ts, min_score=0.0)]
+
+
+def test_valid_until_index_created(asof_driver):
+    with asof_driver.session() as s:
+        n = s.run("SHOW INDEXES YIELD name WHERE name = 'memory_valid_until' RETURN count(*) AS n").single()["n"]
+    assert n == 1
+
+
+def test_as_of_window_excludes_unborn_memory(asof_driver):
+    with asof_driver.session() as s:
+        s.run("CREATE (:Memory {path:'general/__asof_a.md', content:'QQASOF alpha body', "
+              "status:'active', valid_from:'2026-06-05T00:00:00+00:00'})")
+    assert "general/__asof_a.md" not in _asof_paths(asof_driver, "2026-06-01T00:00:00+00:00")  # not yet born
+    assert "general/__asof_a.md" in _asof_paths(asof_driver, "2026-06-06T00:00:00+00:00")      # born by then
+
+
+def test_as_of_window_includes_superseded_at_past_ts(asof_driver):
+    # headline replay: a now-superseded memory must reappear when replaying the past,
+    # and its successor must NOT appear before it existed. CANNOT pass on main.
+    with asof_driver.session() as s:
+        s.run("""
+            CREATE (:Memory {path:'general/__asof_x.md', content:'QQASOF subject old', status:'superseded',
+                             valid_from:'2026-06-01T00:00:00+00:00', valid_until:'2026-06-04T00:00:00+00:00'})
+            CREATE (:Memory {path:'general/__asof_y.md', content:'QQASOF subject new', status:'active',
+                             valid_from:'2026-06-04T00:00:00+00:00'})
+        """)
+    past = _asof_paths(asof_driver, "2026-06-03T00:00:00+00:00")
+    recent = _asof_paths(asof_driver, "2026-06-05T00:00:00+00:00")
+    assert "general/__asof_x.md" in past and "general/__asof_y.md" not in past      # old was live then
+    assert "general/__asof_y.md" in recent and "general/__asof_x.md" not in recent  # new is live now
+
+
+def test_as_of_reconstructs_inplace_body(asof_driver):
+    with asof_driver.session() as s:
+        s.run("""
+            CREATE (m:Memory {path:'general/__asof_r.md', content:'NEW QQASOF body', status:'active',
+                              valid_from:'2026-05-01T00:00:00+00:00', updated_at:'2026-06-03T00:00:00+00:00'})
+            CREATE (:MemoryRevision {content_snapshot:'OLD QQASOF body', operation:'dream_update',
+                                     actor:'t', ts:'2026-06-02T00:00:00+00:00'})-[:VERSION_OF]->(m)
+        """)
+    with asof_driver.session() as s:
+        hits = recall.as_of_query(s, "QQASOF", as_of="2026-06-01T12:00:00+00:00", min_score=0.0)
+    body = next(h["content"] for h in hits if h["path"] == "general/__asof_r.md")
+    assert "OLD QQASOF body" in body and "NEW" not in body   # body rewound via the revision chain
+
+
 @pytest.fixture()
 def lineage_driver():
     d = GraphDatabase.driver(_URI, auth=(_USER, _PWD),

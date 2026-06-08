@@ -75,6 +75,17 @@ def _active(alias: str) -> str:
             f"AND coalesce({alias}.status, 'active') = 'active'")
 
 
+def _as_of_live(alias: str) -> str:
+    """Item #7 — point-in-time lifecycle: the memory was LIVE at $as_of by its
+    bi-temporal window (valid_from <= as_of < valid_until), NOT its CURRENT status.
+    A memory superseded later is excluded by today's status filter but must reappear
+    when replaying the past. Still excludes archived (a separate soft-delete axis).
+    valid_until IS NULL means 'still current'. ISO-8601 UTC compares lexically."""
+    return (f"coalesce({alias}.archived, false) = false "
+            f"AND coalesce({alias}.valid_from, '') <= $as_of "
+            f"AND ({alias}.valid_until IS NULL OR {alias}.valid_until > $as_of)")
+
+
 # --- C2 ranking signals: importance x decayed recency -----------------------
 DEFAULT_IMPORTANCE = 5  # neutral; memories without an importance keep score x1.0
 
@@ -212,15 +223,23 @@ def _bucket_row(r) -> dict:
 # --- primitive retrievers ---------------------------------------------------
 
 def fulltext_search(session, query: str, limit: int = MAX_PROMPT_HITS,
-                    min_score: float = MIN_FULLTEXT_SCORE) -> list:
+                    min_score: float = MIN_FULLTEXT_SCORE, as_of: str | None = None) -> list:
     """Lucene fulltext over (m.content, m.path). Active, non-archived only.
     Escapes reserved chars and returns [] on any error so a malformed query
-    never blocks the vector fallback."""
+    never blocks the vector fallback. With `as_of` (item #7) the lifecycle filter
+    swaps from current-status to the point-in-time window (_as_of_live); as_of=None
+    keeps the hot path byte-identical."""
     raw_limit = max(limit * 3, limit + 5)
+    params = {"query": escape_lucene(query), "min_score": min_score,
+              "limit": raw_limit, "default_importance": DEFAULT_IMPORTANCE}
+    lifecycle = _active("node")
+    if as_of:
+        lifecycle = _as_of_live("node")
+        params["as_of"] = as_of
     cypher = f"""
     CALL db.index.fulltext.queryNodes('memory_fulltext', $query)
     YIELD node, score
-    WHERE score > $min_score AND {_active('node')}
+    WHERE score > $min_score AND {lifecycle}
     RETURN node.path AS path, node.content AS content,
            coalesce(node.project, '') AS project, score,
            coalesce(node.importance, $default_importance) AS importance,
@@ -230,19 +249,17 @@ def fulltext_search(session, query: str, limit: int = MAX_PROMPT_HITS,
     LIMIT $limit
     """
     try:
-        rows = list(session.run(cypher, parameters={
-            "query": escape_lucene(query), "min_score": min_score,
-            "limit": raw_limit, "default_importance": DEFAULT_IMPORTANCE,
-        }))
+        rows = list(session.run(cypher, parameters=params))
     except Exception as e:
         print(f"recall: fulltext query failed ({e}); falling back to vector only", file=sys.stderr)
         return []
     return [_hit(r) for r in rows]
 
 
-def vector_search(session, query: str, limit: int = MAX_PROMPT_HITS) -> list:
+def vector_search(session, query: str, limit: int = MAX_PROMPT_HITS, as_of: str | None = None) -> list:
     """ANN over the memory vector index. [] if embeddings are disabled or the
-    index isn't populated yet."""
+    index isn't populated yet. `as_of` (item #7) swaps the lifecycle filter to the
+    point-in-time window; as_of=None keeps the hot path byte-identical."""
     if not embeddings.is_enabled():
         return []
     try:
@@ -252,19 +269,24 @@ def vector_search(session, query: str, limit: int = MAX_PROMPT_HITS) -> list:
     except Exception:
         return []
     raw_limit = max(limit * 3, limit + 5)
+    params = {"qvec": qvec[0], "k": raw_limit, "default_importance": DEFAULT_IMPORTANCE}
+    lifecycle = _active("node")
+    if as_of:
+        lifecycle = _as_of_live("node")
+        params["as_of"] = as_of
     try:
         rows = list(session.run(
             f"""
             CALL db.index.vector.queryNodes('memory_embeddings', $k, $qvec)
             YIELD node, score
-            WHERE {_active('node')}
+            WHERE {lifecycle}
             RETURN node.path AS path, node.content AS content,
                    coalesce(node.project, '') AS project, score,
                    coalesce(node.importance, $default_importance) AS importance,
                    node.last_accessed_at AS last_accessed_at,
                    node.updated_at AS updated_at, node.ingested_at AS ingested_at
             """,
-            parameters={"qvec": qvec[0], "k": raw_limit, "default_importance": DEFAULT_IMPORTANCE},
+            parameters=params,
         ))
     except Exception:
         return []
@@ -361,6 +383,34 @@ def prompt_query(session, prompt: str, current_project: str | None = None,
     if not ft and not vec:
         return []
     return hybrid_merge(ft, vec, current_project, limit, now=now)
+
+
+def as_of_query(session, prompt: str, current_project: str | None = None,
+                limit: int = MAX_PROMPT_HITS, min_score: float = MIN_FULLTEXT_SCORE,
+                as_of: str | None = None, now=None) -> list:
+    """Point-in-time replay (item #7). The bi-temporal WINDOW (valid_from/valid_until)
+    picks WHICH memories were live at `as_of`; the :MemoryRevision chain
+    (content_as_of) reconstructs WHAT each one said then. Hybrid + ranking are
+    unchanged. `as_of` is an ISO-8601 UTC string (lexicographic compare, like
+    history). Returns ranked hits with each `content` rewound to `as_of`."""
+    if not (prompt or "").strip() or not as_of:
+        return []
+    ft = fulltext_search(session, prompt, limit=limit, min_score=min_score, as_of=as_of)
+    if not ft:
+        terms = extract_terms(prompt)
+        if terms:
+            ft = fulltext_search(session, " OR ".join(terms), limit=limit, min_score=min_score, as_of=as_of)
+    vec = vector_search(session, prompt, limit=limit, as_of=as_of)
+    if not ft and not vec:
+        return []
+    rows = hybrid_merge(ft, vec, current_project, limit, now=now)
+    for hit in rows:
+        hist = memory_history(session, hit["path"])
+        if hist:
+            body = content_as_of(hist["versions"], as_of)
+            if body is not None:
+                hit["content"] = body   # rewind the body to what it said at as_of
+    return rows
 
 
 def session_start_buckets(session, current_project: str | None = None,
