@@ -246,6 +246,67 @@ def test_value_density_orders_session_start_truncation():
     assert paths[0] == "profile/short.md"
 
 
+# --- rank-aware bucket fetch (over-fetch a recency pool, slice by value-density) ---
+
+def test_rank_bucket_keeps_value_densest_not_just_most_recent():
+    now = datetime(2026, 6, 8, tzinfo=timezone.utc)
+    rows = [
+        {"path": "profile/n1.md", "content": "y" * 300, "importance": 5, "updated_at": "2026-06-08T00:00:00+00:00"},
+        {"path": "profile/n2.md", "content": "y" * 300, "importance": 5, "updated_at": "2026-06-07T00:00:00+00:00"},
+        {"path": "profile/n3.md", "content": "y" * 300, "importance": 5, "updated_at": "2026-06-06T00:00:00+00:00"},
+        {"path": "profile/imp.md", "content": "short", "importance": 10, "updated_at": "2026-06-01T00:00:00+00:00"},  # oldest, dense
+    ]
+    kept = recall._rank_bucket(rows, 2, now)
+    paths = {r["path"] for r in kept}
+    assert "profile/imp.md" in paths   # concise/importance-10 survives despite being the oldest
+    assert len(kept) == 2
+
+
+def test_rank_bucket_short_circuits_when_pool_fits():
+    rows = [{"path": "p", "content": "c", "importance": 5}]
+    assert recall._rank_bucket(rows, 5) is rows   # pool <= limit → returned as-is, no re-sort/copy
+
+
+@pytest.fixture()
+def bucket_driver():
+    d = GraphDatabase.driver(_URI, auth=(_USER, _PWD),
+                             notifications_disabled_classifications=["UNRECOGNIZED"])
+
+    def _clean(s):
+        s.run("MATCH (m:Memory) WHERE m.path STARTS WITH 'profile/__rk' DETACH DELETE m")
+
+    with d.session() as s:
+        _clean(s)
+        # three fresh, bulky, mid-importance memories + one older, concise, importance-10
+        s.run(
+            """
+            CREATE (:Memory {path:'profile/__rk_n1.md',  content:$big,   importance:5,  status:'active', updated_at:'2026-06-08T00:00:00+00:00'})
+            CREATE (:Memory {path:'profile/__rk_n2.md',  content:$big,   importance:5,  status:'active', updated_at:'2026-06-07T00:00:00+00:00'})
+            CREATE (:Memory {path:'profile/__rk_n3.md',  content:$big,   importance:5,  status:'active', updated_at:'2026-06-06T00:00:00+00:00'})
+            CREATE (:Memory {path:'profile/__rk_imp.md', content:'short', importance:10, status:'active', updated_at:'2026-06-01T00:00:00+00:00'})
+            """,
+            big="y" * 300,
+        )
+    try:
+        yield d
+    finally:
+        with d.session() as s:
+            _clean(s)
+        d.close()
+
+
+def test_fetch_bucket_surfaces_high_importance_older_memory(bucket_driver):
+    now = datetime(2026, 6, 8, tzinfo=timezone.utc)
+    with bucket_driver.session() as s:
+        rows = recall.fetch_bucket(s, "profile/__rk", limit=2, now=now)
+    paths = {r["path"] for r in rows}
+    # a pure-recency `LIMIT 2` would return only __rk_n1 + __rk_n2; the over-fetch
+    # pool (raw_limit = max(2*3, 2+5) = 7) plus value-density slicing lets the
+    # older, concise, importance-10 memory in.
+    assert "profile/__rk_imp.md" in paths
+    assert len(rows) == 2
+
+
 # --- Phase F slice 2: as-of reconstruction + lineage ------------------------
 
 def test_content_as_of_reconstructs_point_in_time():

@@ -47,6 +47,10 @@ TOOLS_LIMIT = int(os.environ.get("INJECT_TOOLS_LIMIT", "5"))
 PROJECT_LIMIT = int(os.environ.get("INJECT_PROJECT_LIMIT", "5"))
 CHAR_BUDGET = int(os.environ.get("INJECT_CHAR_BUDGET", "4000"))
 PROJECT_BOOST = float(os.environ.get("INJECT_PROJECT_BOOST", "0.5"))
+# Session-start buckets over-fetch a recency-ordered candidate pool this many
+# times the limit, then keep the value-densest `limit` (see _rank_bucket). Mirrors
+# the prompt/vector path's `max(limit*3, limit+5)` over-fetch idiom.
+BUCKET_OVERFETCH = int(os.environ.get("INJECT_BUCKET_OVERFETCH", "3"))
 
 # Closed vocabulary of recall modes (mirrors the roadmap; tool_context is a thin
 # variant of prompt_context for now and gains a dedicated plan in a later phase).
@@ -251,7 +255,19 @@ def hybrid_merge(fulltext: list, vector: list, current_project: str | None, limi
 
 # --- bucket fetch (session-start) -------------------------------------------
 
-def fetch_bucket(session, prefix: str, limit: int) -> list:
+def _rank_bucket(rows: list, limit: int, now=None) -> list:
+    """Slice an over-fetched, recency-ordered candidate pool down to the
+    value-densest `limit` (importance x recency / chars). The DB cut is recency
+    only; this is where importance gets a vote — so a high-importance,
+    slightly-older memory surfaces instead of being lost at the DB LIMIT. A pool
+    already <= limit short-circuits (order is irrelevant; render re-ranks)."""
+    if len(rows) <= limit:
+        return rows
+    return sorted(rows, key=lambda r: value_density(r, now), reverse=True)[:limit]
+
+
+def fetch_bucket(session, prefix: str, limit: int, now=None) -> list:
+    raw_limit = max(limit * BUCKET_OVERFETCH, limit + 5)
     rows = session.run(
         f"MATCH (m:Memory) WHERE m.path STARTS WITH $prefix AND {_active('m')} "
         "RETURN m.path AS path, m.content AS content, "
@@ -259,13 +275,14 @@ def fetch_bucket(session, prefix: str, limit: int) -> list:
         "       m.last_accessed_at AS last_accessed_at, "
         "       m.updated_at AS updated_at, m.ingested_at AS ingested_at "
         "ORDER BY coalesce(m.updated_at, '') DESC, m.path "
-        "LIMIT $limit",
-        parameters={"prefix": prefix, "limit": limit, "default_importance": DEFAULT_IMPORTANCE},
+        "LIMIT $raw_limit",
+        parameters={"prefix": prefix, "raw_limit": raw_limit, "default_importance": DEFAULT_IMPORTANCE},
     )
-    return [_bucket_row(r) for r in rows]
+    return _rank_bucket([_bucket_row(r) for r in rows], limit, now)
 
 
-def fetch_project(session, project: str, limit: int) -> list:
+def fetch_project(session, project: str, limit: int, now=None) -> list:
+    raw_limit = max(limit * BUCKET_OVERFETCH, limit + 5)
     rows = session.run(
         f"MATCH (m:Memory) WHERE m.project = $project "
         "AND NOT (m.path STARTS WITH 'profile/' OR m.path STARTS WITH 'tools/') "
@@ -275,10 +292,10 @@ def fetch_project(session, project: str, limit: int) -> list:
         "       m.last_accessed_at AS last_accessed_at, "
         "       m.updated_at AS updated_at, m.ingested_at AS ingested_at "
         "ORDER BY coalesce(m.updated_at, '') DESC, m.path "
-        "LIMIT $limit",
-        parameters={"project": project, "limit": limit, "default_importance": DEFAULT_IMPORTANCE},
+        "LIMIT $raw_limit",
+        parameters={"project": project, "raw_limit": raw_limit, "default_importance": DEFAULT_IMPORTANCE},
     )
-    return [_bucket_row(r) for r in rows]
+    return _rank_bucket([_bucket_row(r) for r in rows], limit, now)
 
 
 # --- high-level query plans -------------------------------------------------
@@ -305,11 +322,11 @@ def prompt_query(session, prompt: str, current_project: str | None = None,
 def session_start_buckets(session, current_project: str | None = None,
                           profile_limit: int = PROFILE_LIMIT,
                           tools_limit: int = TOOLS_LIMIT,
-                          project_limit: int = PROJECT_LIMIT) -> dict:
+                          project_limit: int = PROJECT_LIMIT, now=None) -> dict:
     return {
-        "profile": fetch_bucket(session, "profile/", profile_limit),
-        "tools": fetch_bucket(session, "tools/", tools_limit),
-        "project": fetch_project(session, current_project, project_limit) if current_project else [],
+        "profile": fetch_bucket(session, "profile/", profile_limit, now),
+        "tools": fetch_bucket(session, "tools/", tools_limit, now),
+        "project": fetch_project(session, current_project, project_limit, now) if current_project else [],
     }
 
 
