@@ -38,6 +38,15 @@ RESULT_STATUS = {
     "quarantine": "pending_review",
 }
 
+# Item #23: content_snapshot ("the body that was REPLACED") is meaningful ONLY for
+# operations that actually change the body. Status-only operations (approve/reject/
+# supersede/flag_contradiction/quarantine) replace no body, so they must carry
+# content_snapshot=None — copying the unchanged body again only bloats the revision
+# chain. memory_history/content_as_of already treat a None snapshot as "no content
+# delta here", so history reconstruction is unaffected. record() drops any snapshot
+# passed for a non-content op defensively.
+CONTENT_OPS = frozenset({"dream_create", "dream_update", "edit"})
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -52,6 +61,9 @@ def record(session, path: str, operation: str, *, actor: str,
     Raises ValueError on an out-of-vocabulary operation."""
     if operation not in OPERATIONS:
         raise ValueError(f"unknown audit operation {operation!r}; choices: {sorted(OPERATIONS)}")
+    # item #23: only content-changing operations carry a body snapshot.
+    if operation not in CONTENT_OPS:
+        content_snapshot = None
     rec = session.run(
         "MATCH (m:Memory {path:$p}) "
         "CREATE (rev:MemoryRevision {ts:$ts, operation:$op, actor:$actor, "
