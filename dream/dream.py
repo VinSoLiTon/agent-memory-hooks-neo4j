@@ -543,12 +543,17 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
     # to pending_review regardless of grounding. Updates to an existing-active
     # memory are never quarantined (consistent with the grounding gate). Skipped
     # when no events were provided — we can't assess provenance, so don't gate.
+    held_updates: dict = {}   # item #10: existing-active paths whose suspicious update is held
     if valid and events:
         ev_count = len(events)
         new_paths = [m["path"] for m in valid
                      if m["path"] not in existing_active and mem_status.get(m["path"]) == "active"]
+        # Item #10: also gate UPDATES to existing-active paths (default-ON; the
+        # exemption was the real, narrow anti-poisoning hole per the triage).
+        gate_updates = os.environ.get("DREAM_GATE_UPDATES", "1") == "1"
+        update_paths = [m["path"] for m in valid if m["path"] in existing_active] if gate_updates else []
         corpus_by_prefix: dict = {}
-        if new_paths:
+        if new_paths or update_paths:
             cand_paths = [m["path"] for m in valid]
             with driver.session() as _ses:
                 for r in _ses.run(
@@ -557,18 +562,43 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
                     "RETURN m.path AS p, m.content AS c LIMIT 1000",
                     exclude=cand_paths):
                     corpus_by_prefix.setdefault(r["p"].split("/", 1)[0], []).append(r["c"])
-        quarantined = 0
-        for path in new_paths:
+
+        def _poison(path: str) -> bool:
             content = next(m["content"] for m in valid if m["path"] == path)
             corpus = " ".join(corpus_by_prefix.get(path.split("/", 1)[0], []))
-            nov = quality_mod.novelty_score(content, corpus)
-            if quality_mod.poisoning_risk(content, ev_count, nov):
-                mem_status[path] = "pending_review"
+            return quality_mod.poisoning_risk(content, ev_count, quality_mod.novelty_score(content, corpus))
+
+        quarantined = 0
+        for path in new_paths:
+            if _poison(path):
+                mem_status[path] = "pending_review"   # NEW directive → quarantine the new node
                 quarantined += 1
         if quarantined:
             print(f"  anti-poisoning gate: {quarantined} directive memory(ies) from a "
                   f"thin/novel session → pending_review (adjudicate with `njhook review`)",
                   file=sys.stderr)
+
+        # A suspicious UPDATE to an existing-active path is HELD (not pending_review —
+        # that would still clobber the established body via the unconditional SET
+        # m.content). Keep the established body active; record the rejected incoming
+        # body as a non-status-changing quarantine revision (rejected_content + reason)
+        # for audit/recovery.
+        for path in update_paths:
+            if _poison(path):
+                held_updates[path] = next(m["content"] for m in valid if m["path"] == path)
+        if held_updates:
+            print(f"  update gate: {len(held_updates)} suspicious update(s) HELD — prior body "
+                  f"kept active, incoming body quarantined as a revision "
+                  f"(DREAM_GATE_UPDATES=0 to disable)", file=sys.stderr)
+            with driver.session() as _ses:
+                for path, rejected in held_updates.items():
+                    _ses.run(
+                        "MATCH (m:Memory {path:$p}) "
+                        "CREATE (rev:MemoryRevision {ts:$ts, operation:'update_held', actor:'dream', "
+                        "    status:coalesce(m.status,'active'), content_snapshot:null, "
+                        "    rejected_content:$rc, reason:'anti-poisoning: suspicious update held'}) "
+                        "MERGE (rev)-[:VERSION_OF]->(m)",
+                        p=path, ts=now, rc=rejected)
 
     embeds: list[list[float]] = []
     embed_dim: int | None = None
@@ -609,6 +639,12 @@ def write_memories(driver, session_key: str, memories: list[dict], watermark: st
             "embedding_model": embed_model_name if embeds and i < len(embeds) else None,
             "embedding_dim": embed_dim if embeds and i < len(embeds) else None,
         })
+
+    # Item #10: held updates must NOT overwrite the established active body — drop
+    # them from the write set (each row already carries its own embedding, so this
+    # is index-safe). The watermark still advances; the rejection is recorded above.
+    if held_updates:
+        rows = [r for r in rows if r["path"] not in held_updates]
 
     with driver.session() as ses:
         # H2: always advance the watermark, even when no memories were produced.
