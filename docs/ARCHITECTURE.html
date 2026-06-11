@@ -793,9 +793,9 @@ stateDiagram-v2
 
   <h4>Local model stack (llama.cpp / Ollama)</h4>
   <table><thead><tr><th>Variable</th><th>Default</th><th>Controls</th></tr></thead><tbody>
-    <tr><td><code>LLAMACPP_CHAT_URL</code></td><td><code>http://127.0.0.1:8080/v1</code></td><td>Chat/dream/judge/critic endpoint</td></tr>
-    <tr><td><code>LLAMACPP_EMBED_URL</code></td><td><code>http://127.0.0.1:8081/v1</code></td><td>Embeddings endpoint</td></tr>
-    <tr><td><code>LLAMACPP_N_CTX</code></td><td>probed (fallback 8192)</td><td>Context window for cap derivation</td></tr>
+    <tr><td><code>LLAMACPP_CHAT_URL</code></td><td><code>http://127.0.0.1:8090/v1</code></td><td>Chat/dream/judge/critic endpoint — shared <code>llama-swap</code> proxy (routes by <code>model</code>; <code>:8080</code> retired)</td></tr>
+    <tr><td><code>LLAMACPP_EMBED_URL</code></td><td><code>http://127.0.0.1:8081/v1</code></td><td>Embeddings endpoint (separate, always-on — never route embeddings through <code>:8090</code>)</td></tr>
+    <tr><td><code>LLAMACPP_N_CTX</code></td><td>probed (fallback 8192)</td><td>Context window for cap derivation — set explicitly (llama-swap doesn’t expose <code>/props</code>)</td></tr>
     <tr><td><code>LLAMACPP_OUTPUT_RESERVE</code></td><td><code>3072</code></td><td>Tokens reserved for output</td></tr>
     <tr><td><code>OLLAMA_HOST</code></td><td><code>http://localhost:11434</code></td><td>Ollama daemon (legacy)</td></tr>
   </tbody></table>

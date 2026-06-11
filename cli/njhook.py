@@ -1755,7 +1755,7 @@ def cmd_health(args: argparse.Namespace) -> int:
             except Exception as e:
                 rows.append((FAIL if required else WARN, label, f"unreachable at {url}: {e}"))
 
-        _probe_llamacpp(os.environ.get("LLAMACPP_CHAT_URL", "http://127.0.0.1:8080/v1"),
+        _probe_llamacpp(os.environ.get("LLAMACPP_CHAT_URL", "http://127.0.0.1:8090/v1"),
                         "llama.cpp chat", os.environ.get("DREAM_PROVIDER") == "llamacpp")
         if os.environ.get("EMBED_PROVIDER") == "llamacpp":
             _probe_llamacpp(os.environ.get("LLAMACPP_EMBED_URL", "http://127.0.0.1:8081/v1"),

@@ -26,7 +26,7 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 # llama.cpp server's OpenAI-compatible base URL (e.g. the `infra-llama` docker
 # container). A LOCAL provider — like ollama, its data never leaves the machine,
 # so it is NOT subject to the Phase H remote-egress block.
-LLAMACPP_CHAT_URL = os.environ.get("LLAMACPP_CHAT_URL", "http://127.0.0.1:8080/v1")
+LLAMACPP_CHAT_URL = os.environ.get("LLAMACPP_CHAT_URL", "http://127.0.0.1:8090/v1")
 
 
 def _extract_json_object(text: str) -> dict:

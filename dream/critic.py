@@ -27,7 +27,7 @@ import os
 from typing import Callable
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-LLAMACPP_CHAT_URL = os.environ.get("LLAMACPP_CHAT_URL", "http://127.0.0.1:8080/v1")
+LLAMACPP_CHAT_URL = os.environ.get("LLAMACPP_CHAT_URL", "http://127.0.0.1:8090/v1")
 
 CRITIC_SYSTEM = (
     "You audit whether a MEMORY NOTE is faithful to the SESSION TRANSCRIPT it was "
