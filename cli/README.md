@@ -23,7 +23,7 @@ Defaults in parentheses.
 | `HOOKS_NEO4J_USER` | `neo4j` | |
 | `HOOKS_NEO4J_PASSWORD` | `password` | |
 | `EMBED_PROVIDER` | unset (semantic recall disabled) | `llamacpp` (default local), `ollama`, or `openai` |
-| `LLAMACPP_CHAT_URL` | `http://127.0.0.1:8080/v1` | llama.cpp chat server (e.g. docker `infra-llama`, Gemma) — local dream provider |
+| `LLAMACPP_CHAT_URL` | `http://127.0.0.1:8090/v1` | llama.cpp chat endpoint — the shared `llama-swap` proxy on `:8090` (routes by `model`; `:8080` is retired). Set `LLAMACPP_N_CTX` explicitly (e.g. `32768`) since llama-swap doesn't expose `/props` |
 | `LLAMACPP_EMBED_URL` | `http://127.0.0.1:8081/v1` | llama.cpp embeddings server (e.g. docker `infra-embeddings`, nomic-embed) |
 | `DREAM_LLAMACPP_MODEL` | `gemma-4-12B-it-Q4_K_M.gguf` | dream model id sent to the llama.cpp chat server |
 | `EMBED_MODEL_LLAMACPP` | `nomic-embed-text-v1.5.f16.gguf` | embedding model id (768-dim, same space as the Ollama nomic model) |
@@ -82,7 +82,7 @@ after pulling schema-touching upgrades.
 
 Stack-readiness check. Walks the pipeline: Neo4j reachability, constraints,
 indexes, hook wrappers, user-level configs, env vars, the local model backend
-(**llama.cpp chat `:8080` + embed `:8081`** when `*_PROVIDER=llamacpp`, or the
+(**llama.cpp chat `:8090` (llama-swap) + embed `:8081`** when `*_PROVIDER=llamacpp`, or the
 Ollama daemon + embed model when `=ollama`), scheduled task, last dream log,
 dream freshness, **event spool / DLQ rate (Phase B)**, **egress policy (Phase H)**,
 and **restore-rehearsal age (Phase H4)**.

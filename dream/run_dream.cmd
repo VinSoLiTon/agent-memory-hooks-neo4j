@@ -4,11 +4,13 @@ cd /d "%~dp0\.."
 if not exist "%~dp0logs" mkdir "%~dp0logs"
 set "LOG=%~dp0logs\dream_%date:~10,4%-%date:~4,2%-%date:~7,2%.log"
 
-rem Nightly uses the local llama.cpp server (Gemma 12B) by default — the docker
-rem `infra-llama` container on :8080, OpenAI-compatible. Replaces the previous
-rem Ollama/qwen3.5 backend (migration: docs/LLAMACPP_MIGRATION.md). Embeddings use
-rem the local llama.cpp embeddings server (`infra-embeddings`, :8081). Override by
-rem exporting DREAM_PROVIDER / EMBED_PROVIDER in User env.
+rem Nightly uses the local llama.cpp server (Gemma 12B) by default — the shared
+rem `llama-swap` proxy on :8090 (model id `gemma-12b` / alias `gemma-4-12B-it-Q4_K_M.gguf`),
+rem OpenAI-compatible; :8080 is retired (see C:\Projects\llm-infra\AGENTS.md). Replaces
+rem the previous Ollama/qwen3.5 backend (migration: docs/LLAMACPP_MIGRATION.md). Embeddings
+rem use the separate always-on embeddings server (`infra-embeddings`, :8081 — never via
+rem :8090). Set LLAMACPP_CHAT_URL + LLAMACPP_N_CTX (=32768) and DREAM_PROVIDER /
+rem EMBED_PROVIDER in User env.
 if "%DREAM_PROVIDER%"=="" set "DREAM_PROVIDER=llamacpp"
 if "%EMBED_PROVIDER%"=="" set "EMBED_PROVIDER=llamacpp"
 
