@@ -192,11 +192,21 @@ Recall boosts in-project hits via Reciprocal Rank Fusion (see
 ## How re-runs work
 
 Each `:Session` carries `last_dreamed_at`. A session is re-dreamed when it
-has events newer than that watermark (or has never been dreamed). The
-watermark **always advances** — even when the model returns no new memories
-— so low-signal sessions are never re-billed. Existing memories are passed
-to the model alongside new events so it can merge updates by path rather
-than duplicate.
+has events newer than that watermark (or has never been dreamed). On a
+**clean** result — the model ran and produced memories, or genuinely found
+nothing — the watermark advances even on a 0-yield, so low-signal sessions
+are never re-dreamed forever. Existing memories are passed to the model
+alongside new events so it can merge updates by path rather than duplicate.
+
+**Transient-failure back-off.** A 0-yield caused by a provider *error* (the
+local model busy / unreachable / a timeout) is NOT treated as an empty
+session: the session is **deferred** — the watermark is left where it is and
+the next scheduled run retries it — and there is no fall-back egress on a
+blip. This matters in full-offline mode (`DREAM_FALLBACK_PROVIDER=none`):
+without it, every llama.cpp hiccup would silently drop the in-flight
+sessions. Deferred counts surface in `njhook dream-stats` (the `defer`
+column) and on the dashboard `/nightly` ledger. The distinction is by
+failure mode: a thrown provider error defers; a clean empty result advances.
 
 Memory writes are upserts on `path`. To delete or rename, use the CLI
 (`njhook delete <path>`) or Neo4j directly.

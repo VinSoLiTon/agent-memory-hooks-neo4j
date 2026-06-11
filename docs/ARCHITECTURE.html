@@ -533,9 +533,12 @@ cap = DREAM_TRANSCRIPT_MAX_CHARS            if set
   <h3 id="dream-sched">Watermark, ordering &amp; backlog</h3>
   <div class="grid2">
     <div>
-      <h4>Watermark</h4>
-      <p><code>:Session.last_dreamed_at</code> is advanced on <i>every</i> run — even a 0-memory session — so low-signal
-      sessions are never re-billed forever. <code>--since 24h|7d|30m</code> further narrows the window.</p>
+      <h4>Watermark &amp; transient back-off</h4>
+      <p><code>:Session.last_dreamed_at</code> advances on a <b>clean</b> run — even a genuine 0-yield — so low-signal
+      sessions aren’t re-dreamed forever. But a 0-yield caused by a provider <i>error</i> (local model busy /
+      unreachable / timeout) is <b>deferred</b>: the watermark is left in place and the next run retries it (no
+      fallback egress on a blip). Critical in full-offline mode — surfaced as the <code>defer</code> column in
+      <code>njhook dream-stats</code>.</p>
     </div>
     <div>
       <h4>Backlog guard (item #24)</h4>
