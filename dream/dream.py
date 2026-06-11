@@ -394,17 +394,37 @@ def call_provider(provider_fn, transcript: str, existing: str, model: str,
 
 def safe_distil(provider_fn, transcript: str, existing: str, model: str,
                 system_prompt: str, provider_name: str = "local",
-                usage_out: dict | None = None) -> list[dict]:
+                usage_out: dict | None = None, error_out: list | None = None) -> list[dict]:
     """Call the primary provider but NEVER raise: on any error (unreachable,
-    HTTP 4xx, malformed JSON, timeout) return [] so the hybrid fallback takes over
-    instead of crashing the whole run (PR-4). 0-yield and hard-error converge to
-    the same []-then-fallback path. On error `usage_out` is left as-is (no usage)."""
+    HTTP 4xx, malformed JSON, timeout) return [] so the run doesn't crash (PR-4).
+
+    A TRANSIENT error is NOT the same as a genuine 0-yield: when the local model is
+    busy/unreachable, an empty result means "couldn't assess this session", not
+    "nothing to remember". `error_out` (a list, when provided) is appended a truthy
+    marker on any exception so the caller can DEFER the session — leave the watermark
+    where it is and retry next run — instead of advancing past it (which would drop
+    the session forever) or egressing to a remote fallback on a blip. A clean empty
+    result leaves `error_out` untouched. On error `usage_out` is left as-is."""
     try:
         return call_provider(provider_fn, transcript, existing, model, system_prompt, usage_out=usage_out)
     except Exception as e:
         print(f"  primary {provider_name} errored ({type(e).__name__}: {str(e)[:140]}); "
-              f"treating as 0-yield → fallback", file=sys.stderr)
+              f"deferring this session (will retry next run)", file=sys.stderr)
+        if error_out is not None:
+            error_out.append(True)
         return []
+
+
+def _defer_session(errored: bool, memories: list) -> bool:
+    """True when a session should be DEFERRED rather than recorded as dreamed.
+
+    A transient provider error (server busy / unreachable / timeout) with nothing
+    produced means we couldn't assess the session — the local model was occupied,
+    not that the session was empty. Deferring skips the write so the watermark is
+    NOT advanced and the next scheduled run retries it (no egress on a blip). A
+    clean empty result (no error) is a genuine 0-yield → not deferred, so the
+    watermark still advances and we don't re-dream empty sessions forever."""
+    return bool(errored) and not memories
 
 
 # Deterministic importance priors by semantic kind — used as a fallback ONLY when
@@ -892,10 +912,11 @@ def _write_nightly_run(driver, run_id, stats, provider, model, duration_ms):
             s.run(
                 "CREATE (:NightlyRun {run_id:$rid, ts:$ts, provider:$p, model:$m, "
                 "sessions_seen:$ss, with_yield:$wy, fallback_fired:$ff, written:$w, "
-                "skipped_sensitive:$sk, duration_ms:$d})",
+                "skipped_sensitive:$sk, deferred:$df, duration_ms:$d})",
                 rid=run_id, ts=datetime.now(timezone.utc).isoformat(), p=provider, m=model,
                 ss=stats["sessions_seen"], wy=stats["with_yield"], ff=stats["fallback_fired"],
-                w=stats["written"], sk=stats["skipped_sensitive"], d=duration_ms,
+                w=stats["written"], sk=stats["skipped_sensitive"], df=stats.get("deferred", 0),
+                d=duration_ms,
             )
     except Exception:
         pass
@@ -1035,7 +1056,7 @@ def main():
         # run is visible — unlike the per-write :DreamRun, which is skipped on
         # zero-yield sessions. Distinct :NightlyRun label.
         stats = {"sessions_seen": 0, "with_yield": 0, "fallback_fired": 0,
-                 "written": 0, "skipped_sensitive": 0}
+                 "written": 0, "skipped_sensitive": 0, "deferred": 0}
         run_id = f"nightly@{datetime.now(timezone.utc).isoformat()}"
         run_t0 = time.monotonic()
         try:
@@ -1062,7 +1083,17 @@ def main():
                 # PR-4: safe_distil never raises — a hard provider error (e.g. llama.cpp
                 # down / 4xx / malformed) becomes [] so the fallback below fires instead
                 # of crashing the run.
-                memories = safe_distil(provider_fn, render_events(events, max_chars=transcript_cap), existing, model, system_prompt, provider_name, usage_out=used_usage)
+                prim_error: list = []
+                memories = safe_distil(provider_fn, render_events(events, max_chars=transcript_cap), existing, model, system_prompt, provider_name, usage_out=used_usage, error_out=prim_error)
+                # Transient primary failure (model busy/unreachable/timeout): defer this
+                # session — do NOT fall back (no egress on a blip) and do NOT advance the
+                # watermark; the next scheduled run retries it. A clean 0-yield (no error)
+                # falls through to the optional fallback / watermark advance below.
+                if _defer_session(bool(prim_error), memories) and not args.dry_run:
+                    stats["deferred"] += 1
+                    print(f"  → deferred {session_key}: primary unavailable, watermark NOT advanced "
+                          f"(retries next run)", file=sys.stderr)
+                    continue
                 # Fall back only if it won't egress a sensitive session to a remote provider.
                 if not memories and fallback and not egress_blocked(fallback[0], session_sensitive, allow_egress):
                     fb_name, fb_fn, fb_model, fb_system = fallback
