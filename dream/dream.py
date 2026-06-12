@@ -430,19 +430,57 @@ def render_existing(memories: list[dict], paths_only: bool = False) -> str:
     return "\n\n".join(parts)
 
 
+def _title_from_path(path: str) -> str:
+    """Fallback title from a memory path stem (e.g. tools/bash/grep-flags.md →
+    'Grep flags') for when the model didn't supply a top-level title."""
+    stem = (path or "").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    t = stem.replace("-", " ").replace("_", " ").strip()
+    return (t[:1].upper() + t[1:]) if t else "Memory"
+
+
+def _normalize_memory_content(mem: dict) -> dict:
+    """Ensure mem['content'] is a full markdown body with YAML frontmatter.
+
+    The model is now asked to emit `content` as the PROSE BODY ONLY plus top-level
+    `title`/`kind` — saving the ~30-40 boilerplate tokens/memory that double-encoded
+    `kind` into the body and pushed big-session output past the slot (truncated /
+    malformed JSON → deferred). We synthesize the frontmatter here so the STORED
+    format is unchanged and everything downstream (quality gate, parse_kind, recall,
+    render, backup) is untouched. Idempotent: if the model still emitted frontmatter
+    (a frontier model, or an older prompt), pass it through verbatim."""
+    if not isinstance(mem, dict):
+        return mem
+    body = mem.get("content") or ""
+    if body.lstrip().startswith("---"):
+        return mem                                          # already has frontmatter
+    kind = mem.get("kind") or memory_types.DEFAULT_KIND
+    title = (mem.get("title") or "").strip() or _title_from_path(mem.get("path", ""))
+    # sanitize: a newline or stray ':' in the title would break the YAML frontmatter
+    # (downstream only regex-reads `kind:`, but keep the block well-formed).
+    title = title.replace("\n", " ").replace("\r", " ").replace(":", " -")[:120].strip()
+    out = dict(mem)
+    out["content"] = f"---\ntitle: {title}\nkind: {kind}\n---\n\n{body.lstrip()}"
+    return out
+
+
 def call_provider(provider_fn, transcript: str, existing: str, model: str,
                   system_prompt: str, usage_out: dict | None = None) -> list[dict]:
     """Thin wrapper so call sites don't need to know provider internals. When
     `usage_out` is given (item #13), the provider fills it in place with
-    {input_tokens, output_tokens} — additive, never changes the return type."""
-    return provider_fn(
+    {input_tokens, output_tokens} — additive, never changes the return type.
+
+    Memories come back with body-only `content` (the lean output contract) and are
+    normalized to full frontmatter'd markdown here (see _normalize_memory_content),
+    so the rest of the pipeline sees the canonical stored format."""
+    mems = provider_fn(
         transcript=transcript,
         existing=existing,
         system=system_prompt,
         model=model,
         max_tokens=MAX_TOKENS,
         usage_out=usage_out,
-    )
+    ) or []
+    return [_normalize_memory_content(m) for m in mems if isinstance(m, dict)]
 
 
 def safe_distil(provider_fn, transcript: str, existing: str, model: str,
