@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Callable
 
 DEFAULT_MODELS = {
@@ -342,6 +343,13 @@ def dream_llamacpp(transcript: str, existing: str, system: str, model: str,
             text = _post({"type": "json_schema",
                           "json_schema": {"name": "memories", "schema": DREAM_JSON_SCHEMA}})
         except urllib.error.HTTPError:
+            # json_object is the UNCONSTRAINED path — the 12B can run away into a
+            # degenerate loop, hit max_tokens, and return truncated/unterminated JSON
+            # (DOE: parse_ok 0.70 + 75-123s vs json_schema's 1.00 + ~2s). It only
+            # exists for older servers that reject json_schema; make a silent
+            # degradation LOUD so a flaky schema request doesn't quietly tank quality.
+            print("  warn: llama.cpp rejected json_schema — falling back to UNCONSTRAINED "
+                  "json_object (runaway/truncation risk; upgrade the server)", file=sys.stderr)
             text = _post({"type": "json_object"})
     except urllib.error.HTTPError as e:
         detail = ""
