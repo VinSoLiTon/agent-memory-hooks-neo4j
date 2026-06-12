@@ -912,11 +912,11 @@ def _write_nightly_run(driver, run_id, stats, provider, model, duration_ms):
             s.run(
                 "CREATE (:NightlyRun {run_id:$rid, ts:$ts, provider:$p, model:$m, "
                 "sessions_seen:$ss, with_yield:$wy, fallback_fired:$ff, written:$w, "
-                "skipped_sensitive:$sk, deferred:$df, duration_ms:$d})",
+                "skipped_sensitive:$sk, deferred:$df, skipped_short:$short, duration_ms:$d})",
                 rid=run_id, ts=datetime.now(timezone.utc).isoformat(), p=provider, m=model,
                 ss=stats["sessions_seen"], wy=stats["with_yield"], ff=stats["fallback_fired"],
                 w=stats["written"], sk=stats["skipped_sensitive"], df=stats.get("deferred", 0),
-                d=duration_ms,
+                short=stats.get("skipped_short", 0), d=duration_ms,
             )
     except Exception:
         pass
@@ -1051,17 +1051,43 @@ def main():
         # Phase H egress policy: high-sensitivity sessions stay off remote providers.
         allow_egress = os.environ.get("DREAM_ALLOW_SENSITIVE_EGRESS") == "1"
 
+        # Skip trivially-short sessions: a session with fewer than DREAM_MIN_EVENTS
+        # events (default 2) is a lone SessionStart / single prompt with no cross-event
+        # pattern to distill — ~89% of sessions in practice. Sending it to the LLM is a
+        # wasted call that always yields nothing. We skip it and still advance the
+        # watermark so it's retired (re-dreamed only if it later grows past the
+        # threshold). Set DREAM_MIN_EVENTS=1 to disable (skips nothing).
+        try:
+            min_events = int(os.environ.get("DREAM_MIN_EVENTS", "2"))
+        except ValueError:
+            min_events = 2
+
         # Item #8: one per-nightly run-ledger node, written UNCONDITIONALLY in the
         # finally below (even on a mid-loop crash) so a zero-yield / all-fallback
         # run is visible — unlike the per-write :DreamRun, which is skipped on
         # zero-yield sessions. Distinct :NightlyRun label.
         stats = {"sessions_seen": 0, "with_yield": 0, "fallback_fired": 0,
-                 "written": 0, "skipped_sensitive": 0, "deferred": 0}
+                 "written": 0, "skipped_sensitive": 0, "deferred": 0, "skipped_short": 0}
         run_id = f"nightly@{datetime.now(timezone.utc).isoformat()}"
         run_t0 = time.monotonic()
         try:
             for session_key, events in sessions:
                 stats["sessions_seen"] += 1
+                # Trivially-short session → skip the LLM call, retire it via the
+                # watermark (so it's not re-scanned every run). It re-qualifies only if
+                # more events arrive past this watermark, at which point it may clear
+                # the threshold. DREAM_MIN_EVENTS=1 disables (len(events) is always >=1).
+                if len(events) < min_events:
+                    stats["skipped_short"] += 1
+                    print(f"\n=== skipping {session_key}: {len(events)} event(s) "
+                          f"< DREAM_MIN_EVENTS={min_events} (nothing to distill) ===")
+                    if not args.dry_run:
+                        wm = events[-1].get("timestamp")
+                        with driver.session() as _ses:
+                            _ses.run(
+                                "MATCH (s:Session {session_key: $sk}) SET s.last_dreamed_at = $wm",
+                                sk=session_key, wm=wm)
+                    continue
                 project = dominant_project([e.get("cwd") for e in events])
                 session_sensitive = any(e.get("sensitivity") == "high" for e in events)
                 # Primary provider is remote + session is sensitive → don't egress; skip.

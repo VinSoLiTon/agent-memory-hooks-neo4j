@@ -812,6 +812,7 @@ stateDiagram-v2
     <tr><td><code>DREAM_PROVIDER</code> / <code>DREAM_FALLBACK_PROVIDER</code></td><td><code>anthropic</code> / <code>anthropic</code></td><td>Primary &amp; 0-yield fallback (nightly sets primary=<code>llamacpp</code>)</td></tr>
     <tr><td><code>DREAM_{ANTHROPIC,OPENAI,OLLAMA,LLAMACPP}_MODEL</code></td><td>see §4</td><td>Per-provider model</td></tr>
     <tr><td><code>DREAM_MAX_TOKENS</code></td><td><code>16384</code></td><td>Output ceiling</td></tr>
+    <tr><td><code>DREAM_MIN_EVENTS</code></td><td><code>2</code></td><td>Skip sessions with fewer than N events (no LLM call; watermark still advances). <code>1</code> disables</td></tr>
     <tr><td><code>DREAM_TRANSCRIPT_MAX_CHARS</code> / <code>_CTX_FRACTION</code></td><td>derived / <code>0.7</code></td><td>Transcript cap (local)</td></tr>
     <tr><td><code>DREAM_GROUNDING_MIN</code></td><td><code>0.10</code></td><td>Grounding gate threshold</td></tr>
     <tr><td><code>DREAM_CRITIQUE</code> / <code>_MAX_CHARS</code></td><td>off / <code>12000</code></td><td>Faithfulness critic (opt-in)</td></tr>

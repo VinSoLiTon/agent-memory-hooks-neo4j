@@ -26,6 +26,7 @@ Defaults in parentheses.
 | `LLAMACPP_CHAT_URL` | `http://127.0.0.1:8090/v1` | llama.cpp chat endpoint — the shared `llama-swap` proxy on `:8090` (routes by `model`; `:8080` is retired). Set `LLAMACPP_N_CTX` explicitly (e.g. `32768`) since llama-swap doesn't expose `/props` |
 | `LLAMACPP_EMBED_URL` | `http://127.0.0.1:8081/v1` | llama.cpp embeddings server (e.g. docker `infra-embeddings`, nomic-embed) |
 | `DREAM_LLAMACPP_MODEL` | `gemma-4-12B-it-Q4_K_M.gguf` | dream model id sent to the llama.cpp chat server |
+| `DREAM_MIN_EVENTS` | `2` | skip sessions with fewer than N events (no LLM call; watermark still advances). `1` disables |
 | `EMBED_MODEL_LLAMACPP` | `nomic-embed-text-v1.5.f16.gguf` | embedding model id (768-dim, same space as the Ollama nomic model) |
 | `EMBED_MODEL_OPENAI` | `text-embedding-3-small` | |
 | `EMBED_MODEL_OLLAMA` | `nomic-embed-text:latest` | |
