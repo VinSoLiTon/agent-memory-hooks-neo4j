@@ -2066,15 +2066,15 @@ def cmd_dream_stats(args: argparse.Namespace) -> int:
             "MATCH (r:NightlyRun) RETURN r.ts AS ts, r.provider AS provider, "
             "r.sessions_seen AS seen, r.with_yield AS yielded, r.fallback_fired AS fell_back, "
             "r.written AS written, r.skipped_sensitive AS skipped, r.deferred AS deferred, "
-            "r.duration_ms AS ms "
+            "r.skipped_short AS short, r.duration_ms AS ms "
             "ORDER BY r.ts DESC LIMIT $n", n=limit)]
     if not rows:
         print("(no nightly runs recorded yet — run dream/run_dream.cmd)")
         return 0
-    print(f"{'ts':<20} {'provider':<10} {'seen':>4} {'yield':>5} {'fb':>3} {'defer':>5} {'wrote':>5} {'skip':>4} {'ms':>8}")
+    print(f"{'ts':<20} {'provider':<10} {'seen':>4} {'short':>5} {'yield':>5} {'fb':>3} {'defer':>5} {'wrote':>5} {'skip':>4} {'ms':>8}")
     for r in rows:
         print(f"{str(r['ts'])[:19]:<20} {str(r['provider'] or '')[:10]:<10} "
-              f"{r['seen'] or 0:>4} {r['yielded'] or 0:>5} {r['fell_back'] or 0:>3} "
+              f"{r['seen'] or 0:>4} {r['short'] or 0:>5} {r['yielded'] or 0:>5} {r['fell_back'] or 0:>3} "
               f"{r['deferred'] or 0:>5} {r['written'] or 0:>5} {r['skipped'] or 0:>4} {r['ms'] or 0:>8}")
     return 0
 

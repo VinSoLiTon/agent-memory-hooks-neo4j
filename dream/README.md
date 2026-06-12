@@ -198,6 +198,13 @@ nothing — the watermark advances even on a 0-yield, so low-signal sessions
 are never re-dreamed forever. Existing memories are passed to the model
 alongside new events so it can merge updates by path rather than duplicate.
 
+**Short-session skip.** A session with fewer than `DREAM_MIN_EVENTS` events
+(default **2**) is a lone SessionStart / single prompt with no cross-event
+pattern to distill — in practice ~89% of sessions. It is skipped **without an
+LLM call**; the watermark still advances so it's retired (re-dreamed only if it
+later grows past the threshold). Set `DREAM_MIN_EVENTS=1` to disable. Skips are
+counted in the `short` column of `njhook dream-stats`.
+
 **Transient-failure back-off.** A 0-yield caused by a provider *error* (the
 local model busy / unreachable / a timeout) is NOT treated as an empty
 session: the session is **deferred** — the watermark is left where it is and
