@@ -56,17 +56,20 @@ Output STRICT JSON only, no prose, matching this schema:
   "memories": [
     {
       "path": "profile/role.md",
+      "title": "User role",
       "kind": "preference",
-      "content": "---\\ntitle: User role\\nkind: preference\\n---\\n\\n<markdown body>",
+      "content": "<markdown body ONLY — no frontmatter>",
       "importance": 8
     }
   ]
 }
 
-Set the top-level `kind` to one of the 15 types above, and mirror it in the \
-body's frontmatter (`title` + `kind`). Pick the type by what the memory IS, not \
-where it's stored: a preference in profile/ is `preference`, a build rule in \
-project/ is `projectrule` or `constraint`.
+`content` is the markdown BODY ONLY — do NOT put a `---` frontmatter block in it; \
+the `title` and `kind` you give as top-level fields become the frontmatter \
+automatically. `title` is a short human label (a few words). Set `kind` to one of \
+the 15 types above — pick the type by what the memory IS, not where it's stored: a \
+preference in profile/ is `preference`, a build rule in project/ is `projectrule` \
+or `constraint`.
 Include `importance`: an integer 1-10 for how broadly and durably useful this \
 memory is. Anchor your rating to these bands — and SPREAD ratings across them, \
 do not default everything to 7-8:
@@ -116,10 +119,10 @@ Example input (events):
 [2026-05-09T10:01:30] PostToolUse tool=Bash
   output: 42 passed in 1.2s
 
-Example output (JSON):
+Example output (JSON — `content` is the body only, no frontmatter):
 {"memories":[
-  {"path":"profile/role.md","kind":"fact","content":"---\\ntitle: User role\\nkind: fact\\n---\\n\\nRust systems engineer.","importance":9},
-  {"path":"project/rust-safety.md","kind":"constraint","content":"---\\ntitle: Rust safety rules\\nkind: constraint\\n---\\n\\n- No `unsafe` blocks without explicit user approval.\\n- Rationale: UAF incident last sprint.","importance":7}
+  {"path":"profile/role.md","title":"User role","kind":"fact","content":"Rust systems engineer.","importance":9},
+  {"path":"project/rust-safety.md","title":"Rust safety rules","kind":"constraint","content":"- No `unsafe` blocks without explicit user approval.\\n- Rationale: UAF incident last sprint.","importance":7}
 ]}
 
 Note: the role memory went to profile/ (cross-project) and is a `fact`. The safety rule \
@@ -149,10 +152,13 @@ DREAM_JSON_SCHEMA = {
                         "type": "string",
                         "pattern": r"^(profile|tools|project|general)/[A-Za-z0-9._/-]+\.md$",
                     },
+                    # short human label → synthesized into the body frontmatter.
+                    "title": {"type": "string", "minLength": 1, "maxLength": 120},
                     # Phase D1: first-class semantic type, constrained to the
                     # closed vocabulary so the local model can't invent a kind.
                     "kind": {"type": "string", "enum": sorted(MEMORY_KINDS)},
-                    "content": {"type": "string", "minLength": 10},
+                    # body ONLY — frontmatter is synthesized from title+kind at write.
+                    "content": {"type": "string", "minLength": 5},
                     "importance": {"type": "integer", "minimum": 1, "maximum": 10},
                 },
                 # importance is REQUIRED here so the schema-constrained local
@@ -162,7 +168,7 @@ DREAM_JSON_SCHEMA = {
                 # (anthropic, openai) don't enforce this required list, so it stays
                 # optional there — handled by the kind-prior floor in
                 # dream._coerce_importance.
-                "required": ["path", "content", "importance"],
+                "required": ["path", "title", "kind", "content", "importance"],
             },
         }
     },
