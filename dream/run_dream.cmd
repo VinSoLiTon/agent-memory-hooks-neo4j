@@ -9,8 +9,10 @@ rem `llama-swap` proxy on :8090 (model id `gemma-12b` / alias `gemma-4-12B-it-Q4
 rem OpenAI-compatible; :8080 is retired (see C:\Projects\llm-infra\AGENTS.md). Replaces
 rem the previous Ollama/qwen3.5 backend (migration: docs/LLAMACPP_MIGRATION.md). Embeddings
 rem use the separate always-on embeddings server (`infra-embeddings`, :8081 — never via
-rem :8090). Set LLAMACPP_CHAT_URL + LLAMACPP_N_CTX (=32768) and DREAM_PROVIDER /
-rem EMBED_PROVIDER in User env.
+rem :8090). Set in User env: LLAMACPP_CHAT_URL, DREAM_PROVIDER, EMBED_PROVIDER, and the
+rem context budget — LLAMACPP_N_CTX = the server's PER-SLOT size (`-c N --parallel P`
+rem => N/P, e.g. 262144/4 = 65536; NOT the total -c, which 400s), optionally an explicit
+rem DREAM_TRANSCRIPT_MAX_CHARS (e.g. 90000 for a 64K slot) as a quality-validated cap.
 if "%DREAM_PROVIDER%"=="" set "DREAM_PROVIDER=llamacpp"
 if "%EMBED_PROVIDER%"=="" set "EMBED_PROVIDER=llamacpp"
 

@@ -228,7 +228,14 @@ def dream_ollama(transcript: str, existing: str, system: str, model: str,
 # --- llama.cpp (local, OpenAI-compatible) -------------------------------
 
 _LLAMACPP_NCTX_CACHE: dict = {}
-_CHARS_PER_TOK = 3.5  # conservative: over-estimates tokens, so we under-fill (never 400)
+# Chars per token, used BOTH to size the transcript char budget (tokens→chars) and
+# to estimate the prompt's token count for eff_max_tokens (chars→tokens). For safety
+# it must be <= the densest real content: code / tool-output / JSON transcripts
+# tokenize at ~2.3 chars/tok (measured), far below prose (~4). A LOWER value makes
+# the char budget smaller AND the prompt-token estimate larger, so a request can
+# never exceed the model's slot (HTTP 400). 3.5 was the bug — it over-filled the
+# budget and under-counted the prompt, overflowing 64K-per-slot servers.
+_CHARS_PER_TOK = 2.0
 
 
 def _llamacpp_n_ctx(base: str) -> int:

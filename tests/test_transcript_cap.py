@@ -54,6 +54,22 @@ def test_ctx_fraction_knob(monkeypatch):
     assert cap == int((32768 - 3072 - 256) * providers._CHARS_PER_TOK * 0.5)
 
 
+def test_derived_cap_leaves_room_for_output(monkeypatch):
+    """Slot-fit guard: the derived cap, at the DENSEST real tokenization, plus the
+    generated JSON (DREAM_MAX_TOKENS), must fit the slot with headroom for the
+    existing-memories + system prompt — else the request overflows (HTTP 400, the
+    64K-slot regression). Pins that _CHARS_PER_TOK stays conservative."""
+    monkeypatch.delenv("DREAM_TRANSCRIPT_MAX_CHARS", raising=False)
+    monkeypatch.setenv("LLAMACPP_N_CTX", "65536")
+    providers._LLAMACPP_NCTX_CACHE.clear()
+    cap = dream_mod._derived_transcript_cap("llamacpp")
+    REAL_DENSE = 2.3   # measured chars/tok for code/JSON-heavy transcripts
+    transcript_tok = cap / REAL_DENSE
+    max_out = int(os.environ.get("DREAM_MAX_TOKENS", "16384"))
+    assert transcript_tok + max_out < 65536 - 6000, \
+        f"derived cap {cap} chars (~{transcript_tok:.0f} tok) + {max_out} output overflows the 64K slot"
+
+
 def test_non_llamacpp_local_falls_back_to_16000(monkeypatch):
     monkeypatch.delenv("DREAM_TRANSCRIPT_MAX_CHARS", raising=False)
     assert dream_mod._derived_transcript_cap("ollama") == 16000

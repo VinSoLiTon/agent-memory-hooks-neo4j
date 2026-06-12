@@ -523,12 +523,15 @@ flowchart TD
 
   <h4>Transcript cap derivation (local models, item #19)</h4>
   <pre><code># precedence: explicit override → llamacpp-derived → fixed default
-cap = DREAM_TRANSCRIPT_MAX_CHARS            if set
+cap = DREAM_TRANSCRIPT_MAX_CHARS            if set   (recommended; e.g. 90000 for a 64K slot)
     = max(8000, int((n_ctx − LLAMACPP_OUTPUT_RESERVE − 256)
-                    × 3.5 chars/tok × DREAM_TRANSCRIPT_CTX_FRACTION))   # llamacpp
+                    × CHARS_PER_TOK(2.0) × DREAM_TRANSCRIPT_CTX_FRACTION))   # llamacpp
     = 16000                                  otherwise
-# n_ctx probed from the llama.cpp /props endpoint (cached), fallback 8192.
-# Applied only in paths-only mode; frontier providers get the full transcript.</code></pre>
+# n_ctx: llama-swap doesn't proxy /props → set LLAMACPP_N_CTX explicitly to the
+#   PER-SLOT size  (server `-c N --parallel P`  ⇒  N/P; NOT the total -c, which 400s).
+# CHARS_PER_TOK is conservative (2.0): code/JSON tokenizes ~2.3 ch/tok, so the budget
+#   under-fills and the provider-layer trim + eff_max_tokens keep the request under the
+#   slot. 3.5 over-filled and overflowed 64K slots (HTTP 400). Applied only paths-only.</code></pre>
 
   <h3 id="dream-sched">Watermark, ordering &amp; backlog</h3>
   <div class="grid2">
@@ -795,8 +798,8 @@ stateDiagram-v2
   <table><thead><tr><th>Variable</th><th>Default</th><th>Controls</th></tr></thead><tbody>
     <tr><td><code>LLAMACPP_CHAT_URL</code></td><td><code>http://127.0.0.1:8090/v1</code></td><td>Chat/dream/judge/critic endpoint — shared <code>llama-swap</code> proxy (routes by <code>model</code>; <code>:8080</code> retired)</td></tr>
     <tr><td><code>LLAMACPP_EMBED_URL</code></td><td><code>http://127.0.0.1:8081/v1</code></td><td>Embeddings endpoint (separate, always-on — never route embeddings through <code>:8090</code>)</td></tr>
-    <tr><td><code>LLAMACPP_N_CTX</code></td><td>probed (fallback 8192)</td><td>Context window for cap derivation — set explicitly (llama-swap doesn’t expose <code>/props</code>)</td></tr>
-    <tr><td><code>LLAMACPP_OUTPUT_RESERVE</code></td><td><code>3072</code></td><td>Tokens reserved for output</td></tr>
+    <tr><td><code>LLAMACPP_N_CTX</code></td><td>probed → <code>8192</code></td><td>Per-request context. Set explicitly to the server's <b>per-slot</b> size (<code>-c N --parallel P</code> → <code>N/P</code>, e.g. <code>65536</code>); not the total <code>-c</code>, which 400s. llama-swap doesn't expose <code>/props</code></td></tr>
+    <tr><td><code>LLAMACPP_OUTPUT_RESERVE</code></td><td><code>3072</code></td><td>Tokens reserved for output (bump for big-yield sessions)</td></tr>
     <tr><td><code>OLLAMA_HOST</code></td><td><code>http://localhost:11434</code></td><td>Ollama daemon (legacy)</td></tr>
   </tbody></table>
 
