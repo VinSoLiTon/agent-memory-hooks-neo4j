@@ -49,6 +49,9 @@ def driver(monkeypatch):
         with d.session() as s:
             s.run("MATCH (e:Event) WHERE e.event_id STARTS WITH $p DETACH DELETE e", p=SID)
             s.run("MATCH (s:Session {session_key:$sk}) DETACH DELETE s", sk=SK)
+            # main() writes a real :NightlyRun (model from default_model → 'stub'); don't
+            # leave it polluting the live ledger / dashboard.
+            s.run("MATCH (r:NightlyRun) WHERE coalesce(r.model,'') STARTS WITH 'stub' DETACH DELETE r")
 
     _clean()
     try:

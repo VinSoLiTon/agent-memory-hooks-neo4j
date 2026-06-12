@@ -114,6 +114,8 @@ BASE = """<!doctype html>
   .pill{display:inline-block;padding:1px 8px;border-radius:10px;background:var(--card);border:1px solid var(--border);font-size:11px;color:var(--muted)}
   .pill.bad{color:var(--bad);border-color:var(--bad)}
   .pill.ok{color:var(--ok);border-color:var(--ok)}
+  tr.badrow td{color:var(--bad)}
+  tr.badrow td:first-child{box-shadow:inset 3px 0 0 var(--bad)}
   .toolbar{display:flex;gap:8px;align-items:center;margin:0 0 16px 0;flex-wrap:wrap}
   .toolbar a, .toolbar button{background:var(--card);border:1px solid var(--border);color:var(--fg);text-decoration:none;padding:6px 12px;border-radius:4px;font:inherit;cursor:pointer}
   .toolbar a:hover, .toolbar button:hover{border-color:var(--accent);color:#fff}
@@ -634,6 +636,16 @@ def stats():
     return page("stats", "Stats", body)
 
 
+def _nightly_degrading(seen, short, deferred, yielded, fell_back) -> bool:
+    """Is this nightly run actually degrading? Only count sessions that REACHED the
+    model (processed = seen − skipped-as-trivial − deferred-on-busy). A run is
+    degrading if it processed sessions yet none yielded, or every processed one fell
+    back to the remote provider. A run that merely skipped trivial / deferred busy
+    sessions is NOT degrading."""
+    processed = (seen or 0) - (short or 0) - (deferred or 0)
+    return processed > 0 and ((yielded or 0) == 0 or (fell_back or 0) == processed)
+
+
 @app.route("/nightly")
 def nightly():
     """Item #8: the per-nightly run ledger (:NightlyRun). A zero-yield or
@@ -641,22 +653,26 @@ def nightly():
     with driver().session() as s:
         rows = [dict(r) for r in s.run(
             "MATCH (r:NightlyRun) RETURN r.ts AS ts, r.provider AS provider, "
-            "r.sessions_seen AS seen, r.with_yield AS yielded, r.fallback_fired AS fell_back, "
+            "r.sessions_seen AS seen, r.skipped_short AS short, r.with_yield AS yielded, "
+            "r.fallback_fired AS fell_back, r.deferred AS deferred, "
             "r.written AS written, r.skipped_sensitive AS skipped, r.duration_ms AS ms "
             "ORDER BY r.ts DESC LIMIT 30")]
     body = "<h1>Nightly runs</h1>"
     if not rows:
         body += "<p class='muted'>No nightly runs recorded yet — the scheduler runs <code>dream/run_dream.cmd</code>.</p>"
         return page("nightly", "Nightly", body)
-    body += ("<table><tr><th>ts</th><th>provider</th><th>seen</th><th>yielded</th>"
-             "<th>fell back</th><th>written</th><th>skipped</th><th>ms</th></tr>")
+    body += ("<table><tr><th>ts</th><th>provider</th><th>seen</th><th>short</th><th>yielded</th>"
+             "<th>fell back</th><th>deferred</th><th>written</th><th>skipped</th><th>ms</th></tr>")
     for r in rows:
         seen = r["seen"] or 0
-        bad = seen > 0 and ((r["yielded"] or 0) == 0 or (r["fell_back"] or 0) == seen)
-        flag = ' class="pill bad"' if bad else ""
+        short = r["short"] or 0
+        deferred = r["deferred"] or 0
+        bad = _nightly_degrading(seen, short, deferred, r["yielded"], r["fell_back"])
+        flag = ' class="badrow"' if bad else ""
         body += (f'<tr{flag}><td class="mono small">{escape(fmt_ts(r["ts"]))}</td>'
                  f'<td class="small">{escape(str(r["provider"] or ""))}</td>'
-                 f'<td>{seen}</td><td>{r["yielded"] or 0}</td><td>{r["fell_back"] or 0}</td>'
+                 f'<td>{seen}</td><td class="muted">{short}</td><td>{r["yielded"] or 0}</td>'
+                 f'<td>{r["fell_back"] or 0}</td><td class="muted">{deferred}</td>'
                  f'<td>{r["written"] or 0}</td><td>{r["skipped"] or 0}</td>'
                  f'<td class="small muted">{r["ms"] or 0}</td></tr>')
     body += "</table>"
