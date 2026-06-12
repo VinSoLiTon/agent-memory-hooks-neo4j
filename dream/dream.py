@@ -1029,6 +1029,9 @@ def main():
         # bigger slice and the provider-layer trim never has to fire — no per-window
         # summarization needed.
         transcript_cap = _derived_transcript_cap(provider_name) if paths_only else None
+        if paths_only:
+            src = "DREAM_TRANSCRIPT_MAX_CHARS" if os.environ.get("DREAM_TRANSCRIPT_MAX_CHARS") else "derived from n_ctx"
+            print(f"transcript budget: {transcript_cap} chars ({src})", file=sys.stderr)
 
         # Hybrid fallback: small local models reliably fail to distil large, real
         # sessions (qwen returns empty, gemma hallucinates). When the local primary
