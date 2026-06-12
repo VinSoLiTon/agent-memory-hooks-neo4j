@@ -168,6 +168,37 @@ def fmt_ts(ts) -> str:
     return str(ts)[:19].replace("T", " ")
 
 
+def walk_session_events(s, session_key: str, cap: int = 600):
+    """Walk a session's event chain ONE :NEXT hop at a time, returning the event
+    property dicts in order plus a `truncated` flag (cap reached).
+
+    NEVER walk the chain with an unbounded FIRST_EVENT/NEXT variable-length path —
+    that expansion materializes a path per reachable event and OOMs / times out
+    Neo4j's transaction-memory pool on long sessions (in practice anything past
+    ~150 events hangs). This is the same hard rule `dream.py::_walk_session_events`
+    documents. A `seen` set guards against a corrupted (cyclic / branched) chain."""
+    first = s.run(
+        "MATCH (sess:Session {session_key: $sk})-[:FIRST_EVENT]->(e:Event) RETURN e",
+        sk=session_key).single()
+    if not first:
+        return [], False
+    out, seen = [], set()
+    node = dict(first["e"])
+    while node is not None:
+        eid = node.get("event_id")
+        if not eid or eid in seen:
+            break
+        seen.add(eid)
+        out.append(node)
+        if len(out) >= cap:
+            return out, True
+        nxt = s.run(
+            "MATCH (:Event {event_id: $eid})-[:NEXT]->(n:Event) RETURN n LIMIT 1",
+            eid=eid).single()
+        node = dict(nxt["n"]) if nxt else None
+    return out, False
+
+
 # --- routes ---------------------------------------------------------------
 
 @app.route("/")
@@ -407,18 +438,21 @@ def memory_archive(path: str):
 def sessions():
     """PR-F #1: list by session_key (canonical) so cross-client raw-id
     collisions can't silently merge views."""
+    # The session list + per-session event count. Counting via a hop-by-hop walk
+    # (NOT an unbounded variable-length chain path, which OOMs on long sessions —
+    # see walk_session_events). ~89% of sessions are 1-event, so most walks are a
+    # single hop; the count is capped so one giant session can't dominate.
     with driver().session() as s:
         rows = list(s.run(
-            """
-            MATCH (s:Session)
-            OPTIONAL MATCH (s)-[:FIRST_EVENT|NEXT*0..]->(e:Event)
-            WITH s, count(DISTINCT e) AS events
-            RETURN coalesce(s.session_key, s.client + ':' + s.session_id) AS session_key,
-                   s.session_id AS sid, s.client AS client, s.created_at AS created,
-                   s.last_dreamed_at AS dreamed, events
-            ORDER BY s.created_at DESC LIMIT 200
-            """
-        ))
+            "MATCH (s:Session) "
+            "RETURN coalesce(s.session_key, s.client + ':' + s.session_id) AS session_key, "
+            "       s.session_id AS sid, s.client AS client, s.created_at AS created, "
+            "       s.last_dreamed_at AS dreamed "
+            "ORDER BY s.created_at DESC LIMIT 200"))
+        counts = {}
+        for r in rows:
+            evs, trunc = walk_session_events(s, r["session_key"], cap=500)
+            counts[r["session_key"]] = f"{len(evs)}{'+' if trunc else ''}"
     body = "<h1>Sessions</h1>"
     body += "<table><tr><th>session_key</th><th>client</th><th>created</th><th>events</th><th>dreamed</th></tr>"
     for r in rows:
@@ -427,7 +461,7 @@ def sessions():
             f'<tr><td><a class="mono" href="{url_for("session_view", sid=sk)}">{escape(sk[:60])}</a></td>'
             f'<td><span class="pill">{escape(r["client"] or "?")}</span></td>'
             f'<td class="muted small">{fmt_ts(r["created"])}</td>'
-            f'<td class="small">{r["events"]}</td>'
+            f'<td class="small">{counts[sk]}</td>'
             f'<td>{"<span class=\"pill ok\">yes</span>" if r["dreamed"] else "<span class=\"pill\">—</span>"}</td></tr>'
         )
     body += "</table>"
@@ -454,27 +488,23 @@ def session_view(sid: str):
             body += "</ul>"
             return page("sessions", sid, body)
         session_key = candidates[0]["sk"]
-
-        rows = list(s.run(
-            """
-            MATCH (s:Session {session_key: $sk})-[:FIRST_EVENT|NEXT*0..]->(e:Event)
-            WITH DISTINCT e
-            RETURN e.timestamp AS ts, e.event_name AS name, e.tool_name AS tool,
-                   e.prompt AS prompt, e.tool_input AS ti, e.tool_response AS tr
-            ORDER BY e.timestamp
-            """,
-            parameters={"sk": session_key},
-        ))
-    if not rows:
+        # Walk the chain hop-by-hop (NOT an unbounded variable-length path — it times
+        # out / OOMs on long sessions; this route did exactly that before).
+        events, truncated = walk_session_events(s, session_key, cap=600)
+    if not events:
         abort(404, f"no events for session {session_key}")
     body = f'<h1 class="mono">session {escape(session_key)}</h1>'
-    body += '<p class="muted">' + str(len(rows)) + " events</p>"
-    for r in rows:
-        head = f"<strong>{escape(r['name'] or '?')}</strong>"
-        if r["tool"]:
-            head += f' <span class="pill">tool={escape(r["tool"])}</span>'
-        body += f'<details><summary>{escape(fmt_ts(r["ts"]))} — {head}</summary>'
-        for label, val in (("prompt", r["prompt"]), ("input", r["ti"]), ("output", r["tr"])):
+    body += '<p class="muted">' + str(len(events)) + ("+" if truncated else "") + " events"
+    if truncated:
+        body += " (showing the first 600 — chain longer)"
+    body += "</p>"
+    for e in events:
+        head = f"<strong>{escape(e.get('event_name') or '?')}</strong>"
+        if e.get("tool_name"):
+            head += f' <span class="pill">tool={escape(e["tool_name"])}</span>'
+        body += f'<details><summary>{escape(fmt_ts(e.get("timestamp")))} — {head}</summary>'
+        for label, val in (("prompt", e.get("prompt")), ("input", e.get("tool_input")),
+                           ("output", e.get("tool_response"))):
             if val:
                 body += f'<h2>{escape(label)}</h2><pre>{escape(str(val))}</pre>'
         body += "</details>"
