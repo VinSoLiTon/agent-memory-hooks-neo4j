@@ -198,6 +198,16 @@ nothing — the watermark advances even on a 0-yield, so low-signal sessions
 are never re-dreamed forever. Existing memories are passed to the model
 alongside new events so it can merge updates by path rather than duplicate.
 
+**Compact transcript** (`DREAM_COMPACT_TRANSCRIPT=1`, opt-in). A denser "dream
+language" for the events fed to the model: each PreToolUse+PostToolUse pair
+collapses to one `tool(input) -> output` line (a tool call costs one header, not
+two), the 32-char ISO timestamp becomes a short `#index`, and event names shrink
+to markers — the high-signal prompt body stays full. On real sessions this is
+**~41% fewer chars / ~50% more events** per dream call (`scripts/dream_encoding_ab.py`).
+A/B held quality: `eval-distillation` scores were identical to the verbose render,
+and on a tool-heavy session compact distilled 5 memories where the verbose render
+truncated its JSON output. Default-off.
+
 **Short-session skip.** A session with fewer than `DREAM_MIN_EVENTS` events
 (default **2**) is a lone SessionStart / single prompt with no cross-event
 pattern to distill — in practice ~89% of sessions. It is skipped **without an
