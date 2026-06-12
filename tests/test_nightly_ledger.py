@@ -124,3 +124,35 @@ def test_dashboard_nightly_route_renders():
     resp = dash.app.test_client().get("/nightly")
     assert resp.status_code == 200
     assert b"Nightly runs" in resp.data
+
+
+def test_dashboard_nightly_row_layout_and_columns(driver):
+    """Regression: a degrading run must flag the ROW (class="badrow"), never put the
+    inline `pill` class on a <tr> (that collapses the row into a pill — the cells stop
+    aligning under the headers). Also pins the deferred/skipped_short columns."""
+    # processed = seen - short - deferred = 3 > 0, with_yield 0 → degrading → badrow
+    dream_mod._write_nightly_run(
+        driver, "__nl_dash", {"sessions_seen": 3, "with_yield": 0, "fallback_fired": 0,
+                              "written": 0, "skipped_sensitive": 0, "deferred": 0,
+                              "skipped_short": 0},
+        "llamacpp", "realmodel", duration_ms=10)
+    sys.path.insert(0, os.path.join(ROOT, "dashboard"))
+    import app as dash
+    dash.app.config["TESTING"] = True
+    html = dash.app.test_client().get("/nightly").data
+    assert b'class="badrow"' in html              # row-level flag…
+    assert b'<tr class="pill' not in html         # …NOT the inline-pill bug
+    assert b">short<" in html and b">deferred<" in html   # new ledger columns surfaced
+
+
+def test_nightly_degrading_excludes_skipped_and_deferred():
+    """The degrading-flag counts only sessions that reached the model."""
+    sys.path.insert(0, os.path.join(ROOT, "dashboard"))
+    import app as dash
+    deg = dash._nightly_degrading
+    assert deg(3, 0, 0, 0, 0) is True        # 3 processed, 0 yielded → degrading
+    assert deg(3, 0, 0, 2, 0) is False       # something yielded → fine
+    assert deg(3, 0, 0, 1, 3) is True        # every processed one fell back → degrading
+    assert deg(5, 5, 0, 0, 0) is False       # all skipped-as-trivial → NOT degrading
+    assert deg(4, 0, 4, 0, 0) is False       # all deferred-on-busy → NOT degrading
+    assert deg(0, 0, 0, 0, 0) is False       # nothing seen → not degrading
