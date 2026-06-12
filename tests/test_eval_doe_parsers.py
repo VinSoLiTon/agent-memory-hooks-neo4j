@@ -63,6 +63,20 @@ def test_parse_delim_skips_malformed_header_and_prose():
 def test_both_prompts_share_base_rules_differ_only_in_output():
     j = doe.system_prompt("json")
     d = doe.system_prompt("delim")
-    assert doe._BASE_RULES in j and doe._BASE_RULES in d   # shared rules
+    assert doe._BASE_RULES in j and doe._BASE_RULES in d   # shared preamble
     assert "STRICT JSON" in j and "STRICT JSON" not in d
     assert "@@end" in d and "@@end" not in j
+
+
+def test_prompt_variants_share_preamble_differ_in_framing():
+    cur = doe.system_prompt("json", "current")
+    cov = doe.system_prompt("json", "coverage")
+    st = doe.system_prompt("json", "structured")
+    for p in (cur, cov, st):
+        assert doe._PREAMBLE in p                          # kind vocab held constant
+    assert "FEWER, SHARPER" in cur and "FEWER, SHARPER" not in cov
+    assert "COMPLETENESS" in cov and "COMPLETENESS" not in cur
+    assert "two steps" in st
+    assert cur != cov and cov != st
+    # unknown variant falls back to current
+    assert doe.system_prompt("json", "nope") == cur

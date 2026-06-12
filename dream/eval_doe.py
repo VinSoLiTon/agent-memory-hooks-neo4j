@@ -47,21 +47,47 @@ LLAMACPP_CHAT_URL = os.environ.get("LLAMACPP_CHAT_URL", "http://127.0.0.1:8090/v
 
 # --- shared rules (one block; the ONLY thing that varies across cells is OUTPUT) ---
 
-_BASE_RULES = """\
-You distill an agent's coding session into a few durable markdown memories that \
-will help future sessions. Each memory has a `path` (e.g. profile/role.md, \
-tools/bash/grep.md, project/deploy.md), a short `title`, a semantic `kind`, a \
-markdown `content` body, and an `importance` 1-10.
+# Shared preamble — held CONSTANT across prompt variants (kind vocab + path scoping
+# + importance). Only the extraction FRAMING (_EXTRACT) varies, so a variant cell
+# difference is the framing, not incidental drift.
+_PREAMBLE = """\
+You distill an agent's coding session into durable markdown memories that will help \
+future sessions. Each memory has a `path` (e.g. profile/role.md, tools/bash/grep.md, \
+project/deploy.md), a short `title`, a semantic `kind`, a markdown `content` body, \
+and an `importance` 1-10.
 
 kind is one of: """ + ", ".join(sorted(mt.MEMORY_KINDS)) + """.
 
+- profile/* and tools/* are cross-project; project/* and general/* are scoped.
+- Pick `kind` by what the memory IS; spread `importance` across the 1-10 range."""
+
+# The prompt FACTOR: three extraction framings targeting the coverage↔noise tradeoff
+# the corpus exposed (coverage ~0.4, noise ~0.3 under `current`).
+_EXTRACT = {
+    # control: today's "prefer fewer, sharper" framing (suspected to suppress coverage)
+    "current": """\
 Rules:
 - Capture durable facts, preferences, decisions, rules, procedures, and lessons — \
 NOT ephemera (tool outputs, exit codes, timings, PIDs, one-off command results).
-- profile/* and tools/* are cross-project; project/* and general/* are scoped.
 - Prefer FEWER, SHARPER memories over many vague ones. If nothing is worth \
-remembering, output an empty set.
-- Pick `kind` by what the memory IS; spread `importance` across the 1-10 range."""
+remembering, output an empty set.""",
+    # coverage push: one memory per distinct fact, aim for completeness
+    "coverage": """\
+Rules:
+- Extract EACH distinct durable fact, preference, decision, rule, procedure, or \
+lesson as its OWN memory — do not merge two unrelated takeaways into one. Aim for \
+COMPLETENESS: capture every durable takeaway in the session.
+- Skip ephemera (tool outputs, exit codes, timings, PIDs, one-off command results).""",
+    # structured: identify-then-emit + explicit ephemera exclusion (coverage AND precision)
+    "structured": """\
+Work in two steps:
+1) Identify each DISTINCT durable takeaway — a fact, preference, decision, rule, \
+procedure, or lesson that would help a FUTURE session.
+2) Emit exactly ONE memory per takeaway.
+Ephemera — tool outputs, exit codes, timings, PIDs, one-off command results — are \
+NEVER takeaways. Don't pad with vague memories, and don't merge two takeaways into one.""",
+}
+_BASE_RULES = _PREAMBLE   # back-compat alias for the shared-preamble invariant test
 
 _OUTPUT_JSON = """\
 Output STRICT JSON only, no prose:
@@ -84,7 +110,8 @@ If nothing is worth remembering, output nothing."""
 
 def system_prompt(fmt: str, variant: str = "current") -> str:
     out = _OUTPUT_DELIM if fmt == "delim" else _OUTPUT_JSON
-    return _BASE_RULES + "\n\n" + out
+    rules = _EXTRACT.get(variant, _EXTRACT["current"])
+    return _PREAMBLE + "\n\n" + rules + "\n\n" + out
 
 
 # --- pure parsers (unit-tested) ---------------------------------------------
@@ -194,30 +221,39 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Distillation DOE (manual; calls the local model).")
     ap.add_argument("--replicates", type=int, default=3)
     ap.add_argument("--formats", default="json,delim")
-    ap.add_argument("--variant", default="current")
+    ap.add_argument("--variants", default="current", help="comma list of prompt variants to sweep")
     ap.add_argument("--persist", action="store_true")
     args = ap.parse_args(argv)
     formats = args.formats.split(",")
+    variants = args.variants.split(",")
     metrics = ["parse_ok", "grounded", "coverage", "noise", "neg_hits", "out_chars", "latency_s", "n"]
 
     all_recs = []
+    summary = []
     for fmt in formats:
-        cell = []
-        for rep in range(args.replicates):
-            for fx in CORPUS:
-                rec = run_one(fx, fmt, args.variant)
-                cell.append(rec); all_recs.append(rec)
-                tag = "ok" if rec["parse_ok"] else (rec.get("error") or "no-parse")
-                print(f"  [{fmt:5} r{rep}] {rec['fixture']:<22} parse={tag:<14} "
-                      f"n={rec['n']} grnd={rec['grounded']:.2f} cov={rec['coverage']:.2f} "
-                      f"noise={rec['noise']:.2f} {rec['out_chars']}ch {rec['latency_s']}s", file=sys.stderr)
-        a = _agg(cell, metrics)
-        runs = len(cell)
-        print(f"\n=== format={fmt} variant={args.variant} | {runs} runs "
-              f"({len(CORPUS)} fixtures × {args.replicates} reps) ===")
-        for k in metrics:
-            m, sd = a[k]
-            print(f"  {k:<10} {m:>8.3f} ± {sd:.3f}")
+        for variant in variants:
+            cell = []
+            for rep in range(args.replicates):
+                for fx in CORPUS:
+                    rec = run_one(fx, fmt, variant)
+                    cell.append(rec); all_recs.append(rec)
+                    tag = "ok" if rec["parse_ok"] else (rec.get("error") or "no-parse")
+                    print(f"  [{fmt:5}/{variant:<10} r{rep}] {rec['fixture']:<22} parse={tag:<12} "
+                          f"n={rec['n']} cov={rec['coverage']:.2f} noise={rec['noise']:.2f}", file=sys.stderr)
+            a = _agg(cell, metrics)
+            summary.append((fmt, variant, a))
+            print(f"\n=== format={fmt} variant={variant} | {len(cell)} runs "
+                  f"({len(CORPUS)} fixtures × {args.replicates} reps) ===")
+            for k in metrics:
+                m, sd = a[k]
+                print(f"  {k:<10} {m:>8.3f} ± {sd:.3f}")
+
+    # compact comparison table across cells (the DOE payoff)
+    print(f"\n{'format/variant':<22}{'parse':>7}{'cover':>7}{'noise':>7}{'neg':>6}{'n':>6}{'chars':>8}{'lat':>7}")
+    for fmt, variant, a in summary:
+        print(f"{fmt+'/'+variant:<22}{a['parse_ok'][0]:>7.2f}{a['coverage'][0]:>7.2f}"
+              f"{a['noise'][0]:>7.2f}{a['neg_hits'][0]:>6.2f}{a['n'][0]:>6.1f}"
+              f"{a['out_chars'][0]:>8.0f}{a['latency_s'][0]:>7.2f}")
 
     if args.persist:
         p = Path(__file__).resolve().parents[1] / ".eval" / "doe.jsonl"
