@@ -27,6 +27,7 @@ def test_env_override_is_honored_verbatim(monkeypatch):
 
 def test_llamacpp_derives_from_n_ctx(monkeypatch):
     monkeypatch.delenv("DREAM_TRANSCRIPT_MAX_CHARS", raising=False)
+    monkeypatch.delenv("LLAMACPP_OUTPUT_RESERVE", raising=False)   # hermetic: default 3072
     monkeypatch.setenv("LLAMACPP_N_CTX", "32768")   # _llamacpp_n_ctx honors this (no /props probe)
     providers._LLAMACPP_NCTX_CACHE.clear()
     cap = dream_mod._derived_transcript_cap("llamacpp")
@@ -47,6 +48,7 @@ def test_bigger_ctx_means_bigger_cap(monkeypatch):
 
 def test_ctx_fraction_knob(monkeypatch):
     monkeypatch.delenv("DREAM_TRANSCRIPT_MAX_CHARS", raising=False)
+    monkeypatch.delenv("LLAMACPP_OUTPUT_RESERVE", raising=False)   # hermetic: default 3072
     monkeypatch.setenv("LLAMACPP_N_CTX", "32768")
     monkeypatch.setenv("DREAM_TRANSCRIPT_CTX_FRACTION", "0.5")
     providers._LLAMACPP_NCTX_CACHE.clear()

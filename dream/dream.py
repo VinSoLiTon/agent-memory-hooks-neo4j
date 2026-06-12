@@ -293,6 +293,21 @@ def _summarize_tool_response(tr) -> str:
     return snippet
 
 
+def _key_tool_input(ti, limit: int = 200) -> str:
+    """The signal-bearing field of a tool_input (command / file_path / path),
+    capped. Shared by the verbose and compact renderers."""
+    if not ti:
+        return ""
+    try:
+        obj = json.loads(ti) if isinstance(ti, str) else ti
+        if isinstance(obj, dict):
+            key = obj.get("command") or obj.get("file_path") or obj.get("path") or obj
+            return str(key)[:limit]
+    except Exception:
+        pass
+    return str(ti)[:limit]
+
+
 def _render_one(e: dict) -> str:
     """PR-C trim render of a single event — full prompt, but tool I/O collapses
     to a one-liner. Signal-bearing fields are what inform memory extraction."""
@@ -301,20 +316,53 @@ def _render_one(e: dict) -> str:
     if e.get("prompt"):
         lines.append(f"  prompt: {e['prompt']}")  # highest-signal field — keep full
     if e.get("tool_input"):
-        ti = e["tool_input"]
-        try:
-            ti_obj = json.loads(ti) if isinstance(ti, str) else ti
-            if isinstance(ti_obj, dict):
-                key_field = (ti_obj.get("command") or ti_obj.get("file_path")
-                             or ti_obj.get("path") or str(ti_obj))
-                lines.append(f"  input:  {str(key_field)[:200]}")
-            else:
-                lines.append(f"  input:  {str(ti)[:200]}")
-        except Exception:
-            lines.append(f"  input:  {str(ti)[:200]}")
+        lines.append(f"  input:  {_key_tool_input(e['tool_input'])}")
     if e.get("tool_response"):
         lines.append(f"  output: {_summarize_tool_response(e['tool_response'])}")
     return "\n".join(lines)
+
+
+# --- compact "dream language" (DREAM_COMPACT_TRANSCRIPT=1) -------------------
+# Same signal, less scaffolding: a short index replaces the 32-char ISO timestamp,
+# a PreToolUse+PostToolUse pair collapses to ONE `tool(input) -> output` line (so a
+# tool call costs one header, not two), and event names shrink to a marker. The
+# high-signal prompt body stays full. Lets ~2x more events fit the transcript budget
+# for tool-heavy sessions; default-off until the A/B confirms quality holds.
+
+def _merge_tool_pairs(events: list[dict]) -> list[dict]:
+    """Collapse a PreToolUse immediately followed by its matching PostToolUse
+    (same tool, same tool_use_id when present) into one logical event carrying both
+    the input and the response. Unpaired events pass through unchanged."""
+    out: list[dict] = []
+    i, n = 0, len(events)
+    while i < n:
+        e = events[i]
+        nxt = events[i + 1] if i + 1 < n else None
+        if (e.get("event_name") == "PreToolUse" and nxt is not None
+                and nxt.get("event_name") == "PostToolUse"
+                and e.get("tool_name") == nxt.get("tool_name")
+                and (not e.get("tool_use_id") or e.get("tool_use_id") == nxt.get("tool_use_id"))):
+            merged = dict(e)
+            merged["tool_response"] = nxt.get("tool_response")
+            out.append(merged)
+            i += 2
+        else:
+            out.append(e)
+            i += 1
+    return out
+
+
+def _render_one_compact(e: dict, idx: int) -> str:
+    """Scaffolding-lean single-line render. `idx` is the event's position (order is
+    the only temporal signal the model needs); the prompt body is kept verbatim."""
+    if e.get("prompt"):
+        return f"#{idx} > {e['prompt']}"                       # user intent — full
+    if e.get("tool_name"):
+        ti = _key_tool_input(e.get("tool_input"))
+        out = _summarize_tool_response(e["tool_response"]) if e.get("tool_response") else ""
+        s = f"#{idx} {e['tool_name']}" + (f"({ti})" if ti else "")
+        return s + (f" -> {out}" if out else "")
+    return f"#{idx} {e.get('event_name', '?')}"
 
 
 def render_events(events: list[dict], max_chars: int | None = None) -> str:
@@ -328,7 +376,12 @@ def render_events(events: list[dict], max_chars: int | None = None) -> str:
     then the most-recent tool events that still fit, re-emitted in chronological
     order with a note of how many were dropped. `max_chars=None` = unbounded
     (frontier models handle the full transcript and distil it better)."""
-    blocks = [(i, bool(e.get("prompt")), _render_one(e)) for i, e in enumerate(events)]
+    if os.environ.get("DREAM_COMPACT_TRANSCRIPT") == "1":
+        logical = _merge_tool_pairs(events)
+        blocks = [(i, bool(e.get("prompt")), _render_one_compact(e, i))
+                  for i, e in enumerate(logical)]
+    else:
+        blocks = [(i, bool(e.get("prompt")), _render_one(e)) for i, e in enumerate(events)]
     if max_chars is None:
         return "\n".join(text for _, _, text in blocks)
 

@@ -26,6 +26,7 @@ Defaults in parentheses.
 | `LLAMACPP_CHAT_URL` | `http://127.0.0.1:8090/v1` | llama.cpp chat endpoint — the shared `llama-swap` proxy on `:8090` (routes by `model`; `:8080` is retired) |
 | `LLAMACPP_N_CTX` | probed → `8192` fallback | Per-request context window. llama-swap doesn't expose `/props`, so **set it explicitly** = the server's **per-slot** size: `-c N --parallel P` → `N/P` (e.g. `262144/4` → **`65536`**). Do NOT use the total `-c` — a request would exceed its slot and 400 |
 | `DREAM_TRANSCRIPT_MAX_CHARS` | derived from `n_ctx` | Explicit transcript cap (overrides the derivation). A quality-validated value is recommended for big contexts, e.g. `90000` for a 64K slot |
+| `DREAM_COMPACT_TRANSCRIPT` | unset | `1` = denser event encoding: merges each PreToolUse+PostToolUse into one `tool(input) -> output` line, drops ISO timestamps for an index. ~41% fewer chars / ~50% more events per dream call; A/B shows quality holds |
 | `LLAMACPP_EMBED_URL` | `http://127.0.0.1:8081/v1` | llama.cpp embeddings server (e.g. docker `infra-embeddings`, nomic-embed) |
 | `DREAM_LLAMACPP_MODEL` | `gemma-4-12B-it-Q4_K_M.gguf` | dream model id sent to the llama.cpp chat server |
 | `DREAM_MIN_EVENTS` | `2` | skip sessions with fewer than N events (no LLM call; watermark still advances). `1` disables |
