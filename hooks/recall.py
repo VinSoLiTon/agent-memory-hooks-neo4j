@@ -49,6 +49,16 @@ TOOLS_LIMIT = int(os.environ.get("INJECT_TOOLS_LIMIT", "5"))
 PROJECT_LIMIT = int(os.environ.get("INJECT_PROJECT_LIMIT", "5"))
 CHAR_BUDGET = int(os.environ.get("INJECT_CHAR_BUDGET", "4000"))
 PROJECT_BOOST = float(os.environ.get("INJECT_PROJECT_BOOST", "0.5"))
+# Project scoping mode for the fused ranker. "soft" (default) keeps the RRF
+# tie-break boost only — cross-project rows still rank. "hard" DROPS foreign
+# rows before the limit slice, but ONLY when the caller supplies a
+# current_project (dashboard /search and CLI callers passing None are
+# untouched). The drop rule is scoped to project/ paths: live data (2026-07-18)
+# shows profile/ and tools/ never carry a project tag, but 31/34 general/ rows
+# do while being cross-project by design — so the path prefix, not the property
+# alone, decides what is droppable. Module constant like RECENCY_ANCHOR_MODE;
+# tests monkeypatch recall.PROJECT_SCOPE.
+PROJECT_SCOPE = os.environ.get("INJECT_PROJECT_SCOPE", "soft")
 # Session-start buckets over-fetch a recency-ordered candidate pool this many
 # times the limit, then keep the value-densest `limit` (see _rank_bucket). Mirrors
 # the prompt/vector path's `max(limit*3, limit+5)` over-fetch idiom.
@@ -293,10 +303,33 @@ def vector_search(session, query: str, limit: int = MAX_PROMPT_HITS, as_of: str 
     return [_hit(r) for r in rows]
 
 
+def _scope_filter(rows: list, current_project: str) -> list:
+    """Hard-scope drop rule: remove rows that belong to a DIFFERENT project.
+    Only project/ paths are droppable — profile/ and tools/ rows carry no
+    project tag in live data, and general/ rows often carry the tag of the
+    project they were distilled in while remaining cross-project by design.
+    Empty-project rows are always kept (cannot be attributed; conservative)."""
+    return [
+        r for r in rows
+        if not ((r.get("path") or "").startswith("project/")
+                and (r.get("project") or "")
+                and r.get("project") != current_project)
+    ]
+
+
 def hybrid_merge(fulltext: list, vector: list, current_project: str | None, limit: int, now=None) -> list:
     """Fuse fulltext + vector with Reciprocal Rank Fusion (k=60), apply the
     in-project boost, then the C2 ranking signals (importance x decayed recency).
-    Returns rows whose `score` is the final, comparable score."""
+    Returns rows whose `score` is the final, comparable score.
+
+    With INJECT_PROJECT_SCOPE=hard and a non-empty current_project, foreign
+    project/ rows are dropped BEFORE fusion and the limit slice, so in-project
+    and cross-cutting rows backfill the freed slots (both retrievers already
+    over-fetch ~3x the limit). Callers passing current_project=None — dashboard
+    /search, CLI without a cwd — get soft behaviour regardless of the env."""
+    if PROJECT_SCOPE == "hard" and current_project:
+        fulltext = _scope_filter(fulltext, current_project)
+        vector = _scope_filter(vector, current_project)
     now = now or _now_utc()
     scores: dict[str, float] = {}
     by_path: dict[str, dict] = {}
@@ -653,14 +686,30 @@ def memory_lineage(session, path: str):
     return hist
 
 
-def render_prompt(rows: list) -> tuple[str, list[str]]:
-    """Render hybrid hits to injection markdown. Returns (markdown, paths)."""
+def render_prompt(rows: list, char_budget: int = CHAR_BUDGET) -> tuple[str, list[str]]:
+    """Render hybrid hits to injection markdown under the shared char budget
+    (INJECT_CHAR_BUDGET). Rows arrive ranked; emission stops at the first row
+    that would overflow the budget — the top hit always survives, mirroring
+    render_session_start's truncation contract. Previously unbudgeted, which is
+    how a prompt injection ballooned to the full limit x memory size on every
+    user message. Returns (markdown, paths)."""
     if not rows:
         return "", []
     parts = ["# Relevant memory for this prompt\n"]
+    used = len(parts[0])
     paths: list[str] = []
     for r in rows:
-        parts.append(f"## {r['path']}\n{r['content']}\n")
+        entry = f"## {r['path']}\n{r['content']}\n"
+        if not paths and len(entry) > char_budget:
+            # The top hit always survives, but the budget stays a real ceiling:
+            # a single oversized memory (seen live: a 7.5k-char stale blob) is
+            # clamped rather than allowed to blow the injection budget alone.
+            entry = entry[:char_budget] + f"\n_(memory truncated; CHAR_BUDGET={char_budget} reached)_\n"
+        elif paths and used + len(entry) > char_budget:
+            parts.append(f"_(further memories omitted; CHAR_BUDGET={char_budget} reached)_\n")
+            break
+        parts.append(entry)
+        used += len(entry)
         paths.append(r["path"])
     # Q6 inline citation footer: name the sources so the agent (and a human reading
     # the transcript) can see exactly which memories informed the context.
