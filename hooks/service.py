@@ -13,6 +13,7 @@ import re
 from datetime import datetime, timezone
 
 import recall
+from content_guard import injection_artifacts
 from project import derive_project
 
 _PATH_RE = re.compile(r"^(profile|tools|project|general)/[A-Za-z0-9._/-]+\.md$")
@@ -51,6 +52,11 @@ def propose_memory(session, path: str, content: str, created_by: str = "mcp") ->
         return {"ok": False, "error": "path must match ^(profile|tools|project|general)/...\\.md$"}
     if not content or not content.strip():
         return {"ok": False, "error": "content required"}
+    artifacts = injection_artifacts(content)
+    if artifacts:
+        # Memory-hygiene guard: refuse bodies that echo rendered-injection
+        # output (the project/njhook.md corruption class) at every door.
+        return {"ok": False, "error": "content contains injection-render artifacts: " + "; ".join(artifacts)}
     existing = session.run(
         "MATCH (m:Memory {path: $p}) RETURN coalesce(m.status, 'active') AS s", p=path
     ).single()
