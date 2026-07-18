@@ -435,6 +435,18 @@ def cmd_edit(args: argparse.Namespace) -> int:
         print("no changes")
         return 0
 
+    # Memory-hygiene guard: refuse to save a body that embeds rendered-injection
+    # output (## <path> block headers / budget / citation framing) — the manual-
+    # edit door is exactly how the project/njhook.md echo corruption got in.
+    from content_guard import injection_artifacts
+    artifacts = injection_artifacts(new_content)
+    if artifacts:
+        print("refusing to save — content contains injection-render artifacts:", file=sys.stderr)
+        for a in artifacts:
+            print(f"  - {a}", file=sys.stderr)
+        print("strip the rendered blocks/markers and retry", file=sys.stderr)
+        return 1
+
     now = datetime.now(timezone.utc).isoformat()
     import audit
     with driver() as d, d.session() as s:
@@ -1677,6 +1689,35 @@ def cmd_health(args: argparse.Namespace) -> int:
                          "memory_embeddings not yet created — run `njhook embed-backfill`"))
     except Exception as e:
         rows.append((WARN, "indexes", f"could not list: {e}"))
+
+    # --- 3b. Memory hygiene: injection-artifact echo + embedding coverage ---
+    # Artifacts = a body embedding rendered-injection output (the corruption
+    # class that stacked self-headers into project/njhook.md); should be zero —
+    # the write-path guards refuse new ones, so any hit here predates the guard.
+    try:
+        from content_guard import injection_artifacts as _artifacts
+        with driver() as d, d.session() as s:
+            mems = list(s.run(
+                "MATCH (m:Memory) WHERE coalesce(m.archived,false)=false "
+                "AND coalesce(m.status,'active')='active' "
+                "RETURN m.path AS p, m.content AS c, m.embedding IS NULL AS noemb"
+            ))
+        dirty = [r["p"] for r in mems if _artifacts(r["c"] or "")]
+        if dirty:
+            rows.append((WARN, "memory hygiene",
+                         f"{len(dirty)} active memory(ies) contain injection-render artifacts: "
+                         + ", ".join(dirty[:3]) + ("…" if len(dirty) > 3 else "")))
+        else:
+            rows.append((OK, "memory hygiene", f"{len(mems)} active memories free of injection artifacts"))
+        if _embeddings.is_enabled():
+            missing = sum(1 for r in mems if r["noemb"])
+            if missing:
+                rows.append((WARN, "embedding coverage",
+                             f"{missing}/{len(mems)} active memories lack an embedding — run `njhook embed-backfill`"))
+            else:
+                rows.append((OK, "embedding coverage", f"all {len(mems)} active memories embedded"))
+    except Exception as e:
+        rows.append((WARN, "memory hygiene", f"could not scan: {e}"))
 
     # --- 4. Hook wrappers (project-level) ---
     for client_dir in (".claude", ".codex", ".cursor", ".gemini"):

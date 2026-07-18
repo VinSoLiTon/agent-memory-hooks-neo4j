@@ -39,6 +39,7 @@ PATH_RE = re.compile(r"^(profile|tools|project|general)/[A-Za-z0-9._/-]+\.md$")
 # Phase D1: `kind` is the semantic type vocabulary (memory_types.MEMORY_KINDS),
 # with the legacy bucket labels still accepted during the migration window.
 from memory_types import VALID_KINDS  # noqa: E402  (single source of truth)
+from content_guard import injection_artifacts  # noqa: E402  (memory-hygiene guard)
 
 MIN_BODY_CHARS = int(os.environ.get("DREAM_MEMORY_MIN_CHARS", "30"))
 MAX_BODY_CHARS = int(os.environ.get("DREAM_MEMORY_MAX_CHARS", "20000"))
@@ -164,6 +165,11 @@ def validate_memory(memory: dict) -> list[str]:
         errors.append(f"body too short ({len(content)} < {MIN_BODY_CHARS} chars)")
     if len(content) > MAX_BODY_CHARS:
         errors.append(f"body too long ({len(content)} > {MAX_BODY_CHARS} chars)")
+
+    # Memory-hygiene guard: a body that embeds rendered-injection output
+    # (## <path> block headers, budget/citation framing) is echo, not knowledge —
+    # the corruption class that stacked four self-headers into project/njhook.md.
+    errors.extend(injection_artifacts(content))
 
     fm_match = _FRONTMATTER_RE.match(content)
     if not fm_match:

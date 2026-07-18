@@ -163,7 +163,16 @@ def embed(texts: list[str]) -> list[list[float]]:
     return _PROVIDERS[EMBED_PROVIDER](capped)
 
 
+# Cap the text sent to the embedding server. nomic-embed-text has a 2048-token
+# context; llama.cpp returns HTTP 500 on overlong input, which aborted a whole
+# embed-backfill batch mid-run (live failure 2026-07-18: a 7.5k-char memory
+# left 252/380 memories unembedded). 4000 chars ≈ 1300-1400 tokens — safe
+# margin; the truncated tail contributes negligible ranking signal anyway.
+EMBED_TEXT_MAX_CHARS = int(os.environ.get("EMBED_TEXT_MAX_CHARS", "4000"))
+
+
 def memory_text(path: str, content: str) -> str:
-    """Canonical text for a memory's embedding. Path is included so file-naming
-    signal contributes to similarity (e.g. 'tools/bash/...' matches 'bash')."""
-    return f"{path}\n\n{content}"
+    """Canonical text for a memory's embedding, capped to the model's safe
+    input size. Path is included so file-naming signal contributes to
+    similarity (e.g. 'tools/bash/...' matches 'bash')."""
+    return f"{path}\n\n{content}"[:EMBED_TEXT_MAX_CHARS]
