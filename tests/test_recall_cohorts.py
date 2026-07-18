@@ -11,7 +11,7 @@ The injection_count schema change was dropped (no usefulness signal to record).
 """
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from neo4j import GraphDatabase
@@ -75,13 +75,17 @@ def cohorts_driver():
             s.run("MATCH (m:Memory) WHERE m.path CONTAINS $mk DETACH DELETE m", mk=MARK)
 
     _clean()
+    # "__co_recent" must stay inside the min_age_days=30 window on EVERY run —
+    # a hardcoded date here was a time bomb (it aged past the cutoff ~40 days
+    # after it was written and the exclusion assert started failing).
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     with d.session() as s:
         s.run("""
             CREATE (:Memory {path:'project/__co_old.md',    content:'b', status:'active', access_count:0, ingested_at:'2025-01-01T00:00:00+00:00'})
             CREATE (:Memory {path:'profile/__co_p.md',       content:'b', status:'active', access_count:0, ingested_at:'2025-01-01T00:00:00+00:00'})
-            CREATE (:Memory {path:'project/__co_recent.md',  content:'b', status:'active', access_count:0, ingested_at:'2026-06-08T00:00:00+00:00'})
+            CREATE (:Memory {path:'project/__co_recent.md',  content:'b', status:'active', access_count:0, ingested_at:$recent})
             CREATE (:Memory {path:'project/__co_used.md',    content:'b', status:'active', access_count:5, ingested_at:'2025-01-01T00:00:00+00:00'})
-        """)
+        """, recent=recent)
     try:
         yield d
     finally:

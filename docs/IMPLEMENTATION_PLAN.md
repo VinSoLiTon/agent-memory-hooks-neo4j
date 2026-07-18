@@ -104,6 +104,18 @@ This plan turns the research findings into a sequenced, dependency-ordered build
 3. With importance+decay enabled, a high-importance recently-accessed memory outranks a stale equal-relevance one (fixture test).
 4. Reranker is off by default and, when enabled, changes only ordering — never surfaces a `status!='active'` memory.
 
+**Addendum (2026-07-18, fix/project-scoped-recall):** the soft in-project RRF
+boost proved insufficient in live use — semantically-similar foreign-project
+memories leaked into every prompt injection. `hybrid_merge` gained an
+`INJECT_PROJECT_SCOPE` knob (`soft` default = prior behaviour byte-for-byte;
+`hard` drops foreign `project/`-path rows pre-limit when a current_project is
+supplied — profile/ tools/ general/ stay cross-cutting because live data tags
+most general/ rows with their origin project). `render_prompt` is now budgeted
+by `INJECT_CHAR_BUDGET` (previously unbudgeted; top hit survives but is clamped
+at the budget). Hard mode + tightened budget ship ONLY via the deployed
+`.claude/hooks/inject_memory.*` wrapper env; dashboard/CLI callers passing
+`current_project=None` are untouched.
+
 ---
 
 ## Phase D — Typed memory + admission gate
