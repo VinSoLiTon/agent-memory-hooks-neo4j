@@ -116,10 +116,16 @@ def emit(event_name: str, context: str, accessed_paths: list[str] | None = None)
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--client", required=True, choices=["claude_code", "codex", "cursor", "gemini"])
-    parser.parse_args()
+    args = parser.parse_args()
 
     try:
         raw = sys.stdin.read()
+        # Double-registration guard: if this exact dispatch was already handled
+        # via another hook registration, emit nothing — otherwise the agent
+        # receives the same memory context twice per prompt. Fail-open inside.
+        import dedup
+        if dedup.duplicate_delivery(raw, args.client):
+            return
         data = json.loads(raw) if raw.strip() else {}
         event = data.get("hook_event_name")
         normalized = (event or "").lower()
