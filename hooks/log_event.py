@@ -204,6 +204,12 @@ def main():
 
     try:
         raw = sys.stdin.read()
+        # Double-registration guard: the same dispatch delivered via a second
+        # hook registration (user-global + project settings) is dropped so it
+        # can't write a duplicate :Event. Fail-open inside dedup.
+        import dedup
+        if dedup.duplicate_delivery(raw, args.client):
+            return
         data = json.loads(raw) if raw.strip() else {}
         log_event(data, client=args.client)
     except Exception as e:
